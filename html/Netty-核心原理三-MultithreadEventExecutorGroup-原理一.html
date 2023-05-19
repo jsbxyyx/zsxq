@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理三 MultithreadEventExecutorGroup 原理一</h1>
+<p>2022-02-05T08:10:13.260+0800</p>
+<p><p><strong>MultithreadEventExecutorGroup 原理</strong></p>
+<p>AbstractEventExecutorGroup类对上层接口的方法进行粗略实现：每个方法都调用next方法找到下一个线程来异步执行，同时返回一个Future表示异步执行的任务。而MultithreadEventExecutorGroup 则是完成了多线程的事件执行器组的实现。</p>
+<p><strong>核心变量与构造器</strong></p>
+<p>我们看到成员变量的声明中看到：</p>
+<ol>
+ <li>EventExecutor[] children 表示子事件执行器数组，这时我们具备了执行器组的特性：拥有了子执行器</li>
+ <li>AtomicInteger terminatedChildren 用于记录已经终止的子事件执行器数量，结合Promise&lt;?&gt; terminationFuture，我们可以让需要执行器组终止的线程进行异步等待和事件回调</li>
+ <li>EventExecutorChooserFactory.EventExecutorChooser chooser 用于从子执行器数组中根据该接口的实例来完成下一个子执行器的获取（负载均衡器），这时我们可以在next方法中调用该选择器完成对下一个子执行器的选择</li>
+</ol>
+<p>在最终的构造函数中，我们看到流程如下：</p>
+<ol>
+ <li>创建子执行器数组</li>
+ <li>调用子类实现的newChild方法创建子执行器的方法，使用其返回的实例完成初始化。在创建过程中，只要有一个子执行器创建实例失败，那么需要全部关闭</li>
+ <li>通过选择器工厂创建选择器实例</li>
+ <li>创建终止监听器，并将该监听器放入子执行器中</li>
+ <li>将子执行器数组设置其为只读执行器，不允许任何修改</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">MultithreadEventExecutorGroup</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractEventExecutorGroup</span> {</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">EventExecutor</span>[] <span style="color: rgb(184, 191, 198);">children</span>; <span style="color: rgb(218, 146, 74);">// 子事件执行器数组（执行器组）</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Set&lt;EventExecutor&gt;</span> <span style="color: rgb(184, 191, 198);">readonlyChildren</span>; <span style="color: rgb(218, 146, 74);">// 只读子事件执行器</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span> <span style="color: rgb(184, 191, 198);">terminatedChildren</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span>(); <span style="color: rgb(218, 146, 74);">// 已经终止的子事件执行器数量</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Promise&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">terminationFuture</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultPromise</span>(<span style="color: rgb(184, 191, 198);">GlobalEventExecutor</span>.<span style="color: rgb(184, 191, 198);">INSTANCE</span>);<span style="color: rgb(218, 146, 74);">// 子事件执行器终止Promise对象，我们可以在关闭执行器组时通过该Future接口来异步获取关闭结果</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">EventExecutorChooserFactory</span>.<span style="color: rgb(184, 191, 198);">EventExecutorChooser</span> <span style="color: rgb(184, 191, 198);">chooser</span>; <span style="color: rgb(218, 146, 74);">// 用于从子执行器数组中根据该接口的实例来完成下一个子执行器的获取（负载均衡器）</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造函数，提供了默认的线程工厂：ThreadPerTaskExecutor</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">MultithreadEventExecutorGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>, <span style="color: rgb(28, 198, 133);">Object</span>... <span style="color: rgb(184, 191, 198);">args</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">threadFactory</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(132, 182, 203);">null</span> : <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ThreadPerTaskExecutor</span>(<span style="color: rgb(184, 191, 198);">threadFactory</span>), <span style="color: rgb(184, 191, 198);">args</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造函数提供默认的EventExecutorChooser实例：DefaultEventExecutorChooserFactory.INSTANCE</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">MultithreadEventExecutorGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(28, 198, 133);">Object</span>... <span style="color: rgb(184, 191, 198);">args</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(184, 191, 198);">DefaultEventExecutorChooserFactory</span>.<span style="color: rgb(184, 191, 198);">INSTANCE</span>, <span style="color: rgb(184, 191, 198);">args</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 完整构造器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">MultithreadEventExecutorGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventExecutorChooserFactory</span> <span style="color: rgb(184, 191, 198);">chooserFactory</span>, <span style="color: rgb(28, 198, 133);">Object</span>... <span style="color: rgb(184, 191, 198);">args</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">nThreads</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 参数校验</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(<span style="color: rgb(28, 198, 133);">String</span>.<span style="color: rgb(184, 191, 198);">format</span>(<span style="color: rgb(210, 107, 107);">"nThreads: %d (expected: &gt; 0)"</span>, <span style="color: rgb(184, 191, 198);">nThreads</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">executor</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// Executor实例未指定的情况下，创建默认的ThreadPerTaskExecutor实例</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">executor</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ThreadPerTaskExecutor</span>(<span style="color: rgb(184, 191, 198);">newDefaultThreadFactory</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">children</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">EventExecutor</span>[<span style="color: rgb(184, 191, 198);">nThreads</span>]; <span style="color: rgb(218, 146, 74);">// 创建子执行器数组</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">nThreads</span>; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">++</span>) { <span style="color: rgb(218, 146, 74);">// 初始化子执行器数组</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">success</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">children</span>[<span style="color: rgb(184, 191, 198);">i</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newChild</span>(<span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(184, 191, 198);">args</span>); <span style="color: rgb(218, 146, 74);">// 调用子类实现的创建子执行器的方法来完成初始化（为何如此设计？很明显：当前类并不知道这个子执行器的实例是谁，我只知道需要创建而已，抽象方法的魅力再一次展现）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">success</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Exception</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建出现异常，那么包装异常对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalStateException</span>(<span style="color: rgb(210, 107, 107);">"failed to create a child event loop"</span>, <span style="color: rgb(184, 191, 198);">e</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!success</span>) { <span style="color: rgb(218, 146, 74);">// 只要有一个子执行器创建实例失败，那么需要全部关闭</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">i</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">children</span>[<span style="color: rgb(184, 191, 198);">j</span>].<span style="color: rgb(184, 191, 198);">shutdownGracefully</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">i</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">++</span>) { <span style="color: rgb(218, 146, 74);">// 当前线程等待子执行器全部关闭</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">e</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">children</span>[<span style="color: rgb(184, 191, 198);">j</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">!e</span>.<span style="color: rgb(184, 191, 198);">isTerminated</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">e</span>.<span style="color: rgb(184, 191, 198);">awaitTermination</span>(<span style="color: rgb(28, 198, 133);">Integer</span>.<span style="color: rgb(184, 191, 198);">MAX_VALUE</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span>.<span style="color: rgb(184, 191, 198);">SECONDS</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">InterruptedException</span> <span style="color: rgb(184, 191, 198);">interrupted</span>) { <span style="color: rgb(218, 146, 74);">// 等待期间被中断唤醒，那么将当前线程中断标志位重置（中断异常会消耗标志位），由调用方来处理该中断</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">currentThread</span>().<span style="color: rgb(184, 191, 198);">interrupt</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">chooser</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">chooserFactory</span>.<span style="color: rgb(184, 191, 198);">newChooser</span>(<span style="color: rgb(184, 191, 198);">children</span>); <span style="color: rgb(218, 146, 74);">// 通过工厂创建选择器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建终止监听器，并将该监听器放入子执行器中。可以看到该监听器，在操作完成时，对当前类的terminatedChildren终止线程数进行自增，当最后一个子执行器执行完成后，设置terminationFuture的成功结果为null，表示终止完成</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">FutureListener&lt;</span><span style="color: rgb(28, 198, 133);">Object</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">terminationListener</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">FutureListener&lt;</span><span style="color: rgb(28, 198, 133);">Object</span><span style="color: rgb(184, 191, 198);">&gt;</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">operationComplete</span>(<span style="color: rgb(184, 191, 198);">Future&lt;</span><span style="color: rgb(28, 198, 133);">Object</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">future</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">terminatedChildren</span>.<span style="color: rgb(184, 191, 198);">incrementAndGet</span>() <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">children</span>.<span style="color: rgb(184, 191, 198);">length</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">terminationFuture</span>.<span style="color: rgb(184, 191, 198);">setSuccess</span>(<span style="color: rgb(132, 182, 203);">null</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;};</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">e</span>: <span style="color: rgb(184, 191, 198);">children</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">e</span>.<span style="color: rgb(184, 191, 198);">terminationFuture</span>().<span style="color: rgb(184, 191, 198);">addListener</span>(<span style="color: rgb(184, 191, 198);">terminationListener</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 一旦执行器数组创建完成，那么将设置其为只读执行器，不允许任何修改</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Set&lt;EventExecutor&gt;</span> <span style="color: rgb(184, 191, 198);">childrenSet</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">LinkedHashSet&lt;EventExecutor&gt;</span>(<span style="color: rgb(184, 191, 198);">children</span>.<span style="color: rgb(184, 191, 198);">length</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Collections</span>.<span style="color: rgb(184, 191, 198);">addAll</span>(<span style="color: rgb(184, 191, 198);">childrenSet</span>, <span style="color: rgb(184, 191, 198);">children</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">readonlyChildren</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Collections</span>.<span style="color: rgb(184, 191, 198);">unmodifiableSet</span>(<span style="color: rgb(184, 191, 198);">childrenSet</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>EventExecutorChooserFactory与DefaultEventExecutorChooserFactory原理</strong></p>
+<p>我们看到EventExecutorChooserFactory接口定义了创建EventExecutorChooser实例的方法，而由于EventExecutorChooser接口属于EventExecutorChooserFactory，所以在接口内部定义了EventExecutorChooser选择器实例的选择功能函数。</p>
+<p>在默认的选择器DefaultEventExecutorChooserFactory工厂中，我们定义了一个全局的INSTANCE单例对象。同时在创建EventExecutorChooser实例时，将会根据子执行器数组的长度是否为2的次幂来选择合适的取余算法，而在内部取余的过程是通过原子性的自增来完成。所以我们也可以理解为默认执行器选择器执行算法为：轮询。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">EventExecutorChooserFactory</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 返回新的EventExecutorChooser实例</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventExecutorChooser</span> <span style="color: rgb(184, 191, 198);">newChooser</span>(<span style="color: rgb(184, 191, 198);">EventExecutor</span>[] <span style="color: rgb(184, 191, 198);">executors</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 定义选择功能方法</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">EventExecutorChooser</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 返回下一个子执行器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">next</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 默认选择器工厂</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultEventExecutorChooserFactory</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">EventExecutorChooserFactory</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 默认单例</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">DefaultEventExecutorChooserFactory</span> <span style="color: rgb(184, 191, 198);">INSTANCE</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultEventExecutorChooserFactory</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">DefaultEventExecutorChooserFactory</span>() { }</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 通过executors子执行器数组来完成创建。通过检测子执行器数组的长度来选择对应的EventExecutorChooser实例</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">EventExecutorChooser</span> <span style="color: rgb(184, 191, 198);">newChooser</span>(<span style="color: rgb(184, 191, 198);">EventExecutor</span>[] <span style="color: rgb(184, 191, 198);">executors</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isPowerOfTwo</span>(<span style="color: rgb(184, 191, 198);">executors</span>.<span style="color: rgb(184, 191, 198);">length</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">PowerOfTowEventExecutorChooser</span>(<span style="color: rgb(184, 191, 198);">executors</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">GenericEventExecutorChooser</span>(<span style="color: rgb(184, 191, 198);">executors</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 笔者说过：二进制的与操作符等于二进制截断，那么这里相当于对val本身和其负数值截断，比如：val为8，那么二进制为：(这里为32位，前面的28个0省略)1000，-8为：（省略28个1）1000，那么执行与操作符，此时截断了前面29个1的值，这时为原值，表明为2的倍数。但是如果：val为7，那么二进制为111，-7为：（省略29个1）001，此时执行与运算，那么将截断为1</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isPowerOfTwo</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">val</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> (<span style="color: rgb(184, 191, 198);">val</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">-val</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">val</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 数组长度为2的倍数时，我们可以用二进制截断来实现：idx.getAndIncrement() &amp; executors.length - 1，通过与运算加速取余数操作。还是以8为例，8-1=7，二进制为0111，此时截断idx.getAndIncrement()的低三位，正好落在数组 0 - 7的index上</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">PowerOfTowEventExecutorChooser</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">EventExecutorChooser</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span> <span style="color: rgb(184, 191, 198);">idx</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span>(); <span style="color: rgb(218, 146, 74);">// 原子性自增（就算溢出为负数，也不影响）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">EventExecutor</span>[] <span style="color: rgb(184, 191, 198);">executors</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">PowerOfTowEventExecutorChooser</span>(<span style="color: rgb(184, 191, 198);">EventExecutor</span>[] <span style="color: rgb(184, 191, 198);">executors</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">executors</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">executors</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">next</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">executors</span>[<span style="color: rgb(184, 191, 198);">idx</span>.<span style="color: rgb(184, 191, 198);">getAndIncrement</span>() <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">executors</span>.<span style="color: rgb(184, 191, 198);">length</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(100, 171, 143);">1</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 数组长度不为2的倍数，那么只能用相对较慢的abs取绝对值，然后%来计算长度。为何取绝对值？AtomicInteger溢出为负数怎么办？</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">GenericEventExecutorChooser</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">EventExecutorChooser</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span> <span style="color: rgb(184, 191, 198);">idx</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">EventExecutor</span>[] <span style="color: rgb(184, 191, 198);">executors</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">GenericEventExecutorChooser</span>(<span style="color: rgb(184, 191, 198);">EventExecutor</span>[] <span style="color: rgb(184, 191, 198);">executors</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">executors</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">executors</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">next</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">executors</span>[<span style="color: rgb(184, 191, 198);">Math</span>.<span style="color: rgb(184, 191, 198);">abs</span>(<span style="color: rgb(184, 191, 198);">idx</span>.<span style="color: rgb(184, 191, 198);">getAndIncrement</span>() <span style="color: rgb(184, 191, 198);">%</span> <span style="color: rgb(184, 191, 198);">executors</span>.<span style="color: rgb(184, 191, 198);">length</span>)];</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

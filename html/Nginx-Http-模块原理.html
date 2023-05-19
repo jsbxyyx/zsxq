@@ -1,0 +1,1654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Nginx Http 模块原理</h1>
+<p>2022-10-06T10:31:46.104+0800</p>
+<p><p>看如下默认的 nginx.conf 文件，我们在配置完核心模块和事件 epoll 模块后，将会配置 http 模块用于处理 http请求，于是我们需要 ngx_http_module 模块来完成该模块的配置。那么，本文就来分析Http 模块的配置原理，以及我们在这里配置的端口与 epoll 事件处理模块如何关联。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  worker_processes 1;
+ </div>
+ <div class="ql-code-block">
+  events {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; worker_connections 1024;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  http { // 默认未注释的设置
+ </div>
+ <div class="ql-code-block">
+  &nbsp; include &nbsp; &nbsp; &nbsp; mime.types;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; default_type application/octet-stream;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; sendfile &nbsp; &nbsp; &nbsp; on;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; server {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; listen &nbsp; &nbsp; &nbsp; 80;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; server_name localhost;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; location / {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; root &nbsp; html;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; index index.html index.htm;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; error_page &nbsp; 500 502 503 504 /50x.html;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; location = /50x.html {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; root &nbsp; html;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">ngx_http_module 模块</strong></h2>
+<p><br></p>
+<p>可以看到该模块没有实现回调函数，也没有实现 ngx_core_module_t 结构的 create_conf 和 init_conf 函数指针，仅仅保留对 http 块的配置函数 ： ngx_http_block，我们知道：当Nginx 解析 <a href="http://Nginx.conf" target="_blank">Nginx.conf</a> 中的 http { } 块时，将会回调该函数，在该函数中我们创建了所有 用于 保存 http 配置信息的上下文以及附属结构。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">ngx_module_t</span> &nbsp;ngx_http_module = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;NGX_MODULE_V1,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;&amp;ngx_http_module_ctx, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* module context */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_commands, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* module directives */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;NGX_CORE_MODULE, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* module type */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init master */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init module */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init process */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init thread */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit thread */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit process */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit master */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;NGX_MODULE_V1_PADDING
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 未实现 create_conf 与 init_conf 函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_core_module_t</span> &nbsp;ngx_http_module_ctx = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_string(<span class="ql-token hljs-string">"http"</span>),
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_command_t</span> &nbsp;ngx_http_commands[] = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; { ngx_string(<span class="ql-token hljs-string">"http"</span>),
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;NGX_MAIN_CONF|NGX_CONF_BLOCK|NGX_CONF_NOARGS,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;ngx_http_block,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-number">0</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-number">0</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span> },
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;ngx_null_command
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">char</span> *<span class="ql-token hljs-title">ngx_http_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">/* 创建http上下文对象*/</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ctx = ngx_pcalloc(cf-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_http_conf_ctx_t</span>));
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;*(<span class="ql-token hljs-type">ngx_http_conf_ctx_t</span> **) conf = ctx; <span class="ql-token hljs-comment">// 从配置对象中获取到配置结构的指针</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">/* 计算HTTP模块的数量并建立索引 */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_max_module = ngx_count_modules(cf-&gt;cycle, NGX_HTTP_MODULE);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">/* HTTP 模块的 main_conf 上下文数组，在所有HTTP上下文中都是同一个 */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ctx-&gt;main_conf = ngx_pcalloc(cf-&gt;pool,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">void</span> *) * ngx_http_max_module);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 分配用于保存 server {} 块的 srv_conf 配置的结构数组（ sizeof(void *) 计算地址大小，后面为http模块数量 ）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ctx-&gt;srv_conf = ngx_pcalloc(cf-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">void</span> *) * ngx_http_max_module);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 分配用于保存 server {} 块的 loc_conf 配置的结构数组</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ctx-&gt;loc_conf = ngx_pcalloc(cf-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">void</span> *) * ngx_http_max_module);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ctx-&gt;loc_conf == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 遍历所有 http 模块，创建他们的 main_conf 和 srv_conf 和 loc_conf 结构（注意：上面我们只是创建了保存他们的数组结构，并没有创建具体结构）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (m = <span class="ql-token hljs-number">0</span>; cf-&gt;cycle-&gt;modules[m]; m++) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cf-&gt;cycle-&gt;modules[m]-&gt;type != NGX_HTTP_MODULE) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;module = cf-&gt;cycle-&gt;modules[m]-&gt;ctx;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;mi = cf-&gt;cycle-&gt;modules[m]-&gt;ctx_index;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module-&gt;create_main_conf) { <span class="ql-token hljs-comment">// 创建该 http 模块的 主配置 信息</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ctx-&gt;main_conf[mi] = module-&gt;create_main_conf(cf);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ctx-&gt;main_conf[mi] == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module-&gt;create_srv_conf) { <span class="ql-token hljs-comment">// 创建该 http 模块的 server配置 信息</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ctx-&gt;srv_conf[mi] = module-&gt;create_srv_conf(cf);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ctx-&gt;srv_conf[mi] == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module-&gt;create_loc_conf) { <span class="ql-token hljs-comment">// 创建该 http 模块的 location地位配置 信息</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ctx-&gt;loc_conf[mi] = module-&gt;create_loc_conf(cf);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ctx-&gt;loc_conf[mi] == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (m = <span class="ql-token hljs-number">0</span>; cf-&gt;cycle-&gt;modules[m]; m++) { <span class="ql-token hljs-comment">// 遍历所有 http 模块，若存在 preconfiguration 函数，那么回调</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cf-&gt;cycle-&gt;modules[m]-&gt;type != NGX_HTTP_MODULE) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;module = cf-&gt;cycle-&gt;modules[m]-&gt;ctx;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module-&gt;preconfiguration) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module-&gt;preconfiguration(cf) != NGX_OK) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">/* 转换配置文件的 http{} 块信息 */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cf-&gt;module_type = NGX_HTTP_MODULE;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cf-&gt;cmd_type = NGX_HTTP_MAIN_CONF;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;rv = ngx_conf_parse(cf, <span class="ql-token hljs-literal">NULL</span>);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">/*</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment"> &nbsp; &nbsp; * 初始化 http{} 主配置信息, 组合 server{} 块的 srv_conf 配置信息 和 location{} 块的 loc_conf 配置信息</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment"> &nbsp; &nbsp; */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf = ctx-&gt;main_conf[ngx_http_core_module.ctx_index];
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cscfp = cmcf-&gt;servers.elts;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (m = <span class="ql-token hljs-number">0</span>; cf-&gt;cycle-&gt;modules[m]; m++) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cf-&gt;cycle-&gt;modules[m]-&gt;type != NGX_HTTP_MODULE) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;module = cf-&gt;cycle-&gt;modules[m]-&gt;ctx;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;mi = cf-&gt;cycle-&gt;modules[m]-&gt;ctx_index;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">// 回调 HTTP 模块 init_main_conf 函数</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module-&gt;init_main_conf) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;rv = module-&gt;init_main_conf(cf, ctx-&gt;main_conf[mi]);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (rv != NGX_CONF_OK) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">goto</span> failed;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;rv = ngx_http_merge_servers(cf, cmcf, module, mi); <span class="ql-token hljs-comment">// 对当前 http 模块的配置信息进行父子配置处理，也即回调子模块的 merge_srv_conf 和 merge_loc_conf 函数进行配置，详情看后面 http_core 模块的描述</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (rv != NGX_CONF_OK) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">goto</span> failed;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 根据上述的配置信息，创建 location 定位树（此时依靠该树，可以用于接收到 http 的 /xx/xx 路径后匹配用于处理的 location {} 块）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (s = <span class="ql-token hljs-number">0</span>; s &lt; cmcf-&gt;servers.nelts; s++) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;clcf = cscfp[s]-&gt;ctx-&gt;loc_conf[ngx_http_core_module.ctx_index];
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_http_init_locations(cf, cscfp[s], clcf) != NGX_OK) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_http_init_static_location_trees(cf, clcf) != NGX_OK) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_http_init_phases(cf, cmcf) != NGX_OK) { <span class="ql-token hljs-comment">// 初始化 http 处理阶段的回调函数数组</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_http_init_headers_in_hash(cf, cmcf) != NGX_OK) { <span class="ql-token hljs-comment">// 初始化用于处理http头部 hash 表</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (m = <span class="ql-token hljs-number">0</span>; cf-&gt;cycle-&gt;modules[m]; m++) { <span class="ql-token hljs-comment">// 回调 Http 模块的 postconfiguration 回调函数</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cf-&gt;cycle-&gt;modules[m]-&gt;type != NGX_HTTP_MODULE) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;module = cf-&gt;cycle-&gt;modules[m]-&gt;ctx;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module-&gt;postconfiguration) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module-&gt;postconfiguration(cf) != NGX_OK) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_http_init_phase_handlers(cf, cmcf) != NGX_OK) { <span class="ql-token hljs-comment">// 初始化回调函数数组中的具体处理函数地址</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">/* 优化端口、地址和服务器名称列表，并将其放入到事件循环的 listen端列表 */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_http_optimize_servers(cf, cmcf, cmcf-&gt;ports) != NGX_OK) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_OK;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// http 模块配置结构的回调函数定义</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">typedef</span> <span class="ql-token hljs-class">struct {</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_int_t</span> &nbsp; (*preconfiguration)(<span class="ql-token hljs-type">ngx_conf_t</span> *cf);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_int_t</span> &nbsp; (*postconfiguration)(<span class="ql-token hljs-type">ngx_conf_t</span> *cf);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">void</span> &nbsp; &nbsp; &nbsp; *(*create_main_conf)(<span class="ql-token hljs-type">ngx_conf_t</span> *cf);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">char</span> &nbsp; &nbsp; &nbsp; *(*init_main_conf)(<span class="ql-token hljs-type">ngx_conf_t</span> *cf, <span class="ql-token hljs-type">void</span> *conf);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">void</span> &nbsp; &nbsp; &nbsp; *(*create_srv_conf)(<span class="ql-token hljs-type">ngx_conf_t</span> *cf);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">char</span> &nbsp; &nbsp; &nbsp; *(*merge_srv_conf)(<span class="ql-token hljs-type">ngx_conf_t</span> *cf, <span class="ql-token hljs-type">void</span> *prev, <span class="ql-token hljs-type">void</span> *conf);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">void</span> &nbsp; &nbsp; &nbsp; *(*create_loc_conf)(<span class="ql-token hljs-type">ngx_conf_t</span> *cf);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">char</span> &nbsp; &nbsp; &nbsp; *(*merge_loc_conf)(<span class="ql-token hljs-type">ngx_conf_t</span> *cf, <span class="ql-token hljs-type">void</span> *prev, <span class="ql-token hljs-type">void</span> *conf);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-type">ngx_http_module_t</span>;
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">ngx_http_core_module 模块</strong></h2>
+<p><br></p>
+<p>从 http 模块中我们看到回调流程如下：</p>
+<p>1、ngx_http_core_create_main_conf -&gt; ngx_http_core_create_srv_conf -&gt; ngx_http_core_create_loc_conf</p>
+<p>2、ngx_http_core_preconfiguration</p>
+<p>3、转换 http 模块 （ngx_conf_parse，保存http{}块内的所有结构都已经创建完毕，那么我们很容易的理解，当该方法完成后 <a href="http://nginx.conf" target="_blank">nginx.conf</a> 中的结构化的字符数据将全部放置到对应的配置结构中）</p>
+<p>4、ngx_http_core_init_main_conf -&gt; ngx_http_core_merge_srv_conf -&gt; ngx_http_core_merge_loc_conf</p>
+<p>5、ngx_http_core_postconfiguration</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">ngx_module_t</span> &nbsp;ngx_http_core_module = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;NGX_MODULE_V1,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;&amp;ngx_http_core_module_ctx, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* module context */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_core_commands, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* module directives */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;NGX_HTTP_MODULE, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* module type */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init master */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init module */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init process */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init thread */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit thread */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit process */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit master */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;NGX_MODULE_V1_PADDING
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 核心模块的配置函数定义</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_http_module_t</span> &nbsp;ngx_http_core_module_ctx = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_core_preconfiguration, &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* preconfiguration */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_core_postconfiguration, &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* postconfiguration */</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_core_create_main_conf, &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* create main configuration */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_core_init_main_conf, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init main configuration */</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_core_create_srv_conf, &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* create server configuration */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_core_merge_srv_conf, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* merge server configuration */</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_core_create_loc_conf, &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* create location configuration */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_core_merge_loc_conf &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* merge location configuration */</span>
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 核心模块的解析函数定义（由于配置项太多，不可能一一例举，我们这里看 server{} 块的解析即可）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_command_t</span> &nbsp;ngx_http_core_commands[] = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; { ngx_string(<span class="ql-token hljs-string">"server"</span>),
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;NGX_HTTP_MAIN_CONF|NGX_CONF_BLOCK|NGX_CONF_NOARGS,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;ngx_http_core_server,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-number">0</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-number">0</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span> },
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ... <span class="ql-token hljs-comment">// 省略其他，建议读者理解了为 server{}块的解析后，去看看 location{} 块的解析</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">ngx_http_core_create_main_conf 函数</strong></h3>
+<p><br></p>
+<p>该函数用于创建 http 核心模块的 ngx_http_core_main_conf_t 配置结构，并初始化其成员变量。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> * <span class="ql-token hljs-title">ngx_http_core_create_main_conf(ngx_conf_t *cf)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_http_core_main_conf_t</span> &nbsp;*cmcf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf = ngx_pcalloc(cf-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_http_core_main_conf_t</span>)); <span class="ql-token hljs-comment">// 创建当前模块的配置结构</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cmcf == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_array_init(&amp;cmcf-&gt;servers, cf-&gt;pool, <span class="ql-token hljs-number">4</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_http_core_srv_conf_t</span> *)) <span class="ql-token hljs-comment">// 初始化配置结构中存放 server 配置信息的结构数组</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;!= NGX_OK)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 其他变量初始化为 -1 </span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf-&gt;server_names_hash_max_size = NGX_CONF_UNSET_UINT;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf-&gt;server_names_hash_bucket_size = NGX_CONF_UNSET_UINT;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf-&gt;variables_hash_max_size = NGX_CONF_UNSET_UINT;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf-&gt;variables_hash_bucket_size = NGX_CONF_UNSET_UINT;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> cmcf;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">ngx_http_core_create_srv_conf 函数</strong></h3>
+<p><br></p>
+<p>该函数用于创建保存 server 结构的配置信息，实现很简单，源码如下。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> * <span class="ql-token hljs-title">ngx_http_core_create_srv_conf(ngx_conf_t *cf)</span> {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_http_core_srv_conf_t</span> &nbsp;*cscf;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cscf = ngx_pcalloc(cf-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_http_core_srv_conf_t</span>)); <span class="ql-token hljs-comment">// server{} 配置结构</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cscf == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_array_init(&amp;cscf-&gt;server_names, cf-&gt;temp_pool, <span class="ql-token hljs-number">4</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_http_server_name_t</span>))
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;!= NGX_OK)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; { &nbsp;<span class="ql-token hljs-comment">// 初始化放置server名字的数组</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 初始化其他变量为初始值 -1</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cscf-&gt;connection_pool_size = NGX_CONF_UNSET_SIZE;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cscf-&gt;request_pool_size = NGX_CONF_UNSET_SIZE;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cscf-&gt;client_header_timeout = NGX_CONF_UNSET_MSEC;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cscf-&gt;client_header_buffer_size = NGX_CONF_UNSET_SIZE;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cscf-&gt;ignore_invalid_headers = NGX_CONF_UNSET;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cscf-&gt;merge_slashes = NGX_CONF_UNSET;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cscf-&gt;underscores_in_headers = NGX_CONF_UNSET;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cscf-&gt;file_name = cf-&gt;conf_file-&gt;file.name.data;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cscf-&gt;line = cf-&gt;conf_file-&gt;line;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> cscf;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">ngx_http_core_create_loc_conf 函数</strong></h3>
+<p><br></p>
+<p>该函数同上述创建配置信息的函数一模一样：创建location配置项，然后初始化默认值，由于内部成员太多，这里将其省略。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> * <span class="ql-token hljs-title">ngx_http_core_create_loc_conf(ngx_conf_t *cf)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_http_core_loc_conf_t</span> &nbsp;*clcf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;clcf = ngx_pcalloc(cf-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_http_core_loc_conf_t</span>)); <span class="ql-token hljs-comment">// 创建保存 location{} 块的配置结构</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (clcf == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 初始化成员为初始值 -1</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;clcf-&gt;client_max_body_size = NGX_CONF_UNSET;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> clcf;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">ngx_http_core_preconfiguration 函数</strong></h3>
+<p><br></p>
+<p>该函数较为简单：遍历ngx_http_core_variables数组，该数组为预定义数组，遍历其保存在当前模块的 ngx_http_core_main_conf_t 配置结构中。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_int_t</span> <span class="ql-token hljs-title">ngx_http_core_preconfiguration(ngx_conf_t *cf)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> ngx_http_variables_add_core_vars(cf);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">ngx_int_t</span> <span class="ql-token hljs-title">ngx_http_variables_add_core_vars(ngx_conf_t *cf)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_http_variable_t</span> &nbsp; &nbsp; &nbsp; &nbsp;*cv, *v;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_http_core_main_conf_t</span> &nbsp;*cmcf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module); <span class="ql-token hljs-comment">// 获取在 ngx_http_module 模块中创建的该模块的 配置结构 </span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf-&gt;variables_keys = ngx_pcalloc(cf-&gt;temp_pool,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_hash_keys_arrays_t</span>)); <span class="ql-token hljs-comment">// 分配存放变量的数组包装结构 ngx_hash_keys_arrays_t</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cmcf-&gt;variables_keys == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf-&gt;variables_keys-&gt;pool = cf-&gt;pool;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf-&gt;variables_keys-&gt;temp_pool = cf-&gt;pool;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_hash_keys_array_init(cmcf-&gt;variables_keys, NGX_HASH_SMALL) <span class="ql-token hljs-comment">// 初始化ngx_hash_keys_arrays_t包装结构中的数组</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;!= NGX_OK)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_array_init(&amp;cmcf-&gt;prefix_variables, cf-&gt;pool, <span class="ql-token hljs-number">8</span>, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_http_variable_t</span>))
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;!= NGX_OK) <span class="ql-token hljs-comment">// 初始化放置 http 前缀的变量描述结构 ngx_http_variable_t</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (cv = ngx_http_core_variables; cv-&gt;name.len; cv++) { &nbsp;<span class="ql-token hljs-comment">// 遍历所有 http 使用的变量信息（头部变量和前缀变量）将其放入上面创建的 前缀变量数组 和 ngx_hash_keys_arrays_t 包装数组结构中的数组</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;v = ngx_http_add_variable(cf, &amp;cv-&gt;name, cv-&gt;flags);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (v == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;*v = *cv; <span class="ql-token hljs-comment">// 添加成功后，将原有变量信息复制到添加后的数组项中</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_OK;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// http 头部和前缀定义，太多了，读者自行查看</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_http_variable_t</span> &nbsp;ngx_http_core_variables[] = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; { ngx_string(<span class="ql-token hljs-string">"http_host"</span>), <span class="ql-token hljs-literal">NULL</span>, ngx_http_variable_header,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;offsetof(<span class="ql-token hljs-type">ngx_http_request_t</span>, headers_in.host), <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span> },
+ </div>
+ <div class="ql-code-block">
+  &nbsp; { ngx_string(<span class="ql-token hljs-string">"content_length"</span>), <span class="ql-token hljs-literal">NULL</span>, ngx_http_variable_content_length,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span> },
+ </div>
+ <div class="ql-code-block">
+  &nbsp; { ngx_string(<span class="ql-token hljs-string">"content_type"</span>), <span class="ql-token hljs-literal">NULL</span>, ngx_http_variable_header,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;offsetof(<span class="ql-token hljs-type">ngx_http_request_t</span>, headers_in.content_type), <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span> }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ....
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// http 变量结构，可见包含 获取和设置的封装函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">struct</span> ngx_http_variable_s {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_str_t</span> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; name; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_set_variable_pt &nbsp; &nbsp; &nbsp;set_handler;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_get_variable_pt &nbsp; &nbsp; &nbsp;get_handler;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">uintptr_t</span> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; data;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_uint_t</span> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;flags;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_uint_t</span> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;index;
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">ngx_http_core_init_main_conf 函数</strong></h3>
+<p><br></p>
+<p>我们知道在 create 创建时，将会初始化为 -1 初始值，然后当我们解析配置文件将会把配置文件中设置的信息放置到结构中，但有些变量用户并没有设置，那么这时，我们需要在该配置项中填入默认值，读者并不需要知道该默认值是什么含义，我们在后面使用到时自然明白。源码如下。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">char</span> * <span class="ql-token hljs-title">ngx_http_core_init_main_conf(ngx_conf_t *cf, void *conf)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 初始化主模块变量的默认值</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_http_core_main_conf_t</span> *cmcf = conf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_uint_value(cmcf-&gt;server_names_hash_max_size, <span class="ql-token hljs-number">512</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_uint_value(cmcf-&gt;server_names_hash_bucket_size,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; ngx_cacheline_size);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf-&gt;server_names_hash_bucket_size =
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_align(cmcf-&gt;server_names_hash_bucket_size, ngx_cacheline_size);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_uint_value(cmcf-&gt;variables_hash_max_size, <span class="ql-token hljs-number">1024</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_uint_value(cmcf-&gt;variables_hash_bucket_size, <span class="ql-token hljs-number">64</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmcf-&gt;variables_hash_bucket_size =
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; ngx_align(cmcf-&gt;variables_hash_bucket_size, ngx_cacheline_size);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cmcf-&gt;ncaptures) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;cmcf-&gt;ncaptures = (cmcf-&gt;ncaptures + <span class="ql-token hljs-number">1</span>) * <span class="ql-token hljs-number">3</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_OK;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 设置时，将会看看配置文件中是否已经设置值，否则将其设置为默认值</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define ngx_conf_init_uint_value(conf, default) &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> &nbsp; &nbsp;if (conf == NGX_CONF_UNSET_UINT) { &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> &nbsp; &nbsp; &nbsp; &nbsp;conf = default; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> &nbsp; &nbsp;}</span>
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">ngx_http_core_merge_srv_conf 函数 与 ngx_http_core_merge_loc_conf 函数</strong></h3>
+<p><br></p>
+<p>这两个函数均用于将解析到的 server 信息进行父子配置，子配置项依赖父配置项的信息来初始化自身的属性，若父配置项不存在该信息，那么使用设置的默认值。源码如下。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 配置server信息</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">char</span> * <span class="ql-token hljs-title">ngx_http_core_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_http_core_srv_conf_t</span> *prev = parent;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_http_core_srv_conf_t</span> *conf = child; <span class="ql-token hljs-comment">// 当前需要组合的信息</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_str_t</span> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;name;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_http_server_name_t</span> &nbsp;*sn;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 组合成员变量</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_merge_size_value(conf-&gt;connection_pool_size,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;prev-&gt;connection_pool_size, <span class="ql-token hljs-number">64</span> * <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">void</span> *));
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_merge_size_value(conf-&gt;request_pool_size,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;prev-&gt;request_pool_size, <span class="ql-token hljs-number">4096</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_merge_msec_value(conf-&gt;client_header_timeout,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;prev-&gt;client_header_timeout, <span class="ql-token hljs-number">60000</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_merge_size_value(conf-&gt;client_header_buffer_size,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;prev-&gt;client_header_buffer_size, <span class="ql-token hljs-number">1024</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_merge_bufs_value(conf-&gt;large_client_header_buffers,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;prev-&gt;large_client_header_buffers,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-number">4</span>, <span class="ql-token hljs-number">8192</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_OK;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 配置location信息</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">char</span> * <span class="ql-token hljs-title">ngx_http_core_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_http_core_loc_conf_t</span> *prev = parent;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_http_core_loc_conf_t</span> *conf = child;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_merge_uint_value(conf-&gt;types_hash_max_size,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;prev-&gt;types_hash_max_size, <span class="ql-token hljs-number">1024</span>);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_merge_uint_value(conf-&gt;types_hash_bucket_size,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;prev-&gt;types_hash_bucket_size, <span class="ql-token hljs-number">64</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 宏定义设置 conf 值，可以看到当conf为初始化值时，才根据 parent的值来进行设置，若parent没有设置该值，那么取默认值</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define ngx_conf_merge_size_value(conf, prev, default) &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> &nbsp; &nbsp;if (conf == NGX_CONF_UNSET_SIZE) { &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> &nbsp; &nbsp; &nbsp; &nbsp;conf = (prev == NGX_CONF_UNSET_SIZE) ? default : prev; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> &nbsp; &nbsp;}</span>
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">ngx_http_core_postconfiguration 函数</strong></h3>
+<p><br></p>
+<p>该函数将在父子配置设置完成后调用，可以看到将 ngx_http_request_body_save_filter 函数作为全局 filter 过滤 http body的函数指针。源码如下。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_int_t</span> <span class="ql-token hljs-title">ngx_http_core_postconfiguration(ngx_conf_t *cf)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_http_top_request_body_filter = ngx_http_request_body_save_filter; <span class="ql-token hljs-comment">// 该函数用于相应http请求体，这里先暂时不用关系，我们把关注点放到对 http 核心模块的框架上</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_OK;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">ngx_http_core_server 函数</strong></h3>
+<p><br></p>
+<p>该函数将在nginx解析到 <a href="http://nginx.conf" target="_blank">nginx.conf</a> 中的 server{} 时调用，进一步完成该该块的结构化信息的解析，将其中设置的值放置在 http 模块对应的配置结构中。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">typedef</span> <span class="ql-token hljs-class">struct {</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">void</span> &nbsp; &nbsp; &nbsp; &nbsp;**main_conf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">void</span> &nbsp; &nbsp; &nbsp; &nbsp;**srv_conf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">void</span> &nbsp; &nbsp; &nbsp; &nbsp;**loc_conf;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-type">ngx_http_conf_ctx_t</span>; <span class="ql-token hljs-comment">// 解析server{}块时用于包装 main、server、location 的配置结构的地址的数组</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">char</span> * <span class="ql-token hljs-title">ngx_http_core_server(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ctx = ngx_pcalloc(cf-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_http_conf_ctx_t</span>)); <span class="ql-token hljs-comment">// 分配 http 上下文的配置结构，包装 main、server、location 的配置结构的地址</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ctx == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;http_ctx = cf-&gt;ctx; <span class="ql-token hljs-comment">// http 模块结构（管理整个 http 的配置）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ctx-&gt;main_conf = http_ctx-&gt;main_conf; <span class="ql-token hljs-comment">// http 主配置结构</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">/* 创建放置 server{} 块的 srv_conf 结构的指针数组*/</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ctx-&gt;srv_conf = ngx_pcalloc(cf-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">void</span> *) * ngx_http_max_module); &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ctx-&gt;srv_conf == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">/* 创建放置 server{} 中 location{} 的 loc_conf 结构的指针数组*/</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ctx-&gt;loc_conf = ngx_pcalloc(cf-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">void</span> *) * ngx_http_max_module);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ctx-&gt;loc_conf == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 遍历所有 http 模块，一次回调他们的 create_srv_conf 、create_loc_conf 来获取它们的对应块配置项，然后将其地址放置到上面创建的包装结构 ngx_http_conf_ctx_t 的数组中</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (i = <span class="ql-token hljs-number">0</span>; cf-&gt;cycle-&gt;modules[i]; i++) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cf-&gt;cycle-&gt;modules[i]-&gt;type != NGX_HTTP_MODULE) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;module = cf-&gt;cycle-&gt;modules[i]-&gt;ctx;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module-&gt;create_srv_conf) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;mconf = module-&gt;create_srv_conf(cf);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (mconf == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ctx-&gt;srv_conf[cf-&gt;cycle-&gt;modules[i]-&gt;ctx_index] = mconf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module-&gt;create_loc_conf) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;mconf = module-&gt;create_loc_conf(cf);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (mconf == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ctx-&gt;loc_conf[cf-&gt;cycle-&gt;modules[i]-&gt;ctx_index] = mconf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">/* 转换内部的server{}块 */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;rv = ngx_conf_parse(cf, <span class="ql-token hljs-literal">NULL</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (rv == NGX_CONF_OK &amp;&amp; !cscf-&gt;listen) { <span class="ql-token hljs-comment">// 若没有设置 server 的监听端口，那么给端口配置一个默认值，可以看到若 uid 为root 用户，那么配置为 80，否则为 8080</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_memzero(&amp;lsopt, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_http_listen_opt_t</span>));
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;p = ngx_pcalloc(cf-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-keyword">struct</span> sockaddr_in));
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (p == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;lsopt.sockaddr = (<span class="ql-token hljs-keyword">struct</span> sockaddr *) p;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-built_in">sin</span> = (<span class="ql-token hljs-keyword">struct</span> sockaddr_in *) p;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-built_in">sin</span>-&gt;sin_family = AF_INET;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-built_in">sin</span>-&gt;sin_port = htons((getuid() == <span class="ql-token hljs-number">0</span>) ? <span class="ql-token hljs-number">80</span> : <span class="ql-token hljs-number">8000</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-built_in">sin</span>-&gt;sin_addr.s_addr = INADDR_ANY;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;lsopt.socklen = <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-keyword">struct</span> sockaddr_in);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;lsopt.backlog = NGX_LISTEN_BACKLOG;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;lsopt.rcvbuf = <span class="ql-token hljs-number">-1</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;lsopt.sndbuf = <span class="ql-token hljs-number">-1</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;lsopt.wildcard = <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;len = NGX_INET_ADDRSTRLEN + <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-string">":65535"</span>) - <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;p = ngx_pnalloc(cf-&gt;pool, len);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (p == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;lsopt.addr_text.data = p;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;lsopt.addr_text.len = ngx_sock_ntop(lsopt.sockaddr, lsopt.socklen, p,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;len, <span class="ql-token hljs-number">1</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_http_add_listen(cf, cscf, &amp;lsopt) != NGX_OK) { <span class="ql-token hljs-comment">// 将端口信息、地址信息、server信息添加到配置信息中</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> rv;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p></p>
+</body>
+</html>

@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>混沌视角</h1>
+<p>2022-01-14T06:39:50.543+0800</p>
+<p><p>小时候喜欢打“魔兽世界”，我相信各位都玩过（没玩过也没关系，不重要），我通常单机与电脑进行PK，选择难度为困难，但是每次都被电脑干趴下（打不过呀），于是乎，我通过命令，打开了上帝视角（我能看到地图上任何一个位置电脑的位置，于是我排兵布阵，天天虐电脑····）。</p>
+<p>自2016年大三接触编程语言而来，我通过“五感辨识”，一直想找到这个打开编程世界的上帝视角的命令，在途中我也迷茫过，怀疑过，这咋可能存在呢?直到某一天，我像破案的常用手法一样，我把常见的语言（动态语言、静态语言）他们的结构和内容进行融合分析，结合 操作系统、计算机组成原理、计算机网络，我发现，真的存在一个上帝视角，而开启这个视角的钥匙，居然是 混沌学习法。</p>
+<p>读者可以试想一下：如果你打开了编程世界的上帝视角，会干嘛？这将意味着：</p>
+<ol>
+ <li>学习不区分语言</li>
+ <li>遇到问题快速定位</li>
+ <li>不再纠结于如何学习</li>
+ <li>对任何新技术，只要看一下架构和功能，马上能猜出底层实现原理</li>
+ <li>抓住语言共同点学习，一次学习，多语言使用</li>
+</ol>
+<p>我称编程世界的上帝视角为：混沌视角。它是在使用混沌学习法的一大产物之一。</p>
+<p><strong>找到GC Root</strong></p>
+<p>在《混沌学习法》中，我们了解到：我们需要找到一个GC Root点，然后往下对比学习分析，扩展知识脉络。那么我们先来定义下本文要探究的GC Root是什么？</p>
+<p>既然我们需要打开混沌视角，那么必然得把多个语言进行融合分析，不过我们先来基于以下已经知道的知识来进行推理：</p>
+<ol>
+ <li>计算机基础硬件：CPU、内存、硬盘</li>
+ <li>用户不需要直接跟硬件进行交互，直接通过命令或者鼠标、键盘外设来跟操作系统交流，操作系统来调度硬件完成操作</li>
+ <li>那么，我们的编程语言自然也是通过某种方式来跟操作系统进行沟通</li>
+ <li>而如果是多个机器进行沟通，那么我们需要在硬件上支持 网卡，操作系统上支持网络栈（这些事情当然由 计算机网络 的知识来提供，当然我们知道这实现是：TCP/IP四层协议（额，OSI七层只是概念模型））</li>
+</ol>
+<p>这时，我们得到了一个结论：一切事情，由操作系统来完成。</p>
+<p>那么，相信读者在其他地方或多或少的知道：操作系统和硬件将用户所处的环境分为：用户空间和内核空间，不过不懂也没关系。我们可以想想你在网站中编写的Controller，然后通过浏览器输入地址，然后就可以通过Http协议访问这个Controller，从而获取到返回结果。那么读者这里可以将操作系统提供的这些功能接口，想象为一个个Controller，而我们所需要做的就是通过编程语言去调用这些接口完成需要的功能。那么，在上面我们提到了，通过Http协议来调用，那么我们与系统调用之间呢？是不是也需要定义一个协议，来完成操作，是的，这就是 系统调用，我们需要使用操作系统提供的方法来完成参数传递到操作系统，从操作系统中获取到结果等等。所以，对于Http协议来说只不过是通过TCP/IP协议栈来完成调用，而系统调用来操作系统是单机上完成调用。</p>
+<p>这时我们找到了GC Root：所有编程语言都会使用系统调用，来告诉操作系统需要完成的动作和获取结果。</p>
+<p>那么，我们继续分析：</p>
+<ol>
+ <li>在计算机中保存计算数据的地方就是内存，一个内存基础单元为 1byte = 8bit（位）【不明白也没关系，你只需要知道，存放数据的盒子，最小就是1byte，不能再小了，比如：没有1bit的盒子，你需要，那么最小给的盒子就是1byte】那么，编程语言需要提供些什么？答案很明显：操作这些不同大小盒子的东西，那是什么？基础数据类型</li>
+ <li>基础数据类型让我们可以从操作系统中获取到 给定 规格大小的盒子，而如果我们需要获取不属于这些规格的盒子呢？我们就需要：分配这些盒子的功能</li>
+ <li>如果我们只分配盒子，不释放，那么显然最终盒子用尽，导致系统奔溃，那么我们需要归还这些盒子，那么这时我们有两种方法：由某个东西帮我们自动归还、通过编程方式手动归还</li>
+ <li>在提供了这些基本操作后，我们考虑下：需要用户直接按照协议来直接操作系统调用么？那必然不是，我们需要在编程语言中提供给用户便捷的使用方法</li>
+</ol>
+<p>这时，通过以上分析我们可以得出以下编程语言需要提供的功能结论：</p>
+<ol>
+ <li>封装系统调用方便用户调用（线程库、IO库、图形库、网络编程库）</li>
+ <li>提供基础数据类型来使用规格化的内存</li>
+ <li>提供内存分配和释放的手段</li>
+ <li>提供基础算法与数据结构（线性表（数组、链表）、队列、栈、树）</li>
+ <li>按照编程语言的特性，提供面向对象的支持（抽象、继承、多态）</li>
+</ol>
+<p><strong>混沌视角的妙用</strong></p>
+<p>当读者掌握到以上的内容后，恭喜您，打开了编程世界的上帝视角，这时，我们来看看如何运用：混沌学习法+混沌视角来进行学习。我们还是以C语言和Java语言来描述，毕竟，没有什么比这两个更为合适举例了（大部分读者为Java Coder，C语言保留了原始的基础操作也是各个底层框架，包括操作系统的主语言）。</p>
+<p>这里，读者以网络编程的例子（这里我们以服务端server举例）来进行分析。我们先给出C语言的网络编程方式：</p>
+<p><span style="color: rgb(218, 146, 74);">/*</span></p>
+<p><span style="color: rgb(218, 146, 74);">* server.c 服务端实现。引入一堆宏定义，它们封装了系统调用和常用算法数据结构</span></p>
+<p><span style="color: rgb(218, 146, 74);">*/</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;sys/types.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;sys/socket.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;stdio.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;netinet/in.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;arpa/inet.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;unistd.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;string.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;netdb.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;sys/ioctl.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;termios.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;stdlib.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;sys/stat.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;fcntl.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;signal.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;sys/time.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;errno.h&gt;</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">main</span>(<span style="color: rgb(28, 198, 133);">void</span>)&nbsp;<span style="color: rgb(218, 146, 74);">// 主函数，将会从这里开始运行</span></p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">sk</span>,<span style="color: rgb(184, 191, 198);">csk</span>;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 服务端sk和客户端csk fd（文件描述符）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">rbuf</span>[<span style="color: rgb(100, 171, 143);">51</span>];&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 接收缓冲区</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_in</span> <span style="color: rgb(141, 141, 240);">addr</span>;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// socket地址</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">socket</span>(<span style="color: rgb(184, 191, 198);">AF_INET</span>,<span style="color: rgb(184, 191, 198);">SOCK_STREAM</span>,<span style="color: rgb(100, 171, 143);">0</span>);&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建socket</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">bzero</span>(<span style="color: rgb(184, 191, 198);">&amp;addr</span>,<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span>));&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 清空内存</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置属性</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_family</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">AF_INET</span>;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_addr</span>.<span style="color: rgb(184, 191, 198);">s_addr</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">htonl</span>(<span style="color: rgb(184, 191, 198);">INADDR_ANY</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_port</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">htons</span>(<span style="color: rgb(100, 171, 143);">5000</span>);&nbsp;<span style="color: rgb(218, 146, 74);">// 设置端口&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 绑定地址</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>(<span style="color: rgb(184, 191, 198);">bind</span>(<span style="color: rgb(184, 191, 198);">sk</span>,(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> <span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">&amp;svraddr</span>,<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_in</span>))<span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>){</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fprintf</span>(<span style="color: rgb(184, 191, 198);">stderr</span>,<span style="color: rgb(210, 107, 107);">"Bind error:%s\n"</span>,<span style="color: rgb(184, 191, 198);">strerror</span>(<span style="color: rgb(184, 191, 198);">errno</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">exit</span>(<span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>(<span style="color: rgb(184, 191, 198);">listen</span>(<span style="color: rgb(184, 191, 198);">sk</span>,<span style="color: rgb(100, 171, 143);">1024</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>){&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 开始监听来自客户端连接</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fprintf</span>(<span style="color: rgb(184, 191, 198);">stderr</span>,<span style="color: rgb(210, 107, 107);">"Listen error:%s\n"</span>,<span style="color: rgb(184, 191, 198);">strerror</span>(<span style="color: rgb(184, 191, 198);">errno</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">exit</span>(<span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 从完成TCP三次握手的队列中获取client连接</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>((<span style="color: rgb(184, 191, 198);">csk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">accept</span>(<span style="color: rgb(184, 191, 198);">sk</span>,(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> <span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">NULL</span>,<span style="color: rgb(184, 191, 198);">NULL</span>)) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>){</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fprintf</span>(<span style="color: rgb(184, 191, 198);">stderr</span>,<span style="color: rgb(210, 107, 107);">"accept error:%s\n"</span>,<span style="color: rgb(184, 191, 198);">strerror</span>(<span style="color: rgb(184, 191, 198);">errno</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">exit</span>(<span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">memset</span>(<span style="color: rgb(184, 191, 198);">rbuf</span>,<span style="color: rgb(100, 171, 143);">0</span>,<span style="color: rgb(100, 171, 143);">51</span>);&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 重置缓冲区</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">recv</span>(<span style="color: rgb(184, 191, 198);">csk</span>,<span style="color: rgb(184, 191, 198);">rbuf</span>,<span style="color: rgb(100, 171, 143);">50</span>,<span style="color: rgb(100, 171, 143);">0</span>);&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 从socket中读取数据放入缓冲区</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">printf</span>(<span style="color: rgb(210, 107, 107);">"%s\n"</span>,<span style="color: rgb(184, 191, 198);">rbuf</span>);&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 打印接收到的数据</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 关闭客户端和服务端</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">close</span>(<span style="color: rgb(184, 191, 198);">csk</span>);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">close</span>(<span style="color: rgb(184, 191, 198);">sk</span>);&nbsp;</p>
+<p>}</p>
+<p>然后是Java语言的网络编程方式：</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">Server</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">main</span>(<span style="color: rgb(28, 198, 133);">String</span>[] <span style="color: rgb(184, 191, 198);">args</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">byte</span>[] <span style="color: rgb(184, 191, 198);">buffer=</span><span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(28, 198, 133);">byte</span>[<span style="color: rgb(100, 171, 143);">1024</span>]; <span style="color: rgb(218, 146, 74);">// 接收缓冲区</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ServerSocket</span> <span style="color: rgb(184, 191, 198);">serverSocket</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ServerSocket</span>(<span style="color: rgb(184, 191, 198);">DEFAULT_PORT</span>, <span style="color: rgb(184, 191, 198);">BACK_LOG</span>, <span style="color: rgb(132, 182, 203);">null</span>); <span style="color: rgb(218, 146, 74);">// 绑定端口同时创建服务端socket</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Socket</span> <span style="color: rgb(184, 191, 198);">socket</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">serverSocket</span>.<span style="color: rgb(184, 191, 198);">accept</span>();<span style="color: rgb(218, 146, 74);">// 接收客户端请求</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">InputStream</span> <span style="color: rgb(184, 191, 198);">inputStream</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">socket</span>.<span style="color: rgb(184, 191, 198);">getInputStream</span>(); <span style="color: rgb(218, 146, 74);">// 获取输入流对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">inputStream</span>.<span style="color: rgb(184, 191, 198);">read</span>(<span style="color: rgb(184, 191, 198);">buffer</span>); <span style="color: rgb(218, 146, 74);">// 读取数据</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">socket</span>.<span style="color: rgb(184, 191, 198);">close</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">serverSocket</span>.<span style="color: rgb(184, 191, 198);">close</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>好的，我们来融合分析。从源码中我们看到了什么？两者居然完全一致：</p>
+<ol>
+ <li>创建Socket</li>
+ <li>绑定端口</li>
+ <li>接收连接</li>
+ <li>分配缓冲区</li>
+ <li>读取数据</li>
+ <li>关闭连接</li>
+</ol>
+<p>只不过C语言较为复杂，而Java通过JVM将C语言所做的这一切封装了。嗯，就这样，后面我们在分析NIO和Socket原理时大家会看到，底层就是这么做的。</p>
+<p>那么，我都已经知道了就是这样的一个操作，将它用到其他语言的领域，会发生什么呢？读者可以打开其他语言的Socket编程一看便知，也是一模一样。笔者这里只是以网络编程作为例子，读者也可以将这个视角运用到编程语言的其他类库中：线程、IO、集合等等，你会发现那是相同的不要不要的，只是写法不一样罢了。</p>
+<p>那么我们在通过底层的分析到共同点后，通过混沌学习法融合分析，直接看清了编程语言底层的设计实现，这时等同于开启了上帝视角，任何语言的原理，都不会逃过这种宿命：封装系统调用、提供功能类库，那么在使用编程语言时，就不需要再畏惧任何东西，底层相同，只需要熟悉语法，找到你需要的系统调用，进而找到编程语言的封装类库，按照语法调用即可。该混沌视角思想皆可运用在其他方面，比如：金融、医学等等。</p>
+<p><span style="color: rgb(255, 102, 112);">最后：易生两极，两极生四象，四象生八卦，八卦生万物。仔细品味，收益颇多。</span></p>
+<p><br></p></p>
+</body>
+</html>

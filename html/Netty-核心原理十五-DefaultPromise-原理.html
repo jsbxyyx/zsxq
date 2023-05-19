@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理十五 DefaultPromise 原理</h1>
+<p>2022-03-28T07:56:31.888+0800</p>
+<p><p><br></p>
+<p><strong>Promise 原理</strong></p>
+<p>该接口也是一个特殊的Future接口，用于对Future代表的异步任务结果操作。我们看到这里面的两大核心方法：设置成功、设置失败同时保存异常结果。读者需要注意的是：不可重复的设置结果，如果在多线程间设置执行结果，那么可以使用tryXXX方法，因为该方法将不会抛出IllegalStateException异常。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">Promise</span><span style="color: rgb(184, 191, 198);">&lt;V&gt;</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;V&gt;</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 设置当前Future代表的异步任务执行结果完成，同时参数result用于设置结果。如果当前结果已经被设置完成，那么将会抛出无效参数异常</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Promise&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">setSuccess</span>(<span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">result</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 尝试设置当前Future代表的异步任务执行结果完成，同时参数result用于设置结果。如果当前任务已经被设置完成，那么返回false，否则返回true</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">trySuccess</span>(<span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">result</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 设置当前Future代表的异步任务执行失败，同时参数cause用于设置异常信息。如果当前结果已经被设置完成，那么将会抛出无效参数异常</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Promise&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">setFailure</span>(<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 尝试设置当前Future代表的异步任务执行失败，同时参数cause用于设置异常信息。如果当前结果已经被设置完成，那么返回false，否则返回true</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">tryFailure</span>(<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 用于设置该Future代表的异步任务在执行后，是否可以被取消</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">setUncancellable</span>();</p>
+<p>}</p>
+<p><strong>DefaultPromise 原理</strong></p>
+<p>DefaultPromise 为Promise接口的默认实现。在其中完成了所有的接口的实现。方法较多，所以笔者将他们拆开方便读者浏览。</p>
+<p><strong>核心变量与构造器</strong></p>
+<p>通过变量定义我们得知：</p>
+<ol>
+ <li>result异步执行结果由RESULT_UPDATER原子性更新，从而保证线程安全</li>
+ <li>EventExecutor executor事件执行器用于通知监听器</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultPromise</span><span style="color: rgb(184, 191, 198);">&lt;V&gt;</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractFuture&lt;V&gt;</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Promise&lt;V&gt;</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">MAX_LISTENER_STACK_DEPTH</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Math</span>.<span style="color: rgb(184, 191, 198);">min</span>(<span style="color: rgb(100, 171, 143);">8</span>,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SystemPropertyUtil</span>.<span style="color: rgb(184, 191, 198);">getInt</span>(<span style="color: rgb(210, 107, 107);">"io.netty.defaultPromise.maxListenerStackDepth"</span>, <span style="color: rgb(100, 171, 143);">8</span>)); <span style="color: rgb(218, 146, 74);">// 最大监听器栈深度，在调用监听器时使用，用于限制调用</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AtomicReferenceFieldUpdater&lt;DefaultPromise</span>, <span style="color: rgb(28, 198, 133);">Object</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">RESULT_UPDATER</span>; <span style="color: rgb(218, 146, 74);">// 原子性更新结果引用对象（JUC的基础？）</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Signal</span> <span style="color: rgb(184, 191, 198);">SUCCESS</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Signal</span>.<span style="color: rgb(184, 191, 198);">valueOf</span>(<span style="color: rgb(184, 191, 198);">DefaultPromise</span>.<span style="color: rgb(200, 143, 208);">class</span>, <span style="color: rgb(210, 107, 107);">"SUCCESS"</span>); <span style="color: rgb(218, 146, 74);">// 当执行结果为null时，设置的成功对象</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Signal</span> <span style="color: rgb(184, 191, 198);">UNCANCELLABLE</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Signal</span>.<span style="color: rgb(184, 191, 198);">valueOf</span>(<span style="color: rgb(184, 191, 198);">DefaultPromise</span>.<span style="color: rgb(200, 143, 208);">class</span>, <span style="color: rgb(210, 107, 107);">"UNCANCELLABLE"</span>); <span style="color: rgb(218, 146, 74);">// 用于标识当前执行的任务不能够被取消</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">CauseHolder</span> <span style="color: rgb(184, 191, 198);">CANCELLATION_CAUSE_HOLDER</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">CauseHolder</span>(<span style="color: rgb(184, 191, 198);">ThrowableUtil</span>.<span style="color: rgb(184, 191, 198);">unknownStackTrace</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">CancellationException</span>(), <span style="color: rgb(184, 191, 198);">DefaultPromise</span>.<span style="color: rgb(200, 143, 208);">class</span>, <span style="color: rgb(210, 107, 107);">"cancel(...)"</span>)); <span style="color: rgb(218, 146, 74);">// 用于在调用cancel方法时标识取消的占位对象</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 初始化result属性原子操作对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">AtomicReferenceFieldUpdater&lt;DefaultPromise</span>, <span style="color: rgb(28, 198, 133);">Object</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">updater</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">PlatformDependent</span>.<span style="color: rgb(184, 191, 198);">newAtomicReferenceFieldUpdater</span>(<span style="color: rgb(184, 191, 198);">DefaultPromise</span>.<span style="color: rgb(200, 143, 208);">class</span>, <span style="color: rgb(210, 107, 107);">"result"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">RESULT_UPDATER</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">updater</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">AtomicReferenceFieldUpdater</span>.<span style="color: rgb(184, 191, 198);">newUpdater</span>(<span style="color: rgb(184, 191, 198);">DefaultPromise</span>.<span style="color: rgb(200, 143, 208);">class</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">Object</span>.<span style="color: rgb(200, 143, 208);">class</span>, <span style="color: rgb(210, 107, 107);">"result"</span>) : <span style="color: rgb(184, 191, 198);">updater</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">volatile</span> <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">result</span>; <span style="color: rgb(218, 146, 74);">// 代表执行结果</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">executor</span>; <span style="color: rgb(218, 146, 74);">// 用于通知监听器的事件执行器对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">listeners</span>; <span style="color: rgb(218, 146, 74);">// 监听器对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">short</span> <span style="color: rgb(184, 191, 198);">waiters</span>; <span style="color: rgb(218, 146, 74);">// 等待当前任务执行完成的线程数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">notifyingListeners</span>; <span style="color: rgb(218, 146, 74);">// 用于标识当前正在通知监听器</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">DefaultPromise</span>(<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">executor</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">executor</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">checkNotNull</span>(<span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(210, 107, 107);">"executor"</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 静态内部类。用于作为异常信息占位对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">CauseHolder</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">CauseHolder</span>(<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">cause</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">cause</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法await原理</strong></p>
+<p>该方法用于在外部线程调用，响应中断的等待当前异步执行任务完成。流程如下：</p>
+<ol>
+ <li>如果任务已经完成，直接返回</li>
+ <li>如果线程被中断，那么抛出中断异常</li>
+ <li>检测死锁（自己等待自己）</li>
+ <li>在当前Promise对象上等待执行完成</li>
+</ol>
+<p><span style="color: rgb(218, 146, 74);">// 用于检测死锁</span></p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">checkDeadLock</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">e</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">executor</span>(); <span style="color: rgb(218, 146, 74);">// 获取通过构造函数传入的执行器对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">e</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">e</span>.<span style="color: rgb(184, 191, 198);">inEventLoop</span>()) { <span style="color: rgb(218, 146, 74);">// 检测当前线程是否为事件执行器中的线程（自己等待自己？）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">BlockingOperationException</span>(<span style="color: rgb(184, 191, 198);">toString</span>());</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 判断当前任务是否执行完成</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">isDone</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">isDone0</span>(<span style="color: rgb(184, 191, 198);">result</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">isDone0</span>(<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">result</span>) {&nbsp;<span style="color: rgb(218, 146, 74);">// 结果不为空且不为不能取消的占位符</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">result</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">result</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">UNCANCELLABLE</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Promise&lt;V&gt;</span> <span style="color: rgb(141, 141, 240);">await</span>() <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isDone</span>()) { <span style="color: rgb(218, 146, 74);">// 已经完成，直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">interrupted</span>()) { <span style="color: rgb(218, 146, 74);">// 线程被中断，那么抛出中断异常</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span>(<span style="color: rgb(184, 191, 198);">toString</span>());</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">checkDeadLock</span>(); <span style="color: rgb(218, 146, 74);">// 检测死锁</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">synchronized</span> (<span style="color: rgb(200, 143, 208);">this</span>) { <span style="color: rgb(218, 146, 74);">// 等待在当前Promise对象上</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">!isDone</span>()) { <span style="color: rgb(218, 146, 74);">// 仍为完成时等待，同时增加等待线程数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">incWaiters</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wait</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">decWaiters</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>}</p>
+<p><strong>核心方法awaitUninterruptibly原理</strong></p>
+<p>该方法用于在外部线程调用，不响应中断的等待当前异步执行任务完成。流程如下：</p>
+<ol>
+ <li>如果任务已经完成，直接返回</li>
+ <li>检测死锁</li>
+ <li>在当前Promise对象上等待任务执行完成，如果等待过程中线程被中断，那么设置中断标识interrupted</li>
+ <li>在任务执行后，如果设置了interrupted中断标志位，那么调用Thread.currentThread().interrupt()方法重新设置线程标志位</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Promise&lt;V&gt;</span> <span style="color: rgb(141, 141, 240);">awaitUninterruptibly</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isDone</span>()) { <span style="color: rgb(218, 146, 74);">// 已经完成，直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">checkDeadLock</span>(); <span style="color: rgb(218, 146, 74);">// 检测死锁</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">interrupted</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>; <span style="color: rgb(218, 146, 74);">// 标志位用于标识线程在等待过程中被中断</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">synchronized</span> (<span style="color: rgb(200, 143, 208);">this</span>) { <span style="color: rgb(218, 146, 74);">// 等待在当前Promise对象上</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">!isDone</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">incWaiters</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wait</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">InterruptedException</span> <span style="color: rgb(184, 191, 198);">e</span>) { <span style="color: rgb(218, 146, 74);">// 与await()不同，这里捕捉了中断异常同时设置了interrupted标志位</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">interrupted</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">decWaiters</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">interrupted</span>) { <span style="color: rgb(218, 146, 74);">// 由于异常捕捉将会清除中断标志位，所以这里重新设置线程标志位</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">currentThread</span>().<span style="color: rgb(184, 191, 198);">interrupt</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>}</p>
+<p><strong>核心方法cancel原理</strong></p>
+<p>该方法用于取消异步执行的任务，参数mayInterruptIfRunning表示当任务正在执行时，是否通过中断停止执行。我们看到这里直接通过compareAndSet将result结果修改为CANCELLATION_CAUSE_HOLDER，如果修改成功，那么唤醒等待任务执行完成的线程，同时通知监听器。源码描述如下。</p>
+<p><span style="color: rgb(218, 146, 74);">// 如果有等待线程那么唤醒它们</span></p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">synchronized</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">checkNotifyWaiters</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">waiters</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyAll</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">cancel</span>(<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">mayInterruptIfRunning</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">RESULT_UPDATER</span>.<span style="color: rgb(184, 191, 198);">compareAndSet</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(132, 182, 203);">null</span>, <span style="color: rgb(184, 191, 198);">CANCELLATION_CAUSE_HOLDER</span>)) { <span style="color: rgb(218, 146, 74);">// CAS原子性更新</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">checkNotifyWaiters</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyListeners</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>}</p>
+<p><strong>核心方法sync原理</strong></p>
+<p>该方法用于外部线程调用，响应中断异常的等待任务完成，如果任务发生了异常，那么将会把异常抛出。可以看到该方法首先使用前面介绍的await方法等待任务执行完成，然后检测如果导致当前任务执行失败的异常信息存在，那么将其抛出。源码描述如下。</p>
+<p><span style="color: rgb(218, 146, 74);">// 如果导致当前任务执行失败的异常信息存在，那么将其抛出</span></p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">rethrowIfFailed</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">cause</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cause</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">PlatformDependent</span>.<span style="color: rgb(184, 191, 198);">throwException</span>(<span style="color: rgb(184, 191, 198);">cause</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Promise&lt;V&gt;</span> <span style="color: rgb(141, 141, 240);">sync</span>() <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">await</span>(); <span style="color: rgb(218, 146, 74);">// 调用await等待完成</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">rethrowIfFailed</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>}</p>
+<p><strong>核心方法syncUninterruptibly原理</strong></p>
+<p>该方法同sync，只不过这里调用了awaitUninterruptibly而不是await。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Promise&lt;V&gt;</span> <span style="color: rgb(141, 141, 240);">syncUninterruptibly</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">awaitUninterruptibly</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">rethrowIfFailed</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>}</p>
+<p><strong>核心方法setSuccess原理</strong></p>
+<p>该方法用于设置成功执行的结果值。我们看到当result为null时设置SUCCESS作为结果。同时读者可以从源码中看到：如何设置任务不允许被取消？设置UNCANCELLABLE为result，同时在执行完成后将其替换为真实结果。源码描述如下。</p>
+<p><span style="color: rgb(218, 146, 74);">// 根据结果值是否为null来选择是否使用静态变量：SUCCESS来设置执行结果</span></p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">setSuccess0</span>(<span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">result</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">setValue0</span>(<span style="color: rgb(184, 191, 198);">result</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">SUCCESS</span> : <span style="color: rgb(184, 191, 198);">result</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 共用方法，用于原子性设置result结果值</span></p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">setValue0</span>(<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">objResult</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">RESULT_UPDATER</span>.<span style="color: rgb(184, 191, 198);">compareAndSet</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(132, 182, 203);">null</span>, <span style="color: rgb(184, 191, 198);">objResult</span>) <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(218, 146, 74);">// 首先尝试原子性将null修改为objResult</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">RESULT_UPDATER</span>.<span style="color: rgb(184, 191, 198);">compareAndSet</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">UNCANCELLABLE</span>, <span style="color: rgb(184, 191, 198);">objResult</span>)) { <span style="color: rgb(218, 146, 74);">// 上一步失败后，有可能之前设置了UNCANCELLABLE标志位，表示不可取消，那么这里可以尝试将其替换为真实结果</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">checkNotifyWaiters</span>(); <span style="color: rgb(218, 146, 74);">// 成功后唤醒等待线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Promise&lt;V&gt;</span> <span style="color: rgb(141, 141, 240);">setSuccess</span>(<span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">result</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">setSuccess0</span>(<span style="color: rgb(184, 191, 198);">result</span>)) { <span style="color: rgb(218, 146, 74);">// 直接调用setSuccess0完成设置，成功后通知监听器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyListeners</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalStateException</span>(<span style="color: rgb(210, 107, 107);">"complete already: "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(200, 143, 208);">this</span>); <span style="color: rgb(218, 146, 74);">// 如果设置失败，那么表明任务已经被其他线程设置完成，抛出异常</span></p>
+<p>}</p>
+<p><strong>核心方法setFailure原理</strong></p>
+<p>该方法用于设置任务执行异常，但是已经完成。参数cause用于指明导致任务结束执行的异常信息。源码描述如下。</p>
+<p><span style="color: rgb(218, 146, 74);">// 将异常信息包装为CauseHolder对象来设置完成</span></p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">setFailure0</span>(<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">setValue0</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">CauseHolder</span>(<span style="color: rgb(184, 191, 198);">checkNotNull</span>(<span style="color: rgb(184, 191, 198);">cause</span>, <span style="color: rgb(210, 107, 107);">"cause"</span>)));</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Promise&lt;V&gt;</span> <span style="color: rgb(141, 141, 240);">setFailure</span>(<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">setFailure0</span>(<span style="color: rgb(184, 191, 198);">cause</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyListeners</span>(); <span style="color: rgb(218, 146, 74);">// 完成后通知监听器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalStateException</span>(<span style="color: rgb(210, 107, 107);">"complete already: "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">cause</span>); <span style="color: rgb(218, 146, 74);">// 重复设置抛出异常</span></p>
+<p>}</p>
+<p><strong>核心方法trySuccess原理</strong></p>
+<p>该方法用于尝试设置任务的结果值，不过这里不会抛出IllegalStateException异常。可以看到流程一致，只不过在末尾不跑异常而是返回false。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">trySuccess</span>(<span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">result</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">setSuccess0</span>(<span style="color: rgb(184, 191, 198);">result</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyListeners</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>}</p>
+<p><strong>核心方法tryFailure原理</strong></p>
+<p>同trySuccess一样，在设置失败后返回false。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">tryFailure</span>(<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">setFailure0</span>(<span style="color: rgb(184, 191, 198);">cause</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyListeners</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>}</p>
+<p><strong>核心方法addListener原理</strong></p>
+<p>该方法用于向Future中添加监听器对象。流程如下：</p>
+<ol>
+ <li>检测监听器不能为空</li>
+ <li>对当前对象上锁保证线程安全，同时调用addListener0添加监听器</li>
+ <li>添加完成后如果任务已经执行完成，那么通知监听器</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">addListener0</span>(<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?</span> <span style="color: rgb(200, 143, 208);">super</span> <span style="color: rgb(184, 191, 198);">V&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">listener</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 监听器变量为空，那么将当前对象设置为listeners对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listener</span>;</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">DefaultFutureListeners</span>) { <span style="color: rgb(218, 146, 74);">// 监听器对象为默认监听器，那么直接将监听器添加到其中的监听器数组中</span></p>
+<p>&nbsp;&nbsp;&nbsp;((<span style="color: rgb(184, 191, 198);">DefaultFutureListeners</span>) <span style="color: rgb(184, 191, 198);">listeners</span>).<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">listener</span>);</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 否则创建默认监听器对象，同时将当前监听器和目前需要添加的监听器放入其中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultFutureListeners</span>((<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;V&gt;&gt;</span>) <span style="color: rgb(184, 191, 198);">listeners</span>, <span style="color: rgb(184, 191, 198);">listener</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Promise&lt;V&gt;</span> <span style="color: rgb(141, 141, 240);">addListener</span>(<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?</span> <span style="color: rgb(200, 143, 208);">super</span> <span style="color: rgb(184, 191, 198);">V&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">listener</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">checkNotNull</span>(<span style="color: rgb(184, 191, 198);">listener</span>, <span style="color: rgb(210, 107, 107);">"listener"</span>); <span style="color: rgb(218, 146, 74);">// 监听器不能为空</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">synchronized</span> (<span style="color: rgb(200, 143, 208);">this</span>) { <span style="color: rgb(218, 146, 74);">// 保证线程安全</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addListener0</span>(<span style="color: rgb(184, 191, 198);">listener</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isDone</span>()) { <span style="color: rgb(218, 146, 74);">// 添加完成后如果任务已经执行完成，那么通知监听器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyListeners</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>}</p>
+<p>上面我们看到了一个类DefaultFutureListeners，我们继续跟进看看该类的实现原理。通过源码我们可以看到DefaultFutureListeners使用数组来保存监听器，在数组容量不够时通过扩容2倍来存放新的监听器。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultFutureListeners</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;&gt;</span>[] <span style="color: rgb(184, 191, 198);">listeners</span>; <span style="color: rgb(218, 146, 74);">// 监听器数组</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">size</span>;&nbsp;<span style="color: rgb(218, 146, 74);">// 总的监听器个数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">progressiveSize</span>; <span style="color: rgb(218, 146, 74);">// 获取任务执行进度的监听器个数</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">DefaultFutureListeners</span>(<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">first</span>, <span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">second</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建监听器数组，同时将两个监听器放入0和1下标</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">GenericFutureListener</span>[<span style="color: rgb(100, 171, 143);">2</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listeners</span>[<span style="color: rgb(100, 171, 143);">0</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">first</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listeners</span>[<span style="color: rgb(100, 171, 143);">1</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">second</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">2</span>; <span style="color: rgb(218, 146, 74);">// 更新监听器长度</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 根据监听器类型是否为带进度查询的监听器类型来增加progressiveSize计数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">first</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">progressiveSize</span> <span style="color: rgb(184, 191, 198);">++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">second</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">progressiveSize</span> <span style="color: rgb(184, 191, 198);">++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 向监听器数组添加监听器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">l</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;&gt;</span>[] <span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">listeners</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">size</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">listeners</span>.<span style="color: rgb(184, 191, 198);">length</span>) { <span style="color: rgb(218, 146, 74);">// 开辟2倍的数组来添加监听器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Arrays</span>.<span style="color: rgb(184, 191, 198);">copyOf</span>(<span style="color: rgb(184, 191, 198);">listeners</span>, <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">&lt;&lt;</span> <span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listeners</span>[<span style="color: rgb(184, 191, 198);">size</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">l</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 增加监听器计数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">l</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">progressiveSize</span> <span style="color: rgb(184, 191, 198);">++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 返回监听器列表</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;&gt;</span>[] <span style="color: rgb(184, 191, 198);">listeners</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">listeners</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法notifyListeners原理</strong></p>
+<p>该方法我们在前面看到了，该方法用于通知所有监听器。流程如下：</p>
+<ol>
+ <li>获取事件执行器对象</li>
+ <li>如果当前线程属于事件执行器的执行线程，那么检测调用栈深后调用notifyListenersNow通知监听器</li>
+ <li>如果是外部线程调用，那么向事件执行器提交一个Runnable任务来完成通知</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">notifyListeners</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">executor</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">executor</span>(); <span style="color: rgb(218, 146, 74);">// 获取事件执行器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">executor</span>.<span style="color: rgb(184, 191, 198);">inEventLoop</span>()) { <span style="color: rgb(218, 146, 74);">// 当前线程属于事件执行器的执行线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">threadLocals</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">get</span>(); <span style="color: rgb(218, 146, 74);">// 获取TL中的当前线程执行监听器的栈深度</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">stackDepth</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">threadLocals</span>.<span style="color: rgb(184, 191, 198);">futureListenerStackDepth</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">stackDepth</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">MAX_LISTENER_STACK_DEPTH</span>) { <span style="color: rgb(218, 146, 74);">// 如果当前线程通知监听器的次数小于设置的最大栈深，那么增加计数，并通知监听器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">threadLocals</span>.<span style="color: rgb(184, 191, 198);">setFutureListenerStackDepth</span>(<span style="color: rgb(184, 191, 198);">stackDepth</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyListenersNow</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> { <span style="color: rgb(218, 146, 74);">// 调用完成后还原之前的栈深</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">threadLocals</span>.<span style="color: rgb(184, 191, 198);">setFutureListenerStackDepth</span>(<span style="color: rgb(184, 191, 198);">stackDepth</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果超过最大调用深度，那么将不会继续调用监听器</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果是外部线程调用，那么需要通过Runnalbe的任务交给时间执行器线程来处理</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">safeExecute</span>(<span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Runnable</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyListenersNow</span>(); <span style="color: rgb(218, 146, 74);">// 注意这里将不会检测栈深，因为不是同一个线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;});</p>
+<p>}</p>
+<p><strong>核心方法notifyListenersNow原理</strong></p>
+<p>该方法用于通知监听器。流程如下：</p>
+<ol>
+ <li>如果已经正在通知监听器，或者监听为空，那么直接返回，否则设置当前正在通知监听器，同时将全局监听器从成员变量中摘下放入局部变量</li>
+ <li>循环根据监听器类型来通知监听器，直到成员变量为空</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">notifyListenersNow</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">listeners</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">synchronized</span> (<span style="color: rgb(200, 143, 208);">this</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果已经正在通知监听器，或者监听为空，那么直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">notifyingListeners</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 否则设置当前正在通知监听器，同时将全局监听器摘下</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyingListeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">listeners</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) { <span style="color: rgb(218, 146, 74);">// 循环通知监听器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">DefaultFutureListeners</span>) { <span style="color: rgb(218, 146, 74);">// 通知DefaultFutureListeners监听器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyListeners0</span>((<span style="color: rgb(184, 191, 198);">DefaultFutureListeners</span>) <span style="color: rgb(184, 191, 198);">listeners</span>);&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 否则通知GenericFutureListener监听器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyListener0</span>(<span style="color: rgb(200, 143, 208);">this</span>, (<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;V&gt;&gt;</span>) <span style="color: rgb(184, 191, 198);">listeners</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">synchronized</span> (<span style="color: rgb(200, 143, 208);">this</span>) { <span style="color: rgb(218, 146, 74);">// 通知完毕后看看是否还存在监听器，如果不存在，那么直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyingListeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">listeners</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法notifyListeners0原理</strong></p>
+<p>以下两个方法用于执行实际的通知操作。我们看到：</p>
+<ol>
+ <li>在DefaultFutureListeners中，将遍历其中监听器列表来通知监听器（使用notifyListener0(Future future, GenericFutureListener l)方法）</li>
+ <li>在GenericFutureListener中，将会回调监听器的operationComplete方法，同时捕捉了执行异常</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">notifyListeners0</span>(<span style="color: rgb(184, 191, 198);">DefaultFutureListeners</span> <span style="color: rgb(184, 191, 198);">listeners</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">a</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listeners</span>.<span style="color: rgb(184, 191, 198);">listeners</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listeners</span>.<span style="color: rgb(184, 191, 198);">size</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">size</span>; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyListener0</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">a</span>[<span style="color: rgb(184, 191, 198);">i</span>]);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">notifyListener0</span>(<span style="color: rgb(184, 191, 198);">Future</span> <span style="color: rgb(184, 191, 198);">future</span>, <span style="color: rgb(184, 191, 198);">GenericFutureListener</span> <span style="color: rgb(184, 191, 198);">l</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">l</span>.<span style="color: rgb(184, 191, 198);">operationComplete</span>(<span style="color: rgb(184, 191, 198);">future</span>);</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(<span style="color: rgb(210, 107, 107);">"An exception was thrown by "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">l</span>.<span style="color: rgb(184, 191, 198);">getClass</span>().<span style="color: rgb(184, 191, 198);">getName</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">".operationComplete()"</span>, <span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法notifyProgressiveListeners原理</strong></p>
+<p>该方法用于通知可以获取任务进度的监听器，参数progress表示当前任务执行进度，total表示当前任务总进度。流程如下：</p>
+<ol>
+ <li>获取进度监听器列表，若没有监听器，那么直接返回</li>
+ <li>判断当前线程属于事件执行器执行线程，如果不是，那么将流程包装为Runnable任务提交到事件执行器的任务队列，若是执行器线程，那么直接通知监听器</li>
+ <li>根据当前监听器列表数组类型调用对应方法完成通知（也即泛型是否为ProgressiveFuture），最终通知方法为notifyProgressiveListeners0</li>
+</ol>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">notifyProgressiveListeners</span>(<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">progress</span>, <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">total</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">progressiveListeners</span>(); <span style="color: rgb(218, 146, 74);">// 获取进度监听器列表</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 没有监听器，直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ProgressiveFuture&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">self</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">ProgressiveFuture&lt;V&gt;</span>) <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">executor</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">executor</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">executor</span>.<span style="color: rgb(184, 191, 198);">inEventLoop</span>()) { <span style="color: rgb(218, 146, 74);">// 当前线程属于事件执行器执行线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 根据当前监听器列表数组类型调用对应方法完成通知（泛型是否为ProgressiveFuture）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener</span>[]) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyProgressiveListeners0</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">self</span>, (<span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener&lt;?&gt;</span>[]) <span style="color: rgb(184, 191, 198);">listeners</span>, <span style="color: rgb(184, 191, 198);">progress</span>, <span style="color: rgb(184, 191, 198);">total</span>); <span style="color: rgb(218, 146, 74);">// 通知GenericProgressiveFutureListener数组类型</span></p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyProgressiveListener0</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">self</span>, (<span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener&lt;ProgressiveFuture&lt;V&gt;&gt;</span>) <span style="color: rgb(184, 191, 198);">listeners</span>, <span style="color: rgb(184, 191, 198);">progress</span>, <span style="color: rgb(184, 191, 198);">total</span>); <span style="color: rgb(218, 146, 74);">// 通知GenericProgressiveFutureListener&lt;ProgressiveFuture&lt;V&gt;&gt; 数组类型</span></p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {&nbsp;<span style="color: rgb(218, 146, 74);">// 线程不属于事件执行器的执行线程，那么直接将上述流程包装为Runnable任务，由事件执行线程来执行，保证线程安全</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener</span>[]) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">array</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(<span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener&lt;?&gt;</span>[]) <span style="color: rgb(184, 191, 198);">listeners</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">safeExecute</span>(<span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Runnable</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyProgressiveListeners0</span>(<span style="color: rgb(184, 191, 198);">self</span>, <span style="color: rgb(184, 191, 198);">array</span>, <span style="color: rgb(184, 191, 198);">progress</span>, <span style="color: rgb(184, 191, 198);">total</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;});</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener&lt;ProgressiveFuture&lt;V&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">l</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(<span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener&lt;ProgressiveFuture&lt;V&gt;&gt;</span>) <span style="color: rgb(184, 191, 198);">listeners</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">safeExecute</span>(<span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Runnable</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyProgressiveListener0</span>(<span style="color: rgb(184, 191, 198);">self</span>, <span style="color: rgb(184, 191, 198);">l</span>, <span style="color: rgb(184, 191, 198);">progress</span>, <span style="color: rgb(184, 191, 198);">total</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;});</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法progressiveListeners原理</strong></p>
+<p>该方法用于获取任务进度监听器。流程如下：</p>
+<ol>
+ <li>若当前Future的监听器列表对象为空，那么直接返回</li>
+ <li>若监听器列表对象为DefaultFutureListeners，那么将其中的监听器数组中的进度监听器复制到新的数组中并返回</li>
+ <li>若监听器列表对象为GenericProgressiveFutureListener监听器对象，那么直接返回</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">synchronized</span> <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(141, 141, 240);">progressiveListeners</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">listeners</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 当前监听器列表为空</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">DefaultFutureListeners</span>) { <span style="color: rgb(218, 146, 74);">// 监听器列表对象为DefaultFutureListeners，那么将其中的监听器数组中的进度监听器复制到新的数组中并返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">DefaultFutureListeners</span> <span style="color: rgb(184, 191, 198);">dfl</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">DefaultFutureListeners</span>) <span style="color: rgb(184, 191, 198);">listeners</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">progressiveSize</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">dfl</span>.<span style="color: rgb(184, 191, 198);">progressiveSize</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">switch</span> (<span style="color: rgb(184, 191, 198);">progressiveSize</span>) { <span style="color: rgb(218, 146, 74);">// 这里优化了进度监听器为0和1的情况，这时不需要创建数组</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(100, 171, 143);">0</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(100, 171, 143);">1</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">l</span>: <span style="color: rgb(184, 191, 198);">dfl</span>.<span style="color: rgb(184, 191, 198);">listeners</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">l</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">l</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建进度监听器数组，并遍历DefaultFutureListeners监听器列表，找到进度监听器将其放入数组中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">array</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">dfl</span>.<span style="color: rgb(184, 191, 198);">listeners</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">copy</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener</span>[<span style="color: rgb(184, 191, 198);">progressiveSize</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">progressiveSize</span>; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">l</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">array</span>[<span style="color: rgb(184, 191, 198);">i</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">l</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">copy</span>[<span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">++</span>] <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener&lt;?&gt;</span>) <span style="color: rgb(184, 191, 198);">l</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">copy</span>;</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">listeners</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener</span>) { <span style="color: rgb(218, 146, 74);">// 若直接为GenericProgressiveFutureListener监听器对象，那么直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">listeners</span>;</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 其他监听器类型将返回null</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法notifyProgressiveListener0原理</strong></p>
+<p>以下两个notifyProgressiveListeners0方法，根据监听器类型不一样进行回调进度监听器。从源码中很清晰的看到：对于 GenericProgressiveFutureListener&lt;?&gt;[] listeners数组，那么遍历监听器列表调用notifyProgressiveListener0。而对于GenericProgressiveFutureListener l，那么直接在try catch中回调operationProgressed方法即可，通过try catch可以避免调用异常导致当前线程退出。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">notifyProgressiveListeners0</span>(</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ProgressiveFuture&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">future</span>, <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">listeners</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">progress</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">total</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">l</span>: <span style="color: rgb(184, 191, 198);">listeners</span>) { <span style="color: rgb(218, 146, 74);">// 遍历调用</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">l</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyProgressiveListener0</span>(<span style="color: rgb(184, 191, 198);">future</span>, <span style="color: rgb(184, 191, 198);">l</span>, <span style="color: rgb(184, 191, 198);">progress</span>, <span style="color: rgb(184, 191, 198);">total</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">notifyProgressiveListener0</span>(</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ProgressiveFuture</span> <span style="color: rgb(184, 191, 198);">future</span>, <span style="color: rgb(184, 191, 198);">GenericProgressiveFutureListener</span> <span style="color: rgb(184, 191, 198);">l</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">progress</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">total</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">l</span>.<span style="color: rgb(184, 191, 198);">operationProgressed</span>(<span style="color: rgb(184, 191, 198);">future</span>, <span style="color: rgb(184, 191, 198);">progress</span>, <span style="color: rgb(184, 191, 198);">total</span>); <span style="color: rgb(218, 146, 74);">// 单个监听器，直接调用</span></p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(<span style="color: rgb(210, 107, 107);">"An exception was thrown by "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">l</span>.<span style="color: rgb(184, 191, 198);">getClass</span>().<span style="color: rgb(184, 191, 198);">getName</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">".operationProgressed()"</span>, <span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

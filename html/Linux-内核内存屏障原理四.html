@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux 内核内存屏障原理四</h1>
+<p>2022-10-11T13:54:49.695+0800</p>
+<p><p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">屏障与传递性</strong></h2>
+<p><br></p>
+<p>传递性是一个关于执行顺序的非常直观的概念，但真正的计算机系统并不总是提供这种概念。来看如下传递性的例子：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <br>
+ </div>
+ <div class="ql-code-block">
+  CPU 1 &nbsp; &nbsp; &nbsp; CPU 2 &nbsp; &nbsp; CPU 3
+ </div>
+ <div class="ql-code-block">
+  ======================= ======================= =======================
+ </div>
+ <div class="ql-code-block">
+  { X = 0, Y = 0 } // 初始值
+ </div>
+ <div class="ql-code-block">
+  STORE X=1 &nbsp; &nbsp; &nbsp; LOAD X &nbsp; &nbsp; STORE Y=1
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &lt;全屏障&gt; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &lt;全屏障&gt;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; LOAD Y &nbsp; &nbsp; LOAD X
+ </div>
+</div>
+<p>假设 CPU 2 加载 X 的值为 1，加载 Y 的值为 0。这表明 CPU 2 在 CPU 1 写入 X 的新值后 执行了加载 X 的操作，CPU 2 执行 加载 Y 的操作 优先于 CPU 3 写入Y的新值执行。那么问题来了：“CPU 3 在加载 X时，是否获取到 X 的初始值 0？”。</p>
+<p>因为 CPU 2 加载 X 的值 发生在 CPU 1 写 X 值之后，而 CPU 2 加载 Y 又发生在 CPU 3 执行 写 Y 值之前，所以很明显， CPU 3 在读取 X 的值时，将返回新值1。而这个例子正是屏障传递性的例子：如果加载操作在 CPU A 上执行后， CPU B 紧跟其后加载相同的变量，那么 CPU A 和 CPU B 必须对同一个变量加载到相同的值，或者 CPU B 加载到 这个变量在 CPU A 读取后 又被修改的值（如何理解？加载相同的值例子中有了，但是，读者考虑下：若我在 CPU 1 的 STORE X = 1 后面 再加一个 STORE X = 2 呢？此时 顺序为： CPU 1 STORE x = 1， CPU 2 LOAD X CPU 1 STORE x = 2 ，那么此时允许 CPU 3读取到 x = 2 的新值，因为这是正常并发执行的现象！）</p>
+<p>在Linux内核中，使用全屏障来保证传递性。因此，在上述例子中，如果 CPU 2 加载 x 的值返回 1，并且 加载 Y 的值返回 0（保证在并发执行阶段， CPU 2 优先于 CPU 3 执行指令），那么 CPU 3 加载 X 的值，一定为 1。</p>
+<p>来考虑下，如果我们把全屏障换为 读屏障 或者 写屏障 是否还满足这种传递性呢?来看如下例子。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <br>
+ </div>
+ <div class="ql-code-block">
+  CPU 1 &nbsp; &nbsp; &nbsp; CPU 2 &nbsp; &nbsp; CPU 3
+ </div>
+ <div class="ql-code-block">
+  ======================= ======================= =======================
+ </div>
+ <div class="ql-code-block">
+  { X = 0, Y = 0 } // 初始值
+ </div>
+ <div class="ql-code-block">
+  STORE X=1 &nbsp; &nbsp; &nbsp; LOAD X &nbsp; &nbsp; STORE Y=1
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &lt;读屏障&gt; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &lt;全屏障&gt;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; LOAD Y &nbsp; &nbsp; LOAD X
+ </div>
+</div>
+<p>在该例子中，我们在 CPU 2 中将原来的 全屏障 替换为了 读屏障，此时破坏了原有的传递性，这时，将允许 CPU 2 加载 x 为 1，加载 y 为 0， CPU 3 加载 x 返回 0。为什么会这样呢？我们来看，虽然 CPU 2 使用读屏障，保证了它能读到最新的 CPU 1 写入 的 X = 1的值，但是有一种可能：如果 CPU 1 和 CPU 2 共享 store buffer 或者 CPU 缓存【参考下 《混沌专题之并发原理》 的描述】，那么此时 CPU 2 自然能够读到 最新值 1，但 由于 CPU 3还没有同步 该最新值，所以，CPU 3 可能读到 X 的旧值，而当我们使用全屏障时，将会保证在共享缓存时，将数据刷出到内存或者等待其他 CPU 同步新值完成再继续执行加载 Y 操作，此时 因为 值已经完成同步，若加载 Y 为0，那么 CPU 3 看到的 X 一定为 1。读者可以考虑下若 CPU 3 把全屏障 换为 写屏障 或者 读屏障，会如何？</p>
+<p>所以，总结一下：只有全屏障才能保证传递性。</p>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">内核屏障</strong></h2>
+<p><br></p>
+<p>Linux 内核存在以下三种不同的屏障：</p>
+<p>1、编译器屏障（Compiler barrier）</p>
+<p>2、CPU 屏障（CPU memory barriers）</p>
+<p>3、内存端口映射屏障（MMIO write barrier.）</p>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">编译器 屏障</strong></h3>
+<p><br></p>
+<p>Linux 提供了 barrier(); 函数，用于防止编译器对程序经过编译生成的汇编代码的内存访问进行重排序，那么编译器何德何能擅作主张呢？答案是在 编译器 语法树生成后，将其在后端分配寄存器前，会根据特定的目标 ISA CPU 进行CPU 相关的优化，使得生成的机器码能够最高性能的在目标 CPU 中执行。</p>
+<p>注意：barrier(); 屏障为 编译器 全屏障，因为在编译器中不存在屏障种类之分。同时，编译器屏障只会作用域编译器，对CPU乱序执行或者因为 CPU 的 MS （内存子系统）延迟写入和延迟读入的行为不产生任何影响。但，起码我们保证了顺序的第一步：禁止编译器优化。</p>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">CPU 屏障</strong></h3>
+<p><br></p>
+<p>Linux内核提供了 8个 基本的CPU屏障：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  类型 &nbsp; &nbsp; 强制性屏障 &nbsp; &nbsp; &nbsp; &nbsp; SMP对称多处理器定义
+ </div>
+ <div class="ql-code-block">
+  =============== ======================= ===========================
+ </div>
+ <div class="ql-code-block">
+  全屏障 &nbsp; &nbsp; mb() &nbsp; &nbsp; &nbsp; &nbsp; smp_mb()
+ </div>
+ <div class="ql-code-block">
+  写屏障 &nbsp; &nbsp; wmb() &nbsp; &nbsp; &nbsp; &nbsp; smp_wmb()
+ </div>
+ <div class="ql-code-block">
+  读屏障 &nbsp; &nbsp; rmb() &nbsp; &nbsp; &nbsp; &nbsp; smp_rmb()
+ </div>
+ <div class="ql-code-block">
+  数据依赖屏障 &nbsp; read_barrier_depends() smp_read_barrier_depends()
+ </div>
+</div>
+<p>上述所有屏障，除了数据依赖屏障外的所有屏障：全屏障、写屏障、读屏障，都具备编译器屏障的作用。</p>
+<p>另外：在使用数据依赖的场景中，编译器通常应该生成正确的内存访问顺序，例如：编译器在生成 a[b] 的指令时（先加载 b的索引下标，然后访问数组中的内容），应该生成 LOAD b ； LOAD a[b] ；的顺序，然而 C语言规范定义中并没有约束编译器是否能够生成提前预读 b 的值的指令，例如：b 初始值为 1，并且我们执行 tmp = a[1]; if (b != 1) tmp = a[b]; ，此时我们在加载 b 之前先加载了 a，那么编译器可以在访问 a 后，预先加载了 b 变量，此时当前 CPU 读取到 b 的值为 1，但 另外的 CPU 在当前 CPU 执行完 tmp = a[1] 指令后，已经将其改变为了 0，于是当前 CPU 在执行 if (b != 1) 判断时，由于编译器生成的指令预读了b的值，那么当前 CPU 将获取不到 b 的最新值，于是产生了错误的执行结果。对于这个问题还没有达成如何解决的共识，但是 ACCESS_ONCE宏 是解决问题的最好的开始。我们看到该宏使用 C 的 volatile 关键字来让 CPU 禁止对 x 变量进行优化。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  #define ACCESS_ONCE(x) (*(volatile typeof(x) *)&amp;(x)) // 该宏保证了编译器在生成代码时，在每次读取 X 变量时，都生成 load x 的指令，而不是使用上一次的缓存结果，例如上述的例子：保证了 变量 b 每次访问时都会产生 load 指令，不会复用该指令预读的结果，这就不会导致：b的值已经变为 0，但仍然使用 b == 1 的值来进行判断
+ </div>
+</div>
+<p>在单处理器编译的系统上，SMP 屏障被简化为编译器屏障，因为它假定 CPU 执行能自身保证变量访问的一致性，并且它自己会根据自己的特性来对指令进行高效执行，同时能保证程序正确的执行顺序。</p>
+<p>注意：必须使用 SMP 屏障来控制 SMP系统 共享内存的访问顺序，尽管使用 锁机制 就足够了。</p>
+<p>强制性屏障不应该用于控制像 SMP 系统导致重排序的现象（也即不应该用它们在单处理器上，来解决重排序问题，因为处理器本身自己会保证程序执行顺序和可见性），因为强制性屏障增加了不必要地单处理器系统的开销。然而，这些屏障可能被用来控制在松散内存 I/O 操作窗口，使用 MMIO 内存端口映射时对访问的影响。所以，即使在非smp系统上，它们也是必需的，因为它们通过禁止编译器和CPU对内存操作进行重新排序，从而影响设备上出现的内存操作的顺序。例如最开始的那个例子：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  *A = 5; // 设置需要访问 5 所映射的网卡内部寄存器
+ </div>
+ <div class="ql-code-block">
+  x = *D; // 读取数据放入 x 变量
+ </div>
+</div>
+<p>很明显，我们这里通过 MMIO 的方式来操作 IO 设备，我们必须保证 先写 A 再读 D，但我们说过 CPU 可以随意排序只要能保证程序顺序，所以 CPU 可能会先读取 D 地址的值，再写 5，所以尽管我们在单处理器上，还是需要使用屏障来强制CPU 和编译器 保证顺序，尽管这会导致性能下降。</p>
+<p>在内核中，还存在以下的函数来保证顺序性：</p>
+<p>1、set_mb(var, value)</p>
+<p>将 value 赋值给 var 变量，同时插入一个全屏障。注意：在单处理器上只会插入一个编译器屏障。</p>
+<p>2、smp_mb<strong style="color: rgb(222, 222, 222);">before_atomic_dec()、smp_mb</strong>after_atomic_dec()、smp_mb<strong style="color: rgb(222, 222, 222);">before_atomic_inc()、smp_mb</strong>after_atomic_inc()</p>
+<p>该系列函数通常与执行原子性的 加、减、递增、递减操作联合使用，将不会有任何返回值，这些函数的调用并不代表一定会产生内存屏障（请查看内核源码，可以很明显发现：当CPU 本身支持原子性指令，能够保证原子性的顺序时，我们根本不需要任何 CPU 屏障，有的仅仅只是编译器屏障）。来看一个例子：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  obj-&gt;dead = 1;
+ </div>
+ <div class="ql-code-block">
+  smp_mb__before_atomic_dec();
+ </div>
+ <div class="ql-code-block">
+  atomic_dec(&amp;obj-&gt;ref_count);
+ </div>
+</div>
+<p>此时，我们通过 smp_mb__before_atomic_dec() 函数可以保证 obj-&gt;dead = 1 的写操作结果 全局可见，也即当 其他CPU 观测到 &amp;obj-&gt;ref_count 被递减后，一定能看到 obj-&gt;dead = 1。</p>
+<p>3、smp_mb<strong style="color: rgb(222, 222, 222);">before_clear_bit(void) 与 smp_mb</strong>after_clear_bit(void)</p>
+<p>这两个函数的用途类似于上述的原子性 inc / dec 屏障。通常用于位解锁操作，这里通常并不意味一定存在内存屏障（也即：CPU 本身指令保证了顺序性，那么会增加一个编译器屏障）。来看使用代码：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  smp_mb__before_clear_bit();
+ </div>
+ <div class="ql-code-block">
+  clear_bit( ... );
+ </div>
+</div>
+<p>我们在清除某个变量中的对应位时，使用 smp_mb__before_clear_bit 函数，这可以防止清除对应位之前的内存操作重排序到清除位操作之后。</p>
+<p>在这里为了避免读者疑惑，我们来看 在 i386 上清除变量位的操作，看如下代码，很明显了吧，smp上增加 lock 前缀，而这个前缀本身就保证了顺序性。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  static __inline__ void clear_bit(int nr, volatile unsigned long * addr)
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  __asm__ __volatile__( LOCK_PREFIX
+ </div>
+ <div class="ql-code-block">
+  "btrl %1,%0"
+ </div>
+ <div class="ql-code-block">
+  :"=m" (ADDR)
+ </div>
+ <div class="ql-code-block">
+  :"Ir" (nr));
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">MMIO 写屏障</strong></h3>
+<p><br></p>
+<p>内核提供了如下函数来提供了特殊的 MMIO 的写屏障功能：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  mmiowb();
+ </div>
+</div>
+<p>该函数为 强制性写屏障的弱化版本，仅保证部分写入顺序，与数据依赖屏障和读屏障的功能类似，为对方的弱化版本。我们来看 x86 上的 该函数实现，看如下代码，退化为了编译器屏障，为何？混沌专题我们说了：intel 的in / out 指令本身能保证顺序。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  #define mmiowb() barrier()
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">隐式内核内存屏障</strong></h2>
+<p><br></p>
+<p>在 linux 内核中存在一些隐含内存屏障语义的函数，比如：锁操作、调度函数。这些函数的内部实现，将在任何处理器平台上支持屏障语义，但，有时候我们并不需要这些函数，所以不能用这些操作来代替上述的强制性屏障和SMP屏障。</p>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">锁操作</strong></h3>
+<p><br></p>
+<p>内核提供如下几种锁操作：</p>
+<p>1、spin locks 自旋锁</p>
+<p>2、R/W spin locks 读写自旋锁</p>
+<p>3、mutexes 互斥量</p>
+<p>4、semaphores 信号量</p>
+<p>5、R/W semaphores 读写信号量</p>
+<p>6、RCU 锁</p>
+<p>在所有使用这些锁操作的代码中，LOCK 获取锁 和 UNLOCK 释放锁 操作都隐含着内存屏障：</p>
+<p>1、获取锁操作的内存屏障含义</p>
+<p>在 LOCK 操作 之后 执行的内存操作将在 LOCK 锁操作 完成 后 完成，也即不允许 LOCK 后的操作重排序到 LOCK 之前。</p>
+<p>在 LOCK 操作 之前 执行的内存操作可以在 LOCK 操作 完成 后 完成，也即允许 LOCK 操作前的操作重排序到 LOCK 操作 之后。</p>
+<p>例如：STORE A ; LOAD B ; LOCK ; STORE C ; LOAD D ; ，那么允许：LOCK ; STORE A ; LOAD B ; STORE C ; LOAD D ;</p>
+<p>2、释放锁操作的内存屏障含义</p>
+<p>在 UNLOCK 操作 之前 执行的内存操作 将在 UNLOCK 操作完成 之前 完成。</p>
+<p>在 UNLOCK 操作 之后 执行的内存操作 可以在 UNLOCK 操作完成 之前 完成，也即允许 UNLOCK 之后的内存操作重排序到 UNLOCK 前面。</p>
+<p>例如：STORE A ; LOAD B ; UNLOCK ; STORE C ; LOAD D ; ，那么允许：STORE A ; LOAD B ; STORE C ; LOAD D ; UNLOCK ;</p>
+<p>3、LOCK 操作 与 LOCK 操作的含义</p>
+<p>在 另一个 LOCK 操作 之前 执行的所有 LOCK 操作 将在该 LOCK 操作 之前 完成。</p>
+<p>4、LOCK 操作 与 UNLOCK 操作的含义</p>
+<p>在 UNLOCK 操作 之前 执行的所有 LOCK 操作将在 UNLOCK 操作 之前 完成。</p>
+<p>在 LOCK 操作 之前 执行的所有 UNLOCK 操作将在 LOCK 操作 之前完成。</p>
+<p>5、获取锁失败含义</p>
+<p>LOCK 操作的某些变体函数可能会获取锁失败，要么是因为无法立即获得锁，要么是因为在等待锁可用时进行阻塞，然后接收了未阻塞的信号而唤醒。获取锁失败并保证包含任何内存屏障。</p>
+<p>因此，从 1，2 和 4 中的定义中我们可以看到：一个 UNLOCK 操作 后面跟着一个 LOCK 操作 就相当于一个 全屏障，而一个 LOCK 后面跟着一个 UNLOCK 操作就不是。例如：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  因为：
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  STORE A ; LOAD B ;
+ </div>
+ <div class="ql-code-block">
+  UNLOCK ;
+ </div>
+ <div class="ql-code-block">
+  STORE C ; LOAD D ;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  允许：
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  STORE A ; LOAD B ; STORE C ; LOAD D ;
+ </div>
+ <div class="ql-code-block">
+  UNLOCK ;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  而又由于：
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  STORE A ; LOAD B ;
+ </div>
+ <div class="ql-code-block">
+  LOCK ;
+ </div>
+ <div class="ql-code-block">
+  STORE C ; LOAD D ;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  允许：
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  LOCK ;
+ </div>
+ <div class="ql-code-block">
+  STORE A ; LOAD B ; STORE C ; LOAD D ;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  于是：
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  STORE A ; LOAD B ;
+ </div>
+ <div class="ql-code-block">
+  UNLOCK ; LOCK ; &nbsp; // LOCK 保证 STORE C ; LOAD D ; 不会重排序到 LOCK 之前，UNLOCK 保证 STORE A ; LOAD B ; 不会重排序到 UNLOCK之后
+ </div>
+ <div class="ql-code-block">
+  STORE C ; LOAD D ;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  但：
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  STORE A ; LOAD B ;
+ </div>
+ <div class="ql-code-block">
+  LOCK ; UNLOCK ; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  STORE C ; LOAD D ;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  此时允许：
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  LOCK;
+ </div>
+ <div class="ql-code-block">
+  STORE A ; LOAD B ;
+ </div>
+ <div class="ql-code-block">
+  STORE C ; LOAD D ;
+ </div>
+ <div class="ql-code-block">
+  UNLOCK ; &nbsp;
+ </div>
+</div>
+<p>所以我们总结下：当使用 LOCK 和 UNLOCK 操作时，临界区以外的指令的影响可能会渗透到临界区内部。例如：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  STORE A ; LOAD B ;
+ </div>
+ <div class="ql-code-block">
+  LOCK ;
+ </div>
+ <div class="ql-code-block">
+  STORE E ; LOAD H ;
+ </div>
+ <div class="ql-code-block">
+  UNLOCK ; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  STORE C ; LOAD D ;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  那么允许：
+ </div>
+ <div class="ql-code-block">
+  LOCK ;
+ </div>
+ <div class="ql-code-block">
+  STORE A ; LOAD B ;
+ </div>
+ <div class="ql-code-block">
+  STORE E ; LOAD H ;
+ </div>
+ <div class="ql-code-block">
+  STORE C ; LOAD D ;
+ </div>
+ <div class="ql-code-block">
+  UNLOCK ; &nbsp;
+ </div>
+</div>
+<p>后面跟着 UNLOCK 操作的 LOCK 操作 不能被认为是全屏障，因为在 LOCK之前 的 内存操作 可能发生在 LOCK 之后，在UNLOCK 之后的 内存操作 可能发生在 UNLOCK 之前，并且这两个内存操作可以自由交叉，再比如：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  *A = a;
+ </div>
+ <div class="ql-code-block">
+  LOCK
+ </div>
+ <div class="ql-code-block">
+  UNLOCK
+ </div>
+ <div class="ql-code-block">
+  *B = b;
+ </div>
+</div>
+<p>可能有如下顺序：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  LOCK, STORE *B, STORE *A, UNLOCK
+ </div>
+</div>
+<p>锁 和 信号量 可能无法在指定 单处理器编译 的系统上 提供任何 顺序性 的保证，因此在这种情况下不能指望实际实现任何东西——特别是在I/O访问方面（IO方面对顺序性要求十分严格，请参考 混沌专题之并发原理 ）——除非结合 中断禁用 操作。例如：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  *A = a;
+ </div>
+ <div class="ql-code-block">
+  *B = b;
+ </div>
+ <div class="ql-code-block">
+  LOCK;
+ </div>
+ <div class="ql-code-block">
+  *C = c;
+ </div>
+ <div class="ql-code-block">
+  *D = d;
+ </div>
+ <div class="ql-code-block">
+  UNLOCK;
+ </div>
+ <div class="ql-code-block">
+  *E = e;
+ </div>
+ <div class="ql-code-block">
+  *F = f;
+ </div>
+</div>
+<p>以下的操作顺序是可能发生的，其中：{<em>F，</em>A} 表示 内存组合 访问。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  LOCK, {*F,*A}, *E, {*C,*D}, *B, UNLOCK
+ </div>
+</div>
+<p>但不允许以下任何违背 LOCK 和 UNLOCK 的规则的操作：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  {*F,*A}, *B, LOCK, *C, *D, UNLOCK, *E
+ </div>
+ <div class="ql-code-block">
+  *A, *B, *C, LOCK, *D, UNLOCK, *E, *F
+ </div>
+ <div class="ql-code-block">
+  *A, *B, LOCK, *C, UNLOCK, *D, *E, *F
+ </div>
+ <div class="ql-code-block">
+  *B, LOCK, *C, *D, UNLOCK, {*F,*A}, *E
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">中断禁止操作</strong></h3>
+<p><br></p>
+<p>禁用中断（相当于 LOCK 操作）和 启用中断（相当于 UNLOCK 操作）的函数将仅作为编译器屏障。因此，如果在这种情况下需要 CPU 屏障 或 I/O 屏障，则必须通过其他方式提供它们。</p>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">进程睡眠 和 进程唤醒函数</strong></h3>
+<p><br></p>
+<p>进程在 共享全局共享数据 中争用资源时，由于获取不到资源，那么进行睡眠，并且在资源可用时被唤醒，这两个操作可以被视为两段数据之间的交互：等待资源的任务状态、表示共享资源数据结构。为了确保这些看起来是按照正确的顺序发生的，进程进入睡眠过程的操作 和 唤醒进程的操作 意味着屏障语义。</p>
+<p>首先，获取不到资源时，导致进程睡眠时将会执行如下操作：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  for (;;) {
+ </div>
+ <div class="ql-code-block">
+  set_current_state(TASK_UNINTERRUPTIBLE); // 设置 任务状态 阻塞状态
+ </div>
+ <div class="ql-code-block">
+  if (event_indicated) // 事件发生，也即：资源可用
+ </div>
+ <div class="ql-code-block">
+  break;
+ </div>
+ <div class="ql-code-block">
+  schedule();
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+ </div>
+ <div class="ql-code-block">
+  #define set_task_state(tsk, state_value) // 直接使用 set_mb 设置值后使用全屏障
+ </div>
+ <div class="ql-code-block">
+  set_mb((tsk)-&gt;state, (state_value))
+ </div>
+</div>
+<p>全屏障会在 set_current_state() 改变任务状态后自动插入：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1
+ </div>
+ <div class="ql-code-block">
+  ===============================
+ </div>
+ <div class="ql-code-block">
+  set_current_state();
+ </div>
+ <div class="ql-code-block">
+  &nbsp;set_mb(); // 调用上面介绍的函数，内部执行以下操作：
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;STORE current-&gt;state // 保存任务状态
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;&lt;general barrier&gt; // 插入全屏障（保证上述状态 提交到内存，同时读取最新的 event_indicated 状态）
+ </div>
+ <div class="ql-code-block">
+  LOAD event_indicated // 加载事件
+ </div>
+</div>
+<p>set_current_state() 函数将可能包装在以下函数中：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  prepare_to_wait();
+ </div>
+ <div class="ql-code-block">
+  prepare_to_wait_exclusive();
+ </div>
+</div>
+<p>因此，这也意味着设置状态后会有一个全屏障。进程等待有各种各样的封装方式，但它们都在正确的地方插入了内存屏障：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  wait_event();
+ </div>
+ <div class="ql-code-block">
+  wait_event_interruptible();
+ </div>
+ <div class="ql-code-block">
+  wait_event_interruptible_exclusive();
+ </div>
+ <div class="ql-code-block">
+  wait_event_interruptible_timeout();
+ </div>
+ <div class="ql-code-block">
+  wait_event_killable();
+ </div>
+ <div class="ql-code-block">
+  wait_event_timeout();
+ </div>
+ <div class="ql-code-block">
+  wait_on_bit();
+ </div>
+ <div class="ql-code-block">
+  wait_on_bit_lock();
+ </div>
+</div>
+<p>接下来我们来看进程唤醒函数：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  event_indicated = 1; // 设置资源可用
+ </div>
+ <div class="ql-code-block">
+  wake_up(&amp;event_wait_queue); // 唤醒进程
+ </div>
+</div>
+<p>或者也可调用如下函数：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  event_indicated = 1;
+ </div>
+ <div class="ql-code-block">
+  wake_up_process(event_daemon);
+ </div>
+</div>
+<p>当且我们因为资源可用从而设置资源后唤醒进程时，写屏障语义 由 wake_up() 及其类似函数提供。按照写屏障约束，我们需要把 写屏障 要被放置在 进程状态被设置之前（保证写屏障前的操作提交到内存），因此 写屏障 需要位于用来指示事件的写操作 和 设置进程状态为 TASK_RUNNING 的 写操作 之间：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============================== ===============================
+ </div>
+ <div class="ql-code-block">
+  set_current_state(); &nbsp; STORE event_indicated
+ </div>
+ <div class="ql-code-block">
+  set_mb(); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; wake_up();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; STORE current-&gt;state &nbsp; &nbsp; &lt;write barrier&gt; // 写屏障保证在写current-&gt;state前，资源可用提交内存
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &lt;general barrier&gt; &nbsp; &nbsp; STORE current-&gt;state
+ </div>
+ <div class="ql-code-block">
+  LOAD event_indicated
+ </div>
+</div>
+<p>唤醒函数的操作有如下几种变体：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  complete();
+ </div>
+ <div class="ql-code-block">
+  wake_up();
+ </div>
+ <div class="ql-code-block">
+  wake_up_all();
+ </div>
+ <div class="ql-code-block">
+  wake_up_bit();
+ </div>
+ <div class="ql-code-block">
+  wake_up_interruptible();
+ </div>
+ <div class="ql-code-block">
+  wake_up_interruptible_all();
+ </div>
+ <div class="ql-code-block">
+  wake_up_interruptible_nr();
+ </div>
+ <div class="ql-code-block">
+  wake_up_interruptible_poll();
+ </div>
+ <div class="ql-code-block">
+  wake_up_interruptible_sync();
+ </div>
+ <div class="ql-code-block">
+  wake_up_interruptible_sync_poll();
+ </div>
+ <div class="ql-code-block">
+  wake_up_locked();
+ </div>
+ <div class="ql-code-block">
+  wake_up_locked_poll();
+ </div>
+ <div class="ql-code-block">
+  wake_up_nr();
+ </div>
+ <div class="ql-code-block">
+  wake_up_poll();
+ </div>
+ <div class="ql-code-block">
+  wake_up_process();
+ </div>
+</div>
+<p>注意，对于需要睡眠的进程在 调用 set_current_state() 函数之后对这些 共享变量 的加载操作，由 睡眠进程 和 唤醒进程 所隐含的内存屏障语义，不能保证在 唤醒睡眠进程之前 使用 多个STORE 操作的变量值保证可见。例如，如果睡眠进程这样执行：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  for:
+ </div>
+ <div class="ql-code-block">
+  set_current_state(TASK_INTERRUPTIBLE);
+ </div>
+ <div class="ql-code-block">
+  if (event_indicated)
+ </div>
+ <div class="ql-code-block">
+  break;
+ </div>
+ <div class="ql-code-block">
+  __set_current_state(TASK_RUNNING); // 设置进程状态为 TASK_RUNNING 运行态
+ </div>
+ <div class="ql-code-block">
+  do_something(my_data); // 读取共享变量（此时可能读不到 my_data 的新值）
+ </div>
+ <div class="ql-code-block">
+ </div>
+ <div class="ql-code-block">
+  #define __set_current_state(state_value) // 该宏不会使用屏障语义
+ </div>
+ <div class="ql-code-block">
+  do { current-&gt;state = (state_value); } while (0)
+ </div>
+</div>
+<p>并且唤醒进程执行：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  my_data = value; // 写共享变量
+ </div>
+ <div class="ql-code-block">
+  event_indicated = 1; // 写资源可用
+ </div>
+ <div class="ql-code-block">
+  wake_up(&amp;event_wait_queue);
+ </div>
+</div>
+<p>不能保证对 event_indicate 变量的更改，会在对 my_data 变量的更改之后被睡眠进程感知。在这种情况下，两边的代码必须在单独的数据访问之间插入自己的内存屏障。因此，上面的睡眠进程应该这样做：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  set_current_state(TASK_INTERRUPTIBLE);
+ </div>
+ <div class="ql-code-block">
+  if (event_indicated) {
+ </div>
+ <div class="ql-code-block">
+  smp_rmb(); // 读屏障保证读取到 my_data 的 最新值（标准的 SMP 屏障对的使用）
+ </div>
+ <div class="ql-code-block">
+  do_something(my_data);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p>并且唤醒进程应该这样做：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  my_data = value;
+ </div>
+ <div class="ql-code-block">
+  smp_wmb(); // 使用写屏障，保证 STORE event_indicated 执行前，完成 STORE my_data 的内存提交
+ </div>
+ <div class="ql-code-block">
+  event_indicated = 1;
+ </div>
+ <div class="ql-code-block">
+  wake_up(&amp;event_wait_queue);
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">其他函数</strong></h3>
+<p><br></p>
+<p>schedule() 调度函数 和 其他类似的调度方法都隐含着全屏障的功能。</p>
+<p><br></p></p>
+</body>
+</html>

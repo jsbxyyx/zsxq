@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理十一 SingleThreadEventLoop 原理</h1>
+<p>2022-03-15T08:01:12.859+0800</p>
+<p><p><strong>OioEventLoopGroup 原理</strong></p>
+<p>该类非常简单，实际没有完成任何操作，仅仅只是在构造函数中初始化父类。主要用于在命名上符合Netty对于事件循环组的定义规范。比如：NIO的为：NioEventLoopGroup、BIO：OioEventLoopGroup。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">OioEventLoopGroup</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ThreadPerChannelEventLoopGroup</span> {</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">OioEventLoopGroup</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">OioEventLoopGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxChannels</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">maxChannels</span>, <span style="color: rgb(184, 191, 198);">Executors</span>.<span style="color: rgb(184, 191, 198);">defaultThreadFactory</span>());</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">OioEventLoopGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxChannels</span>, <span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">maxChannels</span>, <span style="color: rgb(184, 191, 198);">executor</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">OioEventLoopGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxChannels</span>, <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">maxChannels</span>, <span style="color: rgb(184, 191, 198);">threadFactory</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>SingleThreadEventLoop 原理</strong></p>
+<p>该类表示一个单线程执行的事件循环对象，同样大部分操作已经在SingleThreadEventExecutor中实现。这里主要添加了自己的Queue<span style="color: inherit;">&lt;Runnable&gt;</span> tailTasks任务队列的处理，同时实现了EventLoop中register函数的实现。</p>
+<p><strong>核心变量与构造器</strong></p>
+<p>从核心变量和构造器中我们看到，该类主要新增的操作为Queue<span style="color: inherit;">&lt;Runnable&gt;</span> tailTasks队列操作。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">SingleThreadEventLoop</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">SingleThreadEventExecutor</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">EventLoop</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">DEFAULT_MAX_PENDING_TASKS</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Math</span>.<span style="color: rgb(184, 191, 198);">max</span>(<span style="color: rgb(100, 171, 143);">16</span>, <span style="color: rgb(184, 191, 198);">SystemPropertyUtil</span>.<span style="color: rgb(184, 191, 198);">getInt</span>(<span style="color: rgb(210, 107, 107);">"io.netty.eventLoop.maxPendingTasks"</span>, <span style="color: rgb(28, 198, 133);">Integer</span>.<span style="color: rgb(184, 191, 198);">MAX_VALUE</span>)); <span style="color: rgb(218, 146, 74);">// tailTasks队列中最大放置的任务长度</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Queue&lt;Runnable&gt;</span> <span style="color: rgb(184, 191, 198);">tailTasks</span>; <span style="color: rgb(218, 146, 74);">// 放置tail任务的队列。也即在taskQueue普通任务队列执行后，需要执行的任务</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造方法：设置了默认为DEFAULT_MAX_PENDING_TASKS和拒绝函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">SingleThreadEventLoop</span>(<span style="color: rgb(184, 191, 198);">EventLoopGroup</span> <span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>, <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">addTaskWakesUp</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">threadFactory</span>, <span style="color: rgb(184, 191, 198);">addTaskWakesUp</span>, <span style="color: rgb(184, 191, 198);">DEFAULT_MAX_PENDING_TASKS</span>, <span style="color: rgb(184, 191, 198);">RejectedExecutionHandlers</span>.<span style="color: rgb(184, 191, 198);">reject</span>());</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造方法：初始化父类同时创建tailTasks队列</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">SingleThreadEventLoop</span>(<span style="color: rgb(184, 191, 198);">EventLoopGroup</span> <span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">addTaskWakesUp</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxPendingTasks</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">RejectedExecutionHandler</span> <span style="color: rgb(184, 191, 198);">rejectedExecutionHandler</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">threadFactory</span>, <span style="color: rgb(184, 191, 198);">addTaskWakesUp</span>, <span style="color: rgb(184, 191, 198);">maxPendingTasks</span>, <span style="color: rgb(184, 191, 198);">rejectedExecutionHandler</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tailTasks</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newTaskQueue</span>(<span style="color: rgb(184, 191, 198);">maxPendingTasks</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法next原理</strong></p>
+<p>该方法直接调用父类的next方法来获取下一个EventLoop对象。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(141, 141, 240);">next</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> (<span style="color: rgb(184, 191, 198);">EventLoop</span>) <span style="color: rgb(200, 143, 208);">super</span>.<span style="color: rgb(184, 191, 198);">next</span>();</p>
+<p>}</p>
+<p><strong>核心方法executeAfterEventLoopIteration原理</strong></p>
+<p>该方法用于添加任务到tailTasks队列中。流程如下：</p>
+<ol>
+ <li>检查EventLoop是否已经关闭，如果关闭，那么抛出任务拒绝异常</li>
+ <li>尝试将任务放入tailTasks中，如果达到最大长度，导致放入失败，那么抛出任务拒绝异常</li>
+ <li>根据设置唤醒工作任务线程</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">executeAfterEventLoopIteration</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ObjectUtil</span>.<span style="color: rgb(184, 191, 198);">checkNotNull</span>(<span style="color: rgb(184, 191, 198);">task</span>, <span style="color: rgb(210, 107, 107);">"task"</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isShutdown</span>()) { <span style="color: rgb(218, 146, 74);">// 检查EventLoop是否已经关闭</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">reject</span>();</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!tailTasks</span>.<span style="color: rgb(184, 191, 198);">offer</span>(<span style="color: rgb(184, 191, 198);">task</span>)) { <span style="color: rgb(218, 146, 74);">// 尝试将任务放入tailTasks中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">reject</span>(<span style="color: rgb(184, 191, 198);">task</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">wakesUpForTask</span>(<span style="color: rgb(184, 191, 198);">task</span>)) { <span style="color: rgb(218, 146, 74);">// 根据设置唤醒工作任务线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wakeup</span>(<span style="color: rgb(184, 191, 198);">inEventLoop</span>());</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法afterRunningAllTasks原理</strong></p>
+<p>在SingleThreadEventExecutor类的runAllTasks方法中，我们看到该方法将作为钩子函数来执行，当所有taskQueue中的任务都执行完毕后，会回调该钩子函数。我们看到这里重写了该方法，将执行tailTasks队列中的任务。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">afterRunningAllTasks</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">runAllTasksFrom</span>(<span style="color: rgb(184, 191, 198);">tailTasks</span>);</p>
+<p>}</p>
+<p><strong>核心方法register原理</strong></p>
+<p>register方法用于将Channel注册到当前EventLoop中。我们看到这里将封装ChannelPromise对象后，调用Channel的unsafe对象的register方法来完成注册。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(141, 141, 240);">register</span>(<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">channel</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultChannelPromise</span>(<span style="color: rgb(184, 191, 198);">channel</span>, <span style="color: rgb(200, 143, 208);">this</span>));</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(141, 141, 240);">register</span>(<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ObjectUtil</span>.<span style="color: rgb(184, 191, 198);">checkNotNull</span>(<span style="color: rgb(184, 191, 198);">promise</span>, <span style="color: rgb(210, 107, 107);">"promise"</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">promise</span>.<span style="color: rgb(184, 191, 198);">channel</span>().<span style="color: rgb(184, 191, 198);">unsafe</span>().<span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">promise</span>); <span style="color: rgb(218, 146, 74);">// 注册通道</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">promise</span>;</p>
+<p>}</p>
+<p><strong>核心方法hasTasks原理</strong></p>
+<p>该方法用于判断是否有任务需要执行。注意这里需要判断父类的taskQueue和当前tailTasks。源码描述如下。</p>
+<p><span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">hasTasks</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">super</span>.<span style="color: rgb(184, 191, 198);">hasTasks</span>() <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">!tailTasks</span>.<span style="color: rgb(184, 191, 198);">isEmpty</span>();</p>
+<p>}</p>
+<p><strong>核心方法pendingTasks原理</strong></p>
+<p>该方法用于获取当前需要执行的任务个数。可以看到任务个数等于：父类taskQueue的任务数+tailTasks的任务数。源码描述如下。</p>
+<p><span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">pendingTasks</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">super</span>.<span style="color: rgb(184, 191, 198);">pendingTasks</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">tailTasks</span>.<span style="color: rgb(184, 191, 198);">size</span>();</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

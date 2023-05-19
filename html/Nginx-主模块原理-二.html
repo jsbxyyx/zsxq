@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Nginx 主模块原理 二</h1>
+<p>2022-09-08T18:13:14.829+0800</p>
+<p><p><strong style="font-size: 1.5em;font-style;font-variant-ligatures;font-variant-caps; color: rgb(38, 38, 38);">ngx_event_core_module 模块</strong></p>
+<p><br></p>
+<p>该模块核心功能非常简单：创建 <a href="http://nginx.conf" target="_blank">nginx.conf</a> events 块中的配置信息，同时赋值给 事件循环 结构，然后根据配置信息检测系统是否支持所配置的多路复用器。同时该结构存在 init module 和 init process 回调，在回调中将会调用事件处理模块的对应回调函数。同时每个连接都将包装在 ngx_connection_t 结构中，事件结构 ngx_event_t 将用于表示注册到 多路复用器的事件类型信息。源码如下。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 注意这里存在：init module（初始化事件循环结构时，此时子进程未启动，调用） 和 init process（当子进程创建成功后回调） 回调</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">ngx_module_t</span> &nbsp;ngx_event_core_module = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;NGX_MODULE_V1,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;&amp;ngx_event_core_module_ctx, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* module context */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_event_core_commands, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* module directives */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;NGX_EVENT_MODULE, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* module type */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init master */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_event_module_init, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* init module */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_event_process_init, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init process */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init thread */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit thread */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit process */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit master */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;NGX_MODULE_V1_PADDING
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 拥有创建和初始化 conf 的回调函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_event_module_t</span> &nbsp;ngx_event_core_module_ctx = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;&amp;event_core_name,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_event_core_create_conf, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* create configuration */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_event_core_init_conf, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init configuration */</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; { <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-literal">NULL</span> }
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 忽略掉其他配置，默认 nginx.conf 只有该配置项</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_command_t</span> &nbsp;ngx_event_core_commands[] = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; { ngx_string(<span class="ql-token hljs-string">"worker_connections"</span>), <span class="ql-token hljs-comment">// 解析到 events 模块的该字符串时回调</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; NGX_EVENT_CONF|NGX_CONF_TAKE1,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; ngx_event_connections,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-number">0</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-number">0</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-literal">NULL</span> },
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 创建配置结构，可以看到这里同样先分配空间，然后初始化为初始值（通常为无效值 -1）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> * <span class="ql-token hljs-title">ngx_event_core_create_conf(ngx_cycle_t *cycle)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_event_conf_t</span> &nbsp;*ecf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ecf = ngx_palloc(cycle-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_event_conf_t</span>));
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ecf == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ecf-&gt;connections = NGX_CONF_UNSET_UINT;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ecf-&gt;use = NGX_CONF_UNSET_UINT;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ecf-&gt;multi_accept = NGX_CONF_UNSET;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ecf-&gt;accept_mutex = NGX_CONF_UNSET;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ecf-&gt;accept_mutex_delay = NGX_CONF_UNSET_MSEC;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ecf-&gt;name = (<span class="ql-token hljs-type">void</span> *) NGX_CONF_UNSET;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> ecf;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 初始化该模块的配置项为默认值</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">char</span> * <span class="ql-token hljs-title">ngx_event_core_init_conf(ngx_cycle_t *cycle, void *conf)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_event_conf_t</span> &nbsp;*ecf = conf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-meta">#if (NGX_HAVE_EPOLL) &amp;&amp; !(NGX_TEST_BUILD_EPOLL) // 配置使用了epoll，那么保存epoll fd</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-type">int</span> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;fd;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_int_t</span> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;i;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_module_t</span> &nbsp; &nbsp; &nbsp; &nbsp;*module;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_event_module_t</span> &nbsp;*event_module;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;module = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-meta">#if (NGX_HAVE_EPOLL) &amp;&amp; !(NGX_TEST_BUILD_EPOLL) // 创建 epoll fd（注意：该 fd 不使用哈，仅仅用于探测OS是否支持该系统调用，也就看看错误号或者返回值）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;fd = epoll_create(<span class="ql-token hljs-number">100</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (fd != <span class="ql-token hljs-number">-1</span>) { <span class="ql-token hljs-comment">// 正常分配，那么仅作为测试用，所以释放掉，并选取 epoll 模块</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; (<span class="ql-token hljs-type">void</span>) close(fd);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;module = &amp;ngx_epoll_module;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (ngx_errno != NGX_ENOSYS) { <span class="ql-token hljs-comment">// 非 NGX_ENOSYS 错误号，表明OS 支持该特性，那么获取 epoll 模块地址</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;module = &amp;ngx_epoll_module;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 宏定义判断是否为其他多路复用器，我们这里关注 epoll 即可</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-meta">#if (NGX_HAVE_DEVPOLL) &amp;&amp; !(NGX_TEST_BUILD_DEVPOLL)</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; module = &amp;ngx_devpoll_module;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-meta">#if (NGX_HAVE_KQUEUE)</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; module = &amp;ngx_kqueue_module;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-meta">#if (NGX_HAVE_SELECT)</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;module = &amp;ngx_select_module;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module == <span class="ql-token hljs-literal">NULL</span>) { <span class="ql-token hljs-comment">// 若未配置 module，那么遍历当前配置的所有模块，找到可以使用的事件循环模块</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (i = <span class="ql-token hljs-number">0</span>; cycle-&gt;modules[i]; i++) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cycle-&gt;modules[i]-&gt;type != NGX_EVENT_MODULE) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;event_module = cycle-&gt;modules[i]-&gt;ctx;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_strcmp(event_module-&gt;name-&gt;data, event_core_name.data) == <span class="ql-token hljs-number">0</span>)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;module = cycle-&gt;modules[i];
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module == <span class="ql-token hljs-literal">NULL</span>) { <span class="ql-token hljs-comment">// 仍未找到，直接报错，因为不能没有处理IO的事件模块</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_log_error(NGX_LOG_EMERG, cycle-&gt;<span class="ql-token hljs-built_in">log</span>, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-string">"no events module found"</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 初始化变量为对应默认值（#define DEFAULT_CONNECTIONS 512）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_uint_value(ecf-&gt;connections, DEFAULT_CONNECTIONS);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cycle-&gt;connection_n = ecf-&gt;connections;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_uint_value(ecf-&gt;use, module-&gt;ctx_index);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;event_module = module-&gt;ctx;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_ptr_value(ecf-&gt;name, event_module-&gt;name-&gt;data);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_value(ecf-&gt;multi_accept, <span class="ql-token hljs-number">0</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_value(ecf-&gt;accept_mutex, <span class="ql-token hljs-number">0</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_msec_value(ecf-&gt;accept_mutex_delay, <span class="ql-token hljs-number">500</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_OK;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 解析到 worker_connections 字符串时回调，我们看到直接读取该配置保存到 &nbsp; cf-&gt;cycle-&gt;connection_n 中</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">char</span> * <span class="ql-token hljs-title">ngx_event_connections(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_event_conf_t</span> &nbsp;*ecf = conf;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_str_t</span> &nbsp;*value;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ecf-&gt;connections != NGX_CONF_UNSET_UINT) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-string">"is duplicate"</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;value = cf-&gt;args-&gt;elts;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ecf-&gt;connections = ngx_atoi(value[<span class="ql-token hljs-number">1</span>].data, value[<span class="ql-token hljs-number">1</span>].len);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ecf-&gt;connections == (<span class="ql-token hljs-type">ngx_uint_t</span>) NGX_ERROR) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_conf_log_error(NGX_LOG_EMERG, cf, <span class="ql-token hljs-number">0</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-string">"invalid number \"%V\""</span>, &amp;value[<span class="ql-token hljs-number">1</span>]);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cf-&gt;cycle-&gt;connection_n = ecf-&gt;connections;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_OK;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 模块初始化回调（获取涉及到的所有模块的配置并根据配置创建对应结构）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_int_t</span> <span class="ql-token hljs-title">ngx_event_module_init(ngx_cycle_t *cycle)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ... <span class="ql-token hljs-comment">// 省略掉变量定义</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cf = ngx_get_conf(cycle-&gt;conf_ctx, ngx_events_module); <span class="ql-token hljs-comment">// 获取事件处理模块的配置，这里对应 epoll 的事件模块</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ecf = (*cf)[ngx_event_core_module.ctx_index]; <span class="ql-token hljs-comment">// 获取自身模块的配置信息</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (!ngx_test_config &amp;&amp; ngx_process &lt;= NGX_PROCESS_MASTER) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_log_error(NGX_LOG_NOTICE, cycle-&gt;<span class="ql-token hljs-built_in">log</span>, <span class="ql-token hljs-number">0</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-string">"using the \"%s\" event method"</span>, ecf-&gt;name);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ccf = (<span class="ql-token hljs-type">ngx_core_conf_t</span> *) ngx_get_conf(cycle-&gt;conf_ctx, ngx_core_module); <span class="ql-token hljs-comment">// 获取核心模块的配置信息</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ... <span class="ql-token hljs-comment">// 省略掉：设置文件限制、设置accept锁多进程使用的共享内存等等，这些我们先暂时忽略，关注点在于：epoll事件模块的处理</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_OK;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 进程执行时初始化回调</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_int_t</span> <span class="ql-token hljs-title">ngx_event_process_init(ngx_cycle_t *cycle)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_uint_t</span> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; m, i;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_event_t</span> &nbsp; &nbsp; &nbsp; &nbsp; *rev, *wev;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_listening_t</span> &nbsp; &nbsp; *ls;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_connection_t</span> &nbsp; &nbsp;*c, *next, *old;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_core_conf_t</span> &nbsp; &nbsp; *ccf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_event_conf_t</span> &nbsp; &nbsp;*ecf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_event_module_t</span> &nbsp;*module;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 获取核心模块、当前模块的配置信息，然后根据配置决定是否使用互斥锁（存在master、存在多个worker、指定使用互斥锁）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ccf = (<span class="ql-token hljs-type">ngx_core_conf_t</span> *) ngx_get_conf(cycle-&gt;conf_ctx, ngx_core_module);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ecf = ngx_event_get_conf(cycle-&gt;conf_ctx, ngx_event_core_module);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ccf-&gt;master &amp;&amp; ccf-&gt;worker_processes &gt; <span class="ql-token hljs-number">1</span> &amp;&amp; ecf-&gt;accept_mutex) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_use_accept_mutex = <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_accept_mutex_held = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_accept_mutex_delay = ecf-&gt;accept_mutex_delay;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; } <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_use_accept_mutex = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_use_exclusive_accept = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 初始化事件队列（我们在整体启动流程中看到过，事件将在这些队列中流转）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_queue_init(&amp;ngx_posted_accept_events);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_queue_init(&amp;ngx_posted_next_events);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_queue_init(&amp;ngx_posted_events);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 初始化管理时间事件的 红黑树 结构</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_event_timer_init(cycle-&gt;<span class="ql-token hljs-built_in">log</span>) == NGX_ERROR) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 遍历所有配置的事件模块找到目前使用的模块，回调其 init 函数（这里也即回调 ngx_epoll_module 的init函数）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (m = <span class="ql-token hljs-number">0</span>; cycle-&gt;modules[m]; m++) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cycle-&gt;modules[m]-&gt;type != NGX_EVENT_MODULE) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cycle-&gt;modules[m]-&gt;ctx_index != ecf-&gt;use) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;module = cycle-&gt;modules[m]-&gt;ctx;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (module-&gt;actions.init(cycle, ngx_timer_resolution) != NGX_OK) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-built_in">exit</span>(<span class="ql-token hljs-number">2</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cycle-&gt;connections =
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_alloc(<span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_connection_t</span>) * cycle-&gt;connection_n, cycle-&gt;<span class="ql-token hljs-built_in">log</span>); <span class="ql-token hljs-comment">// 分配连接结构数组</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cycle-&gt;connections == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;c = cycle-&gt;connections;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cycle-&gt;read_events = ngx_alloc(<span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_event_t</span>) * cycle-&gt;connection_n,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; cycle-&gt;<span class="ql-token hljs-built_in">log</span>); <span class="ql-token hljs-comment">// 分配保存读事件的数组</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cycle-&gt;read_events == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;rev = cycle-&gt;read_events;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (i = <span class="ql-token hljs-number">0</span>; i &lt; cycle-&gt;connection_n; i++) { <span class="ql-token hljs-comment">// 初始化读事件结构默认值</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;rev[i].closed = <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;rev[i].instance = <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cycle-&gt;write_events = ngx_alloc(<span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_event_t</span>) * cycle-&gt;connection_n,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;cycle-&gt;<span class="ql-token hljs-built_in">log</span>); <span class="ql-token hljs-comment">// 分配保存写事件的数组</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (cycle-&gt;write_events == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;wev = cycle-&gt;write_events;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (i = <span class="ql-token hljs-number">0</span>; i &lt; cycle-&gt;connection_n; i++) { <span class="ql-token hljs-comment">// 初始化写事件结构默认值</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;wev[i].closed = <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;i = cycle-&gt;connection_n;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;next = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">do</span> { <span class="ql-token hljs-comment">// 初始化所有连接结构的默认值</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;i--;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;c[i].data = next; <span class="ql-token hljs-comment">// 数据变量保存下一个连接的地址</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;c[i].read = &amp;cycle-&gt;read_events[i]; <span class="ql-token hljs-comment">// 每个连接使用对应下标处的读写结构</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;c[i].write = &amp;cycle-&gt;write_events[i];
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;c[i].fd = (<span class="ql-token hljs-type">ngx_socket_t</span>) <span class="ql-token hljs-number">-1</span>; <span class="ql-token hljs-comment">// 对应客户端 fd 初始化为 -1</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;next = &amp;c[i];
+ </div>
+ <div class="ql-code-block">
+  &nbsp; } <span class="ql-token hljs-keyword">while</span> (i);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 保存当前空闲的连接结构和数量</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cycle-&gt;free_connections = next;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cycle-&gt;free_connection_n = cycle-&gt;connection_n;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ls = cycle-&gt;listening.elts;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (i = <span class="ql-token hljs-number">0</span>; i &lt; cycle-&gt;listening.nelts; i++) { <span class="ql-token hljs-comment">// 遍历之前我们看到如果使用 REUSEPORT 时，复制的 server fd</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#if (NGX_HAVE_REUSEPORT)</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ls[i].reuseport &amp;&amp; ls[i].worker != ngx_worker) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">// 获取一个空闲的连接结构绑定到当前 server fd，并设置对应信息</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;c = ngx_get_connection(ls[i].fd, cycle-&gt;<span class="ql-token hljs-built_in">log</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (c == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;c-&gt;type = ls[i].type;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;c-&gt;<span class="ql-token hljs-built_in">log</span> = &amp;ls[i].<span class="ql-token hljs-built_in">log</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;c-&gt;listening = &amp;ls[i];
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ls[i].connection = c;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;rev = c-&gt;read;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;rev-&gt;<span class="ql-token hljs-built_in">log</span> = c-&gt;<span class="ql-token hljs-built_in">log</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;rev-&gt;accept = <span class="ql-token hljs-number">1</span>; <span class="ql-token hljs-comment">// 当前为接收连接事件</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;rev-&gt;handler = (c-&gt;type == SOCK_STREAM) ? ngx_event_accept
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; : ngx_event_recvmsg; <span class="ql-token hljs-comment">// 事件处理器为 ngx_event_accept（为何不是 ngx_event_recvmsg？因为我们通常使用 TCP）</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#if (NGX_HAVE_REUSEPORT) // 配置使用端口复用，那么回调 EPOLL 模块的 add 回调函数，添加读事件</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ls[i].reuseport) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_add_event(rev, NGX_READ_EVENT, <span class="ql-token hljs-number">0</span>) == NGX_ERROR) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_use_accept_mutex) { <span class="ql-token hljs-comment">// 若使用互斥锁，那么继续循环</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#if (NGX_HAVE_EPOLLEXCLUSIVE) // 否则使用内核 4.x 的新特性：内核自己维护多进程的 EPOLL 唤醒（也即当多个进程使用 epoll fd 监听了同一个 server fd时，连接到了，只会通知一个进程来处理）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> ((ngx_event_flags &amp; NGX_USE_EPOLL_EVENT)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&amp;&amp; ccf-&gt;worker_processes &gt; <span class="ql-token hljs-number">1</span>)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_use_exclusive_accept = <span class="ql-token hljs-number">1</span>; <span class="ql-token hljs-comment">// 标识 使用 epoll 互斥</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_add_event(rev, NGX_READ_EVENT, NGX_EXCLUSIVE_EVENT) <span class="ql-token hljs-comment">// 添加读事件</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;== NGX_ERROR)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_add_event(rev, NGX_READ_EVENT, <span class="ql-token hljs-number">0</span>) == NGX_ERROR) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_OK;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">ngx_epoll_module 模块</strong></h2>
+<p><br></p>
+<p>该模块使用了 Epoll 作为多路复用器实现。通过代码我们不难得到一个结论：每个worker 进程创建了自己的事件循环以及epoll 多路复用器。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">ngx_module_t</span> &nbsp;ngx_epoll_module = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;NGX_MODULE_V1,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;&amp;ngx_epoll_module_ctx, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* module context */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_commands, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* module directives */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;NGX_EVENT_MODULE, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* module type */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init master */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init module */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init process */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init thread */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit thread */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit process */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* exit master */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;NGX_MODULE_V1_PADDING
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 包含创建配置与初始化配置回调 </span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_event_module_t</span> &nbsp;ngx_epoll_module_ctx = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;&amp;epoll_name,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_epoll_create_conf, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* create configuration */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_epoll_init_conf, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* init configuration */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 定义了事件模块中的：ngx_event_actions_t &nbsp; actions 结构，这些回调方法我们之前看到过：ngx_epoll_process_events，当需要操作事件时回调（英文自己看吧，我就不翻译了，因为很简单）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_add_event, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* add an event */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_del_event, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* delete an event */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_add_event, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* enable an event */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_del_event, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">/* disable an event */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_add_connection, &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* add an connection */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_del_connection, &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* delete an connection */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-meta">#if (NGX_HAVE_EVENTFD) // 存在Linux 的 eventfd ，那么使用该fd进行通知 epoll（咋弄？把一个fd注册到epoll中，如果要通知，那么直接写数据就行）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; ngx_epoll_notify, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* trigger a notify */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-meta">#else</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">NULL</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* trigger a notify */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_process_events, &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* process the events */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_init, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* init the events */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_done, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">/* done the events */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 解析到 对应字符串时，回调，我们直接不看了- - ，因为这玩意儿直接跟前面一样：读取配置的信息赋值，，</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_command_t</span> &nbsp;ngx_epoll_commands[] = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; { ngx_string(<span class="ql-token hljs-string">"epoll_events"</span>),
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; NGX_EVENT_CONF|NGX_CONF_TAKE1,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; ngx_conf_set_num_slot,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-number">0</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; offsetof(<span class="ql-token hljs-type">ngx_epoll_conf_t</span>, events),
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-literal">NULL</span> },
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; { ngx_string(<span class="ql-token hljs-string">"worker_aio_requests"</span>),
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; NGX_EVENT_CONF|NGX_CONF_TAKE1,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; ngx_conf_set_num_slot,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-number">0</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; offsetof(<span class="ql-token hljs-type">ngx_epoll_conf_t</span>, aio_requests),
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-literal">NULL</span> },
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_null_command
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// epoll 配置只有两个，所以很简单</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> * <span class="ql-token hljs-title">ngx_epoll_create_conf(ngx_cycle_t *cycle)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_epoll_conf_t</span> &nbsp;*epcf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;epcf = ngx_palloc(cycle-&gt;pool, <span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-type">ngx_epoll_conf_t</span>));
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (epcf == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;epcf-&gt;events = NGX_CONF_UNSET;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;epcf-&gt;aio_requests = NGX_CONF_UNSET;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> epcf;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 初始化为默认值</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">char</span> * <span class="ql-token hljs-title">ngx_epoll_init_conf(ngx_cycle_t *cycle, void *conf)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_epoll_conf_t</span> *epcf = conf;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_uint_value(epcf-&gt;events, <span class="ql-token hljs-number">512</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_conf_init_uint_value(epcf-&gt;aio_requests, <span class="ql-token hljs-number">32</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_CONF_OK;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 在 ngx_event_core_module 中我们看到：将在其 ngx_event_process_init 回调函数中 回调该方法（注意哈：调用该方法的均为 worker 进程，因为 process_init 的生命周期 将在子进程 fork 成功后 由每个子进程执行），那么这就可以得到结论：每个 worker 进程 均持有自己的 epoll fd</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">ngx_int_t</span> <span class="ql-token hljs-title">ngx_epoll_init(ngx_cycle_t *cycle, ngx_msec_t timer)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">ngx_epoll_conf_t</span> &nbsp;*epcf;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;epcf = ngx_event_get_conf(cycle-&gt;conf_ctx, ngx_epoll_module); &nbsp;<span class="ql-token hljs-comment">// 获取当前模块配置信息</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ep == <span class="ql-token hljs-number">-1</span>) { &nbsp;<span class="ql-token hljs-comment">// 创建 epoll fd</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ep = epoll_create(cycle-&gt;connection_n / <span class="ql-token hljs-number">2</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ep == <span class="ql-token hljs-number">-1</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_log_error(NGX_LOG_EMERG, cycle-&gt;<span class="ql-token hljs-built_in">log</span>, ngx_errno,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-string">"epoll_create() failed"</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#if (NGX_HAVE_EVENTFD) // 调用系统调用eventfd 创建 notify_fd ，并将其通过 epoll_ctl 添加到 epoll 中监听，之后我们就可以通过向该 fd 写入数据唤醒 epoll，自己打开看，很简单~</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (ngx_epoll_notify_init(cycle-&gt;<span class="ql-token hljs-built_in">log</span>) != NGX_OK) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_module_ctx.actions.notify = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#if (NGX_HAVE_FILE_AIO) // 初始化 libaio 的创建，这个后面会单独一篇文章来描述 linux aio 的实现原理~别着急了解下即可</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_aio_init(cycle, epcf);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#if (NGX_HAVE_EPOLLRDHUP) // 配置了 epoll 检测 对端断开连接（EPOLLRDHUP标志位检测） 事件，那么执行检测。在内部使用 socketpair(AF_UNIX, SOCK_STREAM, 0, s) 创建 一对 unix socket 的 fd，把其中一个fd s[0] 注册到 epoll中，随后关闭 s[1] 看看是否epoll 支持 EPOLLRDHUP标志位。其实就是做一下测试，看看内核中的 epoll 有没有这个标志位而已</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ngx_epoll_test_rdhup(cycle);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (nevents &lt; epcf-&gt;events) { <span class="ql-token hljs-comment">// 创建保存 epoll_event 的列表 event_list</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (event_list) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ngx_free(event_list);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;event_list = ngx_alloc(<span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-keyword">struct</span> epoll_event) * epcf-&gt;events,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; cycle-&gt;<span class="ql-token hljs-built_in">log</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (event_list == <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_ERROR;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;nevents = epcf-&gt;events;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_io = ngx_os_io;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_event_actions = ngx_epoll_module_ctx.actions; <span class="ql-token hljs-comment">// 将epoll_module 的回调函数保存到每个worker进程的全局变量 ngx_event_actions 中，此时将可以根据之前介绍的宏，直接调用这里注册的每个 epoll 关联函数 </span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#if (NGX_HAVE_CLEAR_EVENT) // 根据配置项 在 ngx_event_flags 标志位中设置对应位，表示 EPOLL 使用 ET 边缘模式 （NGX_USE_CLEAR_EVENT）或者 LT 水平触发模式（NGX_USE_LEVEL_EVENT）来监听 对应的 FD，我们在下一篇文章中详细分析</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_event_flags = NGX_USE_CLEAR_EVENT
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#else</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ngx_event_flags = NGX_USE_LEVEL_EVENT
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;|NGX_USE_GREEDY_EVENT
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;|NGX_USE_EPOLL_EVENT;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> NGX_OK;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p></p>
+</body>
+</html>

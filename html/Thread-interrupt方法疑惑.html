@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Thread interrupt方法疑惑</h1>
+<p>2022-04-11T09:34:38.387+0800</p>
+<p><p><strong>概述</strong></p>
+<p>对于线程的正确停止而言，我们通常设置一个标志位，然后当另外一个线程可以通过修改该标志位，然后将线程停止。代码如下。</p>
+<p><span style="color: rgb(218, 146, 74);">// 伪代码</span></p>
+<p><span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">flag</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">threadA</span>()<span style="color: rgb(184, 191, 198);">-&gt;</span>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(184, 191, 198);">flag</span>){</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// doSomething</span></p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">threadB</span>()<span style="color: rgb(184, 191, 198);">-&gt;</span>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">flag</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>; <span style="color: rgb(218, 146, 74);">// 此时将线程A停止</span></p>
+<p>}</p>
+<p>理想情况下，我们可以让线程停止，但是有时线程可能在执行阻塞操作，比如：在等待锁，那么这时光是设置标志位并没有什么用，我们需要将线程从阻塞状态中返回，这时我们可以通过Thread类的interrupt方法来中断线程。在Thread类中，对于中断的处理有如下几个方法：</p>
+<p><span style="color: rgb(218, 146, 74);">// 中断当前线程</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">interrupt</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(200, 143, 208);">this</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">currentThread</span>())</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">checkAccess</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">synchronized</span> (<span style="color: rgb(184, 191, 198);">blockerLock</span>) { <span style="color: rgb(218, 146, 74);">// 这里我们不考虑该对象，该blocker对象用于表示当前线程阻塞在哪个对象上</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Interruptible</span> <span style="color: rgb(184, 191, 198);">b</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">blocker</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">b</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">interrupt0</span>();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// Just to set the interrupt flag</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">b</span>.<span style="color: rgb(184, 191, 198);">interrupt</span>(<span style="color: rgb(200, 143, 208);">this</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">interrupt0</span>(); <span style="color: rgb(218, 146, 74);">// 直接看该方法</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 判断当前线程是否发生了中断，并清除中断标志位</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">interrupted</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">currentThread</span>().<span style="color: rgb(184, 191, 198);">isInterrupted</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 判断当前线程是否发生了中断，不清除中断标志位</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">isInterrupted</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">isInterrupted</span>(<span style="color: rgb(132, 182, 203);">false</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">native</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">interrupt0</span>(); <span style="color: rgb(218, 146, 74);">// JNI 方法完成中断</span></p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">native</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">isInterrupted</span>(<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">ClearInterrupted</span>); <span style="color: rgb(218, 146, 74);">// JNI 方法判断是会否发生中断</span></p>
+<p>那么，这时在某些情况下会产生疑惑：什么时候我在调用 interrupt 方法时会抛出中断异常，什么时候又不会。比如以下代码。LockSupport.park()方法阻塞时，调用线程中断，那么将会导致线程被唤醒，将不会抛出异常，而对于Object.wait()来说，将会抛出异常。这是为何？本文将详细解释该现象出现的原因。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">LockSupport</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">park</span>() { <span style="color: rgb(218, 146, 74);">// 将当前线程阻塞（此时线程中断，仅仅简单唤醒，而不会抛出异常）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">UNSAFE</span>.<span style="color: rgb(184, 191, 198);">park</span>(<span style="color: rgb(132, 182, 203);">false</span>, <span style="color: rgb(100, 171, 143);">0L</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(28, 198, 133);">Object</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将当前在synchronized块中的线程移动到等待池中，此时如果线程中断，将会抛出异常</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">wait</span>() <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wait</span>(<span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">native</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">wait</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span>;</p>
+<p>}</p>
+<p><strong>interrupt0方法原理</strong></p>
+<p>通过源码我们很容易得知，线程可能阻塞的结构如下：</p>
+<ol>
+ <li>ParkEvent *_SleepEvent</li>
+ <li>Parker *parker</li>
+ <li>ParkEvent * _ParkEvent</li>
+</ol>
+<p>该方法将通过 osthread-&gt;set_interrupted(true) 设置中断标志位后，如果以上三个阻塞结构存在，那么调用其 unpark() 方法完成唤醒，那么什么是 ParkEvent ？什么是Parker ？参考《深入理解java高并发编程》一书的最后一章，这里我们只需要知道它是两个阻塞结构即可。</p>
+<p><span style="color: rgb(184, 191, 198);">JVM_ENTRY</span>(<span style="color: rgb(28, 198, 133);">void</span>, <span style="color: rgb(184, 191, 198);">JVM_Interrupt</span>(<span style="color: rgb(184, 191, 198);">JNIEnv*</span> <span style="color: rgb(184, 191, 198);">env</span>, <span style="color: rgb(184, 191, 198);">jobject</span> <span style="color: rgb(184, 191, 198);">jthread</span>))</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">oop</span> <span style="color: rgb(184, 191, 198);">java_thread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">JNIHandles</span>::<span style="color: rgb(184, 191, 198);">resolve_non_null</span>(<span style="color: rgb(184, 191, 198);">jthread</span>); <span style="color: rgb(218, 146, 74);">// 获取java Thread对象</span></p>
+<p><span style="color: rgb(184, 191, 198);">MutexLockerEx</span> <span style="color: rgb(141, 141, 240);">ml</span>(<span style="color: rgb(184, 191, 198);">thread-&gt;threadObj</span>() <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">java_thread</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">NULL</span> : <span style="color: rgb(184, 191, 198);">Threads_lock</span>); <span style="color: rgb(218, 146, 74);">// 获取线程锁保证在处理中断时线程安全</span></p>
+<p><span style="color: rgb(184, 191, 198);">JavaThread*</span> <span style="color: rgb(184, 191, 198);">thr</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">java_lang_Thread</span>::<span style="color: rgb(184, 191, 198);">thread</span>(<span style="color: rgb(184, 191, 198);">JNIHandles</span>::<span style="color: rgb(184, 191, 198);">resolve_non_null</span>(<span style="color: rgb(184, 191, 198);">jthread</span>)); <span style="color: rgb(218, 146, 74);">// 获取C++层面的JavaThread对象（注意：该对象不是Java的 Thread，只有oop才是，这里为C++层面表示Thread的JavaThread C++类）</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">thr</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread</span>::<span style="color: rgb(184, 191, 198);">interrupt</span>(<span style="color: rgb(184, 191, 198);">thr</span>); <span style="color: rgb(218, 146, 74);">// 执行中断</span></p>
+<p>}</p>
+<p><span style="color: rgb(184, 191, 198);">JVM_END</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">Thread</span>::<span style="color: rgb(184, 191, 198);">interrupt</span>(<span style="color: rgb(184, 191, 198);">Thread*</span> <span style="color: rgb(184, 191, 198);">thread</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">os</span>::<span style="color: rgb(184, 191, 198);">interrupt</span>(<span style="color: rgb(184, 191, 198);">thread</span>); <span style="color: rgb(218, 146, 74);">// 调用os模块处理中断</span></p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">os</span>::<span style="color: rgb(184, 191, 198);">interrupt</span>(<span style="color: rgb(184, 191, 198);">Thread*</span> <span style="color: rgb(184, 191, 198);">thread</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">OSThread*</span> <span style="color: rgb(184, 191, 198);">osthread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">thread-&gt;osthread</span>(); <span style="color: rgb(218, 146, 74);">// 获取当前JavaThread对应的OSThread C++对象，该对象用于表示原生pthread 线程库（以Linux为例）创建的线程</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!osthread-&gt;interrupted</span>()) { <span style="color: rgb(218, 146, 74);">// 若之前线程未被中断，那么设置中断标志位，同时如果当前线程阻塞在_SleepEvent中，那么调用其unpark方法将其唤醒（注意：这里为核心，为什么中断能唤醒线程，原理在于此：中断标志位设置后将会把线程唤醒）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">osthread-&gt;set_interrupted</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">OrderAccess</span>::<span style="color: rgb(184, 191, 198);">fence</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ParkEvent</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(184, 191, 198);">slp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">thread-&gt;_SleepEvent</span> ;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">slp</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span>) <span style="color: rgb(184, 191, 198);">slp-&gt;unpark</span>() ;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">thread-&gt;is_Java_thread</span>()) <span style="color: rgb(218, 146, 74);">// 当前中断的线程为Thread java线程，那么也将Parker唤醒</span></p>
+<p>&nbsp;&nbsp;&nbsp;((<span style="color: rgb(184, 191, 198);">JavaThread*</span>)<span style="color: rgb(184, 191, 198);">thread</span>)<span style="color: rgb(184, 191, 198);">-&gt;parker</span>()<span style="color: rgb(184, 191, 198);">-&gt;unpark</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ParkEvent</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">ev</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">thread-&gt;_ParkEvent</span> ; <span style="color: rgb(218, 146, 74);">// 线程如果拥有其他_ParkEvent，那么也将其唤醒</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ev</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span>) <span style="color: rgb(184, 191, 198);">ev-&gt;unpark</span>() ;</p>
+<p>}</p>
+<p><strong>IsInterrupted方法原理</strong></p>
+<p><span style="color: rgb(184, 191, 198);">JVM_QUICK_ENTRY</span>(<span style="color: rgb(184, 191, 198);">jboolean</span>, <span style="color: rgb(184, 191, 198);">JVM_IsInterrupted</span>(<span style="color: rgb(184, 191, 198);">JNIEnv*</span> <span style="color: rgb(184, 191, 198);">env</span>, <span style="color: rgb(184, 191, 198);">jobject</span> <span style="color: rgb(184, 191, 198);">jthread</span>, <span style="color: rgb(184, 191, 198);">jboolean</span> <span style="color: rgb(184, 191, 198);">clear_interrupted</span>))</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">// 获取Java Thread 线程，然后获取锁，获取C++ JavaThread对象，然后调用is_interrupted</span></p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">oop</span> <span style="color: rgb(184, 191, 198);">java_thread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">JNIHandles::resolve_non_null</span>(<span style="color: rgb(184, 191, 198);">jthread</span>);</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">MutexLockerEx</span> <span style="color: rgb(141, 141, 240);">ml</span>(<span style="color: rgb(184, 191, 198);">thread-&gt;threadObj</span>() <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">java_thread</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">NULL</span> : <span style="color: rgb(184, 191, 198);">Threads_lock</span>);</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">JavaThread*</span> <span style="color: rgb(184, 191, 198);">thr</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">java_lang_Thread::thread</span>(<span style="color: rgb(184, 191, 198);">JNIHandles::resolve_non_null</span>(<span style="color: rgb(184, 191, 198);">jthread</span>));</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">thr</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">JNI_FALSE</span>;</p>
+<p>} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> (<span style="color: rgb(184, 191, 198);">jboolean</span>) <span style="color: rgb(184, 191, 198);">Thread::is_interrupted</span>(<span style="color: rgb(184, 191, 198);">thr</span>, <span style="color: rgb(184, 191, 198);">clear_interrupted</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>}</p>
+<p><span style="color: rgb(184, 191, 198);">JVM_END</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 直接调用OS模块来查看中断，clear_interrupted 用于标识当前是否应该清除中断标志位</span></p>
+<p><span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(141, 141, 240);">Thread::is_interrupted</span>(<span style="color: rgb(184, 191, 198);">Thread*</span> <span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(184, 191, 198);">clear_interrupted</span>) {</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">os::is_interrupted</span>(<span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(184, 191, 198);">clear_interrupted</span>);</p>
+<p>}</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 获取OSThread 获取其interrupted标志位，如果指定清除，那么将其设置为false</span></p>
+<p><span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(141, 141, 240);">os::is_interrupted</span>(<span style="color: rgb(184, 191, 198);">Thread*</span> <span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(184, 191, 198);">clear_interrupted</span>) {</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">OSThread*</span> <span style="color: rgb(184, 191, 198);">osthread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">thread-&gt;osthread</span>();</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(184, 191, 198);">interrupted</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">osthread-&gt;interrupted</span>();</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">interrupted</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">clear_interrupted</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">osthread-&gt;set_interrupted</span>(<span style="color: rgb(132, 182, 203);">false</span>);</p>
+<p>}</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">interrupted</span>;</p>
+<p>}</p>
+<p><strong>小结</strong></p>
+<p>由此可见，线程中断仅仅只是设置中断标志位，然后唤醒阻塞的线程，其他什么也不做，而判断中断是否已经发生，仅仅根据OSThread模块的interrupted中断标志位来判断，其他也什么都不做。【作者：黄俊，微信联系：bx_java】</p>
+<p><strong>park 阻塞原理</strong></p>
+<p>要想了解为何不抛出中断异常，那么我们直接看park阻塞时，和被唤醒后的处理操作。通过源码我们看到Parker阻塞后，将不会进一步处理中断操作，而是直接返回，所以将不会抛出中断异常。</p>
+<p><span style="color: rgb(184, 191, 198);">UNSAFE_ENTRY</span>(<span style="color: rgb(28, 198, 133);">void</span>, <span style="color: rgb(184, 191, 198);">Unsafe_Park</span>(<span style="color: rgb(184, 191, 198);">JNIEnv</span> <span style="color: rgb(184, 191, 198);">*env</span>, <span style="color: rgb(184, 191, 198);">jobject</span> <span style="color: rgb(184, 191, 198);">unsafe</span>, <span style="color: rgb(184, 191, 198);">jboolean</span> <span style="color: rgb(184, 191, 198);">isAbsolute</span>, <span style="color: rgb(184, 191, 198);">jlong</span> <span style="color: rgb(184, 191, 198);">time</span>))</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;parker</span>()<span style="color: rgb(184, 191, 198);">-&gt;park</span>(<span style="color: rgb(184, 191, 198);">isAbsolute</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">time</span>); <span style="color: rgb(218, 146, 74);">// 直接调用Parker的park方法</span></p>
+<p><span style="color: rgb(184, 191, 198);">UNSAFE_END</span></p>
+<p>&nbsp;&nbsp;</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">Parker::park</span>(<span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(184, 191, 198);">isAbsolute</span>, <span style="color: rgb(184, 191, 198);">jlong</span> <span style="color: rgb(184, 191, 198);">time</span>) { <span style="color: rgb(218, 146, 74);">// isAbsolute表示是否为绝对时间，time表示阻塞时长</span></p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">Atomic::xchg</span>(<span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">&amp;_counter</span>) <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(200, 143, 208);">return</span>; <span style="color: rgb(218, 146, 74);">// 以_counter值是否为0来判断当前线程是否已经执行过park方法（这里使用xchg，将会把0设置为_counter值，同时返回旧_counter值，判断是否大于0）</span></p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">Thread*</span> <span style="color: rgb(184, 191, 198);">thread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Thread::current</span>();</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">JavaThread</span> <span style="color: rgb(184, 191, 198);">*jt</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">JavaThread</span> <span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">thread</span>;</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">Thread::is_interrupted</span>(<span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(132, 182, 203);">false</span>)) { <span style="color: rgb(218, 146, 74);">// 若此时线程已经调用过interrupt方法，那么直接返回</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>}</p>
+<p>...</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">status</span> ;</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">_counter</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 此时_counter已经被其他线程设置，那么将其设置为0并返回（也即调用过unpark，具体参考《深入理解java高并发编程》最后一章）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_counter</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">status</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">pthread_mutex_unlock</span>(<span style="color: rgb(184, 191, 198);">_mutex</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">OrderAccess::fence</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>}</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">// 根据是否超时等待，来阻塞线程</span></p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">time</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_cur_index</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">REL_INDEX</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">status</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">pthread_cond_wait</span> (<span style="color: rgb(184, 191, 198);">&amp;_cond</span>[<span style="color: rgb(184, 191, 198);">_cur_index</span>], <span style="color: rgb(184, 191, 198);">_mutex</span>) ; <span style="color: rgb(218, 146, 74);">// 永久等待</span></p>
+<p>} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 超时等待</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_cur_index</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">isAbsolute</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">ABS_INDEX</span> : <span style="color: rgb(184, 191, 198);">REL_INDEX</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">status</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">os::Linux::safe_cond_timedwait</span> (<span style="color: rgb(184, 191, 198);">&amp;_cond</span>[<span style="color: rgb(184, 191, 198);">_cur_index</span>], <span style="color: rgb(184, 191, 198);">_mutex</span>, <span style="color: rgb(184, 191, 198);">&amp;absTime</span>) ;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">status</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">WorkAroundNPTLTimedWaitHang</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_cond_destroy</span> (<span style="color: rgb(184, 191, 198);">&amp;_cond</span>[<span style="color: rgb(184, 191, 198);">_cur_index</span>]) ;</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_cond_init</span>&nbsp;(<span style="color: rgb(184, 191, 198);">&amp;_cond</span>[<span style="color: rgb(184, 191, 198);">_cur_index</span>], <span style="color: rgb(184, 191, 198);">isAbsolute</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">NULL</span> : <span style="color: rgb(184, 191, 198);">os::Linux::condAttr</span>());</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">_counter</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span> ; <span style="color: rgb(218, 146, 74);">// 被唤醒后清除_counter，然后返回</span></p>
+<p>...</p>
+<p>}</p>
+<p><strong>wait 阻塞原理</strong></p>
+<p>要想了解为何抛出中断异常，那么我们直接看wait 阻塞时，和被唤醒后的处理操作。通过源码，我们很自然看到，当线程在被中断唤醒时，由于WasNotified为false，那么此时将会抛出InterruptedException异常。</p>
+<p><span style="color: rgb(184, 191, 198);">JVM_ENTRY</span>(<span style="color: rgb(28, 198, 133);">void</span>, <span style="color: rgb(184, 191, 198);">JVM_MonitorWait</span>(<span style="color: rgb(184, 191, 198);">JNIEnv*</span> <span style="color: rgb(184, 191, 198);">env</span>, <span style="color: rgb(184, 191, 198);">jobject</span> <span style="color: rgb(184, 191, 198);">handle</span>, <span style="color: rgb(184, 191, 198);">jlong</span> <span style="color: rgb(184, 191, 198);">ms</span>))</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">Handle</span> <span style="color: rgb(141, 141, 240);">obj</span>(<span style="color: rgb(184, 191, 198);">THREAD</span>, <span style="color: rgb(184, 191, 198);">JNIHandles::resolve_non_null</span>(<span style="color: rgb(184, 191, 198);">handle</span>)); <span style="color: rgb(218, 146, 74);">// 包装锁对象</span></p>
+<p>...</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">ObjectSynchronizer::wait</span>(<span style="color: rgb(184, 191, 198);">obj</span>, <span style="color: rgb(184, 191, 198);">ms</span>, <span style="color: rgb(184, 191, 198);">CHECK</span>); <span style="color: rgb(218, 146, 74);">// 调用同步器wait方法</span></p>
+<p><span style="color: rgb(184, 191, 198);">JVM_END</span></p>
+<p>&nbsp;&nbsp;</p>
+<p><span style="color: rgb(218, 146, 74);">// 将锁膨胀为重量级锁，因为只有重量级锁才会存在wait集合来放置线程（详细参考《深入理解java高并发编程》）</span></p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">ObjectSynchronizer::wait</span>(<span style="color: rgb(184, 191, 198);">Handle</span> <span style="color: rgb(184, 191, 198);">obj</span>, <span style="color: rgb(184, 191, 198);">jlong</span> <span style="color: rgb(184, 191, 198);">millis</span>, <span style="color: rgb(184, 191, 198);">TRAPS</span>) {</p>
+<p>...</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">ObjectMonitor*</span> <span style="color: rgb(184, 191, 198);">monitor</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ObjectSynchronizer::inflate</span>(<span style="color: rgb(184, 191, 198);">THREAD</span>, <span style="color: rgb(184, 191, 198);">obj</span>());</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">monitor-&gt;wait</span>(<span style="color: rgb(184, 191, 198);">millis</span>, <span style="color: rgb(132, 182, 203);">true</span>, <span style="color: rgb(184, 191, 198);">THREAD</span>); <span style="color: rgb(218, 146, 74);">// 通过监视器等待，这里指定true，表示可以通过线程中断唤醒</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">ObjectMonitor::wait</span>(<span style="color: rgb(184, 191, 198);">jlong</span> <span style="color: rgb(184, 191, 198);">millis</span>, <span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(184, 191, 198);">interruptible</span>, <span style="color: rgb(184, 191, 198);">TRAPS</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(184, 191, 198);">Self</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">THREAD</span> ; <span style="color: rgb(218, 146, 74);">// 获取当前JavaThread对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ObjectWaiter</span> <span style="color: rgb(184, 191, 198);">node</span>(<span style="color: rgb(184, 191, 198);">Self</span>); <span style="color: rgb(218, 146, 74);">// 封装等待节点</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">node</span>.<span style="color: rgb(184, 191, 198);">TState</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ObjectWaiter::TS_WAIT</span> ;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">AddWaiter</span> (<span style="color: rgb(184, 191, 198);">&amp;node</span>) ; <span style="color: rgb(218, 146, 74);">// 将节点插入_WaitSet等待池中</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">exit</span> (<span style="color: rgb(132, 182, 203);">true</span>, <span style="color: rgb(184, 191, 198);">Self</span>) ;&nbsp;<span style="color: rgb(218, 146, 74);">// 退出监视器，释放锁</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">interruptible</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> (<span style="color: rgb(184, 191, 198);">Thread::is_interrupted</span>(<span style="color: rgb(184, 191, 198);">THREAD</span>, <span style="color: rgb(132, 182, 203);">false</span>) <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">HAS_PENDING_EXCEPTION</span>)) { <span style="color: rgb(218, 146, 74);">// 当前线程已经被中断，同时指定了interruptible为true，表示可以响应中断（前面我们进入该方法时设置为true），或者当前线程有未处理的异常（HAS_PENDING_EXCEPTION），那么不阻塞</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">node</span>.<span style="color: rgb(184, 191, 198);">_notified</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 否则阻塞在线程的_ParkEvent上（还记得中断会操作该对象唤醒么）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">millis</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Self-&gt;_ParkEvent-&gt;park</span> () ;</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Self-&gt;_ParkEvent-&gt;park</span> (<span style="color: rgb(184, 191, 198);">millis</span>) ;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;...</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">WasNotified</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">node</span>.<span style="color: rgb(184, 191, 198);">_notified</span> ; <span style="color: rgb(218, 146, 74);">// 判断当前线程是否是被正常的Object.notify方法唤醒，注意：当被中断唤醒时将不会设置该标志位</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!WasNotified</span>) { <span style="color: rgb(218, 146, 74);">// 抛出中断异常</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">interruptible</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">Thread::is_interrupted</span>(<span style="color: rgb(184, 191, 198);">Self</span>, <span style="color: rgb(132, 182, 203);">true</span>) <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">!HAS_PENDING_EXCEPTION</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">TEVENT</span> (<span style="color: rgb(184, 191, 198);">Wait</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(184, 191, 198);">IEX</span> <span style="color: rgb(184, 191, 198);">from</span> <span style="color: rgb(184, 191, 198);">epilog</span>) ;</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">THROW</span>(<span style="color: rgb(184, 191, 198);">vmSymbols::java_lang_InterruptedException</span>());</p>
+<p>&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>sleep 阻塞原理</strong></p>
+<p>我们再来看看Thread.sleep时，为何也会抛出InterruptedException异常。通过源码我们得知：线程将会阻塞在_SleepEvent上，该对象将会在Thread.interrupt时调用其unpark唤醒，这时将会在这里检测中断标志位返回OS_INTRPT，将导致线程抛出中断异常。</p>
+<p><span style="color: rgb(184, 191, 198);">JVM_ENTRY</span>(<span style="color: rgb(28, 198, 133);">void</span>, <span style="color: rgb(184, 191, 198);">JVM_Sleep</span>(<span style="color: rgb(184, 191, 198);">JNIEnv*</span> <span style="color: rgb(184, 191, 198);">env</span>, <span style="color: rgb(184, 191, 198);">jclass</span> <span style="color: rgb(184, 191, 198);">threadClass</span>, <span style="color: rgb(184, 191, 198);">jlong</span> <span style="color: rgb(184, 191, 198);">millis</span>))</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">millis</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 超时时间为0，尝试转为yield让出CPU，该ConvertSleepToYield默认为true</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ConvertSleepToYield</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">os</span>::<span style="color: rgb(184, 191, 198);">yield</span>();</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 否则执行睡眠操作</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ThreadState</span> <span style="color: rgb(184, 191, 198);">old_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">thread-&gt;osthread</span>()<span style="color: rgb(184, 191, 198);">-&gt;get_state</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;osthread</span>()<span style="color: rgb(184, 191, 198);">-&gt;set_state</span>(<span style="color: rgb(184, 191, 198);">SLEEPING</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">os</span>::<span style="color: rgb(184, 191, 198);">sleep</span>(<span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(184, 191, 198);">MinSleepInterval</span>, <span style="color: rgb(132, 182, 203);">false</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;osthread</span>()<span style="color: rgb(184, 191, 198);">-&gt;set_state</span>(<span style="color: rgb(184, 191, 198);">old_state</span>);</p>
+<p>&nbsp;}</p>
+<p>} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 直接执行睡眠操作</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ThreadState</span> <span style="color: rgb(184, 191, 198);">old_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">thread-&gt;osthread</span>()<span style="color: rgb(184, 191, 198);">-&gt;get_state</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;osthread</span>()<span style="color: rgb(184, 191, 198);">-&gt;set_state</span>(<span style="color: rgb(184, 191, 198);">SLEEPING</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">os</span>::<span style="color: rgb(184, 191, 198);">sleep</span>(<span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(184, 191, 198);">millis</span>, <span style="color: rgb(132, 182, 203);">true</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">OS_INTRPT</span>) { <span style="color: rgb(218, 146, 74);">// 因为中断被唤醒，那么抛出异常</span></p>
+<p>&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">THROW_MSG</span>(<span style="color: rgb(184, 191, 198);">vmSymbols</span>::<span style="color: rgb(184, 191, 198);">java_lang_InterruptedException</span>(), <span style="color: rgb(210, 107, 107);">"sleep interrupted"</span>);</p>
+<p>&nbsp;}</p>
+<p><span style="color: rgb(184, 191, 198);">JVM_END</span></p>
+<p>&nbsp;&nbsp;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">os</span>::<span style="color: rgb(184, 191, 198);">sleep</span>(<span style="color: rgb(184, 191, 198);">Thread*</span> <span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(184, 191, 198);">jlong</span> <span style="color: rgb(184, 191, 198);">millis</span>, <span style="color: rgb(184, 191, 198);">bool</span> <span style="color: rgb(184, 191, 198);">interruptible</span>) {</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">ParkEvent</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(184, 191, 198);">slp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">thread-&gt;_SleepEvent</span> ; <span style="color: rgb(218, 146, 74);">// 获取_SleepEvent对象</span></p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">slp-&gt;reset</span>() ;</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">OrderAccess</span>::<span style="color: rgb(184, 191, 198);">fence</span>() ;</p>
+<p>​</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">interruptible</span>) { <span style="color: rgb(218, 146, 74);">// 可以被中断唤醒</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">jlong</span> <span style="color: rgb(184, 191, 198);">prevtime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">javaTimeNanos</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">os</span>::<span style="color: rgb(184, 191, 198);">is_interrupted</span>(<span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(132, 182, 203);">true</span>)) { <span style="color: rgb(218, 146, 74);">// 当前线程已经被中断</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">OS_INTRPT</span>;</p>
+<p>&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">jlong</span> <span style="color: rgb(184, 191, 198);">newtime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">javaTimeNanos</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">newtime</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">prevtime</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// time moving backwards, should only happen if no monotonic clock</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// not a guarantee() because JVM should not abort on kernel/glibc bugs</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">assert</span>(<span style="color: rgb(184, 191, 198);">!Linux</span>::<span style="color: rgb(184, 191, 198);">supports_monotonic_clock</span>(), <span style="color: rgb(210, 107, 107);">"time moving backwards"</span>);</p>
+<p>&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">millis</span> <span style="color: rgb(184, 191, 198);">-=</span> (<span style="color: rgb(184, 191, 198);">newtime</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">prevtime</span>) <span style="color: rgb(184, 191, 198);">/</span> <span style="color: rgb(184, 191, 198);">NANOSECS_PER_MILLISEC</span>;</p>
+<p>&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>(<span style="color: rgb(184, 191, 198);">millis</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 已经超时，那么直接正常返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">OS_OK</span>;</p>
+<p>&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">prevtime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newtime</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">slp-&gt;park</span>(<span style="color: rgb(184, 191, 198);">millis</span>); <span style="color: rgb(218, 146, 74);">// 开始睡眠</span></p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 不响应中断唤醒，可以看到这里没有os::is_interrupted(thread, true)代码</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">jlong</span> <span style="color: rgb(184, 191, 198);">newtime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">javaTimeNanos</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">newtime</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">prevtime</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// time moving backwards, should only happen if no monotonic clock</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// not a guarantee() because JVM should not abort on kernel/glibc bugs</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">assert</span>(<span style="color: rgb(184, 191, 198);">!Linux</span>::<span style="color: rgb(184, 191, 198);">supports_monotonic_clock</span>(), <span style="color: rgb(210, 107, 107);">"time moving backwards"</span>);</p>
+<p>&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">millis</span> <span style="color: rgb(184, 191, 198);">-=</span> (<span style="color: rgb(184, 191, 198);">newtime</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">prevtime</span>) <span style="color: rgb(184, 191, 198);">/</span> <span style="color: rgb(184, 191, 198);">NANOSECS_PER_MILLISEC</span>;</p>
+<p>&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>(<span style="color: rgb(184, 191, 198);">millis</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(200, 143, 208);">break</span> ;</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">prevtime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newtime</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">slp-&gt;park</span>(<span style="color: rgb(184, 191, 198);">millis</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">OS_OK</span> ;</p>
+<p>}</p>
+<p>}</p>
+<p><strong>THROW 原理</strong></p>
+<p>接下来我们来看看JVM如何抛出异常。通过源码我们得知：两个宏定义最终调用_throw方法完成异常处理，然后获取当前Thread 设置 pending_exception ，这时将会在线程执行字节码时进行检测，当发现有挂起未处理的异常时，进行处理。</p>
+<p><span style="color: rgb(183, 179, 179);">#define THROW(name)&nbsp;{ Exceptions::_throw_msg(THREAD_AND_LOCATION, name, NULL); return; }</span></p>
+<p>​</p>
+<p><span style="color: rgb(183, 179, 179);">#define THROW_MSG(name, message)&nbsp;{ Exceptions::_throw_msg(THREAD_AND_LOCATION, name, message); return; }</span></p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">Exceptions::_throw_msg</span>(<span style="color: rgb(184, 191, 198);">Thread*</span> <span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char*</span> <span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">line</span>, <span style="color: rgb(184, 191, 198);">Symbol*</span> <span style="color: rgb(184, 191, 198);">name</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char*</span> <span style="color: rgb(184, 191, 198);">message</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Handle</span> <span style="color: rgb(184, 191, 198);">h_loader</span>, <span style="color: rgb(184, 191, 198);">Handle</span> <span style="color: rgb(184, 191, 198);">h_protection_domain</span>) {</p>
+<p>...</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">_throw</span>(<span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(184, 191, 198);">line</span>, <span style="color: rgb(184, 191, 198);">h_exception</span>, <span style="color: rgb(184, 191, 198);">message</span>);</p>
+<p>}</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">Exceptions::_throw</span>(<span style="color: rgb(184, 191, 198);">Thread*</span> <span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char*</span> <span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">line</span>, <span style="color: rgb(184, 191, 198);">Handle</span> <span style="color: rgb(184, 191, 198);">h_exception</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char*</span> <span style="color: rgb(184, 191, 198);">message</span>) {</p>
+<p>&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;set_pending_exception</span>(<span style="color: rgb(184, 191, 198);">h_exception</span>(), <span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(184, 191, 198);">line</span>);</p>
+<p>&nbsp;&nbsp;...</p>
+<p>}</p>
+<p><strong>总结</strong></p>
+<p>线程在中断时何时抛出异常，体现在代码中如何处理，也即中断后，是否判断中断异常标志位。而对于Unsafe.park来说，它将不会响应中断标志位，所以中断后仅仅将其唤醒，取决于设计。</p>
+<p><br></p></p>
+</body>
+</html>

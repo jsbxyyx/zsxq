@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux 硬中断处理过程</h1>
+<p>2022-11-17T06:19:46.551+0800</p>
+<p><p>我们知道：中断机制是一个可以让 CPU 与 设备 异步执行的高性能通讯手段 ------ CPU 执行指令，设备执行设备操作，当设备完成后 通过中断线通知 CPU 工作完成，CPU 响应中断从而完成设备的数据处理。那么CPU 是如何检测中断的呢？我们在混沌学堂说过，每次CPU 执行完当前指令后，会存在一个中断处理周期，CPU可以在此周期内检测中断高低电平，从而响应中断。那么本文将详细描述 CPU处理 整个硬中断过程的原理。</p>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">request_irq 函数</strong></h3>
+<p><br></p>
+<p>内核通常使用 request_irq 函数来注册中断处理（这里我们以 i386 平台来举例）。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct irqaction {</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">irqreturn_t</span> (*handler)(<span class="ql-token hljs-type">int</span>, <span class="ql-token hljs-type">void</span> *, <span class="ql-token hljs-keyword">struct</span> pt_regs *);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> flags;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> mask;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">const</span> <span class="ql-token hljs-type">char</span> *name;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> *dev_id;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct irqaction *next;</span> <span class="ql-token hljs-comment">// 通过该属性形成上下文链表</span>
+ </div>
+ <div class="ql-code-block">
+  }; <span class="ql-token hljs-comment">// 中断上下文</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// irq ：设备响应的中断号（也叫中断线） handler：当CPU检测发生中断时回调的函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// irqflags : 标识中断类型（SA_SHIRQ（共享中断线 --- 也即，多个驱动程序注册到该中断号上，驱动程序自己维护CPU硬中断的关闭与否）、SA_INTERRUPT（当中断处理时，是否屏蔽 CPU 中断）、SA_SAMPLE_RANDOM（当前中断是否影响到硬件随机数熵））</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">request_irq(unsigned int irq, </span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> irqreturn_t (*handler)(int, void *, struct pt_regs *),</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> unsigned long irqflags, </span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> const char * devname,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> void *dev_id)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> retval;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct irqaction * action;</span> <span class="ql-token hljs-comment">// 用于表示当前中断上下文</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (irqflags &amp; SA_SHIRQ) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!dev_id)
+ </div>
+ <div class="ql-code-block">
+  printk(<span class="ql-token hljs-string">"Bad boy: %s (at 0x%x) called us without a dev_id!\n"</span>, devname, (&amp;irq)[<span class="ql-token hljs-number">-1</span>]);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (irq &gt;= NR_IRQS)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!handler)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  action = (<span class="ql-token hljs-keyword">struct</span> irqaction *)
+ </div>
+ <div class="ql-code-block">
+  kmalloc(<span class="ql-token hljs-keyword">sizeof</span>(<span class="ql-token hljs-keyword">struct</span> irqaction), GFP_ATOMIC);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!action)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 初始化结构变量</span>
+ </div>
+ <div class="ql-code-block">
+  action-&gt;handler = handler;
+ </div>
+ <div class="ql-code-block">
+  action-&gt;flags = irqflags;
+ </div>
+ <div class="ql-code-block">
+  action-&gt;mask = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  action-&gt;name = devname;
+ </div>
+ <div class="ql-code-block">
+  action-&gt;next = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  action-&gt;dev_id = dev_id;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  retval = setup_irq(irq, action); <span class="ql-token hljs-comment">// 将上下文安装到内核中</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (retval)
+ </div>
+ <div class="ql-code-block">
+  kfree(action);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> retval;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">setup_irq 函数</strong></h3>
+<p><br></p>
+<p>该函数用于将中断上下文 struct irqaction * new 注册到内核结构中，当硬中断发生时，进行中断号匹配后，回调其中的handler 函数。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">typedef</span> <span class="ql-token hljs-class">struct irq_desc {</span> <span class="ql-token hljs-comment">// 中断描述符，其中保存了中断上下文</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">int</span> status;
+ </div>
+ <div class="ql-code-block">
+  hw_irq_controller *handler;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct irqaction *action;</span> <span class="ql-token hljs-comment">// 当前中断号所对应的中断上下文链表</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">int</span> depth;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">int</span> irq_count;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">int</span> irqs_unhandled;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">spinlock_t</span> lock;
+ </div>
+ <div class="ql-code-block">
+  } ____cacheline_aligned <span class="ql-token hljs-type">irq_desc_t</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">extern</span> <span class="ql-token hljs-type">irq_desc_t</span> irq_desc [NR_IRQS]; <span class="ql-token hljs-comment">// 每个中断号对应该数组下标</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 宏定义挺有意思（i386）：当开启 APIC 时能响应的中断号非常多，如果没有开启中断号，那么只能最多 16个中断号（使用 8259A 中断芯片 两片级联，详细请看 混沌学堂的描述）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#ifdef CONFIG_X86_IO_APIC</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define NR_IRQS 224</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"># if (224 &gt;= 32 * NR_CPUS)</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"># define NR_IRQ_VECTORS NR_IRQS</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"># else</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"># define NR_IRQ_VECTORS (32 * NR_CPUS)</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"># endif</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#else // 两片 8259A 级联</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define NR_IRQS 16</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define NR_IRQ_VECTORS NR_IRQS</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#endif</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">setup_irq(unsigned int irq, struct irqaction * new)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> shared = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> flags;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct irqaction *old, **p;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">irq_desc_t</span> *desc = irq_desc + irq; <span class="ql-token hljs-comment">// 获取保存当前中断上下文的中断描述符</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (desc-&gt;handler == &amp;no_irq_type) <span class="ql-token hljs-comment">// 描述符已经设置该中断号不响应任何中断，那么直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOSYS;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (new-&gt;flags &amp; SA_SAMPLE_RANDOM) { <span class="ql-token hljs-comment">// 处理随机数熵（忽略）</span>
+ </div>
+ <div class="ql-code-block">
+  rand_initialize_irq(irq);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  spin_lock_irqsave(&amp;desc-&gt;lock,flags); <span class="ql-token hljs-comment">// 对当前中断描述符上自旋锁，保证操作安全</span>
+ </div>
+ <div class="ql-code-block">
+  p = &amp;desc-&gt;action;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((old = *p) != <span class="ql-token hljs-literal">NULL</span>) { <span class="ql-token hljs-comment">// 存在旧的中断上下文</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(old-&gt;flags &amp; new-&gt;flags &amp; SA_SHIRQ)) { <span class="ql-token hljs-comment">// 若没有设置共享中断标志位，那么表示当前中断号独占，那么直接解锁返回</span>
+ </div>
+ <div class="ql-code-block">
+  spin_unlock_irqrestore(&amp;desc-&gt;lock,flags);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EBUSY;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">// 共享中断号，那么将当前上下文关联到当前中断号对应的中断上下文链表的末尾</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">do</span> {
+ </div>
+ <div class="ql-code-block">
+  p = &amp;old-&gt;next;
+ </div>
+ <div class="ql-code-block">
+  old = *p;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">while</span> (old);
+ </div>
+ <div class="ql-code-block">
+  shared = <span class="ql-token hljs-number">1</span>; <span class="ql-token hljs-comment">// 标识共享中断线</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  *p = new;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!shared) { <span class="ql-token hljs-comment">// 独占中断线，那么设置状态位后回调硬中断控制器的回调函数（硬中断在初始化时将会设置用于响应该中断号的回调函数）</span>
+ </div>
+ <div class="ql-code-block">
+  desc-&gt;depth = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  desc-&gt;status &amp;= ~(IRQ_DISABLED | IRQ_AUTODETECT | IRQ_WAITING | IRQ_INPROGRESS);
+ </div>
+ <div class="ql-code-block">
+  desc-&gt;handler-&gt;startup(irq);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  spin_unlock_irqrestore(&amp;desc-&gt;lock,flags);
+ </div>
+ <div class="ql-code-block">
+  register_irq_proc(irq); <span class="ql-token hljs-comment">// 将中断号信息注册到 /proc/irq 文件系统中，比如：create /proc/irq/1234</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 这里我们看看 8259A 中断控制器的初始化</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">make_8259A_irq(unsigned int irq)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  disable_irq_nosync(irq);
+ </div>
+ <div class="ql-code-block">
+  io_apic_irqs &amp;= ~(<span class="ql-token hljs-number">1</span>&lt;&lt;irq);
+ </div>
+ <div class="ql-code-block">
+  irq_desc[irq].handler = &amp;i8259A_irq_type; <span class="ql-token hljs-comment">// 设置中断控制器的回调函数</span>
+ </div>
+ <div class="ql-code-block">
+  enable_irq(irq);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 了解下即可，具体函数就是利用 io 指令读写 8259A 的端口寄存器</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-class">struct hw_interrupt_type i8259A_irq_type =</span> {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-string">"XT-PIC"</span>,
+ </div>
+ <div class="ql-code-block">
+  startup_8259A_irq,
+ </div>
+ <div class="ql-code-block">
+  shutdown_8259A_irq,
+ </div>
+ <div class="ql-code-block">
+  enable_8259A_irq,
+ </div>
+ <div class="ql-code-block">
+  disable_8259A_irq,
+ </div>
+ <div class="ql-code-block">
+  mask_and_ack_8259A,
+ </div>
+ <div class="ql-code-block">
+  end_8259A_irq,
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-literal">NULL</span>
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">init_IRQ 函数</strong></h3>
+<p><br></p>
+<p>该函数用于初始化 IRQ 处理，流程如下：</p>
+<p>1、初始化 8259A 芯片与 irq_desc 数组</p>
+<p>2、对所有中断号设置中断处理函数</p>
+<p>3、执行控制芯片初始化（比如第二块级联的 8259A 芯片）</p>
+<p>4、设置时钟中断</p>
+<p>5、设置 FPU 处理器</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  asmlinkage <span class="ql-token hljs-type">void</span> __init <span class="ql-token hljs-title">start_kernel(void)</span>{ <span class="ql-token hljs-comment">// 内核启动代码</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;init_IRQ(); &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// i386 初始化 8259A 中断控制器，并注册中断相应函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> __init <span class="ql-token hljs-title">init_IRQ(void)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> i;
+ </div>
+ <div class="ql-code-block">
+  pre_intr_init_hook(); <span class="ql-token hljs-comment">// 初始化 8259A 芯片与 irq_desc 数组</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">for</span> (i = <span class="ql-token hljs-number">0</span>; i &lt; NR_IRQS; i++) { <span class="ql-token hljs-comment">// 对所有中断号设置中断处理函数。对于 8259A 前面说过 最多 16个</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-built_in">vector</span> = FIRST_EXTERNAL_VECTOR + i;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (<span class="ql-token hljs-built_in">vector</span> != SYSCALL_VECTOR)
+ </div>
+ <div class="ql-code-block">
+  set_intr_gate(<span class="ql-token hljs-built_in">vector</span>, interrupt[i]);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  intr_init_hook(); <span class="ql-token hljs-comment">// 执行控制芯片初始化，在这里初始化第二块级联的 8259A 芯片的 IRQ 号和处理函数</span>
+ </div>
+ <div class="ql-code-block">
+  setup_timer(); <span class="ql-token hljs-comment">// 设置时钟中断</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (boot_cpu_data.hard_math &amp;&amp; !cpu_has_fpu) <span class="ql-token hljs-comment">// 设置 FPU 处理器</span>
+ </div>
+ <div class="ql-code-block">
+  setup_irq(FPU_IRQ, &amp;fpu_irq);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 初始化 8259A 芯片和中断描述数组</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> __init <span class="ql-token hljs-title">pre_intr_init_hook(void)</span>{
+ </div>
+ <div class="ql-code-block">
+  init_ISA_irqs();
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> __init <span class="ql-token hljs-title">init_ISA_irqs</span> <span class="ql-token hljs-params">(void)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> i;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  init_8259A(<span class="ql-token hljs-number">0</span>); <span class="ql-token hljs-comment">// 初始化 8259A 的内部寄存器状态</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">for</span> (i = <span class="ql-token hljs-number">0</span>; i &lt; NR_IRQS; i++) { <span class="ql-token hljs-comment">// 初始化 irq_desc 数组</span>
+ </div>
+ <div class="ql-code-block">
+  irq_desc[i].status = IRQ_DISABLED;
+ </div>
+ <div class="ql-code-block">
+  irq_desc[i].action = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  irq_desc[i].depth = <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (i &lt; <span class="ql-token hljs-number">16</span>) { &nbsp;<span class="ql-token hljs-comment">// 我们使用 16个中断号即可，注册上述的芯片控制器回调函数</span>
+ </div>
+ <div class="ql-code-block">
+  irq_desc[i].handler = &amp;i8259A_irq_type;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  irq_desc[i].handler = &amp;no_irq_type;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">interrupt[i] 数组生成</strong></h3>
+<p><br></p>
+<p>在上面我们看到会遍历该数组将数组中的地址信息放入 IDT 中，CPU 将在接受到中断后查找 IDT 表，找到入口函数调用。我们看到这里所有中断处理地址都是 do_IRQ 函数，这是为了统一内核的硬中断处理，稍后我们会看到该函数的执行过程。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 宏定义，定义全局名字并对齐</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define ENTRY(name) \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> &nbsp;.globl name; \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> &nbsp;ALIGN; \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> &nbsp;name:</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  .data
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-title">ENTRY(interrupt)</span> <span class="ql-token hljs-comment">// 定义 interrupt 数组</span>
+ </div>
+ <div class="ql-code-block">
+  .text
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">vector</span>=<span class="ql-token hljs-number">0</span>
+ </div>
+ <div class="ql-code-block">
+  ENTRY(irq_entries_start)
+ </div>
+ <div class="ql-code-block">
+  .rept NR_IRQS &nbsp;<span class="ql-token hljs-comment">// 重复生成 16 个中断处理函数入口</span>
+ </div>
+ <div class="ql-code-block">
+  ALIGN
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-number">1</span>: pushl $<span class="ql-token hljs-built_in">vector-256</span> &nbsp;<span class="ql-token hljs-comment">// 每次进入common_interrupt前，将当前中断向量压入栈中</span>
+ </div>
+ <div class="ql-code-block">
+  jmp common_interrupt <span class="ql-token hljs-comment">// 跳转到 common_interrupt 地址处继续处理中断</span>
+ </div>
+ <div class="ql-code-block">
+  .data <span class="ql-token hljs-comment">// 该数据表示指向 标号为 1的入口地址，将包含在 interrupt 数组 中</span>
+ </div>
+ <div class="ql-code-block">
+  .<span class="ql-token hljs-type">long</span> <span class="ql-token hljs-number">1b</span>
+ </div>
+ <div class="ql-code-block">
+  .text
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">vector</span>=<span class="ql-token hljs-built_in">vector</span>+<span class="ql-token hljs-number">1</span>
+ </div>
+ <div class="ql-code-block">
+  .endr
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ALIGN
+ </div>
+ <div class="ql-code-block">
+  common_interrupt:
+ </div>
+ <div class="ql-code-block">
+  SAVE_ALL <span class="ql-token hljs-comment">// 保存所有寄存器</span>
+ </div>
+ <div class="ql-code-block">
+  call do_IRQ <span class="ql-token hljs-comment">// 调用 do_IRQ 地址处理当前中断</span>
+ </div>
+ <div class="ql-code-block">
+  jmp ret_from_intr <span class="ql-token hljs-comment">// 调用中断后返回进程进入中断前的状态</span>
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">do_IRQ 函数</strong></h3>
+<p><br></p>
+<p>该函数用于统一响应 Linux 硬中断，当 CPU 检测到 中断后 执行该方法前，将会压入保存的寄存器以及中断号放入栈中传递，这时我们可以通过 struct pt_regs 获取这些保存的寄存器的值。处理流程如下：</p>
+<p>1、设置状态位，表示当前正在处理硬中断</p>
+<p>2、调用中断控制器的 ack 函数，回复中断控制器，当前已经接收到该中断</p>
+<p>3、若当前硬中断状态不为 IRQ_DISABLED（已关闭） 和 IRQ_INPROGRESS（正在处理），那么取出该硬中断的处理函数 action，并设置标志位 表示该中断将要被处理</p>
+<p>4、回调该 IRQ 设置 action 回调函数</p>
+<p>5、回调 end 函数 并退出中断处理</p>
+<p>6、检测是否存在挂起的软中断，若存在，那么执行这些未处理的软中断</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  asmlinkage <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">do_IRQ(struct pt_regs regs)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> irq = regs.orig_eax &amp; <span class="ql-token hljs-number">0xff</span>; <span class="ql-token hljs-comment">// 获取中断号</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">irq_desc_t</span> *desc = irq_desc + irq; <span class="ql-token hljs-comment">// 获取当前中断号的描述符</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct irqaction * action;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">int</span> status;
+ </div>
+ <div class="ql-code-block">
+  irq_enter(); <span class="ql-token hljs-comment">// 设置状态位，表示当前正在处理硬中断</span>
+ </div>
+ <div class="ql-code-block">
+  kstat_this_cpu.irqs[irq]++;
+ </div>
+ <div class="ql-code-block">
+  spin_lock(&amp;desc-&gt;lock);
+ </div>
+ <div class="ql-code-block">
+  desc-&gt;handler-&gt;ack(irq); <span class="ql-token hljs-comment">// 调用中断控制器的 ack 函数，回复中断控制器，当前已经接收到该中断</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  status = desc-&gt;status &amp; ~(IRQ_REPLAY | IRQ_WAITING); <span class="ql-token hljs-comment">// 去除中断状态位中的 IRQ_REPLAY 和 IRQ_WAITING 状态</span>
+ </div>
+ <div class="ql-code-block">
+  status |= IRQ_PENDING; <span class="ql-token hljs-comment">// 当前硬中断还没处理，所以现在设置状态为：待处理</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  action = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (likely(!(status &amp; (IRQ_DISABLED | IRQ_INPROGRESS)))) { <span class="ql-token hljs-comment">// 若当前硬中断状态不为 IRQ_DISABLED（已关闭） 和 IRQ_INPROGRESS（正在处理），那么取出该硬中断的处理函数 action，并设置标志位 表示该中断将要被处理</span>
+ </div>
+ <div class="ql-code-block">
+  action = desc-&gt;action;
+ </div>
+ <div class="ql-code-block">
+  status &amp;= ~IRQ_PENDING; <span class="ql-token hljs-comment">// 去除 IRQ_PENDING 标志位</span>
+ </div>
+ <div class="ql-code-block">
+  status |= IRQ_INPROGRESS; <span class="ql-token hljs-comment">// 设置 当前中断 即将被处理状态位</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  desc-&gt;status = status;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 如果该硬中断正在被处理或者被禁用，那么直接退出</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (unlikely(!action))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> out;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">for</span> (;;) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">irqreturn_t</span> action_ret;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  spin_unlock(&amp;desc-&gt;lock); <span class="ql-token hljs-comment">// 由于标志位已经被设置，所以，这里可以释放该中断号描述符的自旋锁</span>
+ </div>
+ <div class="ql-code-block">
+  action_ret = handle_IRQ_event(irq, &amp;regs, action); <span class="ql-token hljs-comment">// 回调该中断号注册的中断处理函数</span>
+ </div>
+ <div class="ql-code-block">
+  spin_lock(&amp;desc-&gt;lock); <span class="ql-token hljs-comment">// 处理完成后，由于需要重新设置状态位，所以这里重新获取自旋锁</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!noirqdebug) <span class="ql-token hljs-comment">// 如果开启了 irq 调试，那么对当前 irq 的处理状态进行检测：如果前10万个中断中的99,900个没有被处理，那么我们可以假定该IRQ以某种方式卡住了，那么将其删除并尝试关闭该 IRQ，这里我们了解即可</span>
+ </div>
+ <div class="ql-code-block">
+  note_interrupt(irq, desc, action_ret);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (likely(!(desc-&gt;status &amp; IRQ_PENDING))) <span class="ql-token hljs-comment">// 若当前中断在处理过程中没有再次被中断（可能由其他 CPU 的中断控制器设置），那么退出</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  desc-&gt;status &amp;= ~IRQ_PENDING; <span class="ql-token hljs-comment">// 否则继续循环处理该硬中断</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  desc-&gt;status &amp;= ~IRQ_INPROGRESS; <span class="ql-token hljs-comment">// 标识当前硬中断已经处理完成</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  out: <span class="ql-token hljs-comment">// 回调 end 函数，同时解锁</span>
+ </div>
+ <div class="ql-code-block">
+  desc-&gt;handler-&gt;end(irq);
+ </div>
+ <div class="ql-code-block">
+  spin_unlock(&amp;desc-&gt;lock);
+ </div>
+ <div class="ql-code-block">
+  irq_exit(); <span class="ql-token hljs-comment">// 设置状态位表示 CPU 完成处理 硬中断，同时检测是否存在软中断，若存在，那么触发软中断执行</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 检测是否发生软中断，若存在，那么执行</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define irq_exit() </span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">do</span> {
+ </div>
+ <div class="ql-code-block">
+  preempt_count() -= IRQ_EXIT_OFFSET;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!in_interrupt() &amp;&amp; softirq_pending(smp_processor_id())) &nbsp;<span class="ql-token hljs-comment">// in_interrupt() 表示当前软中断已经处理，但是可能在处理过程中，又发生了 硬中断，所以这里需要检测是否 该软中断 正在被处理，若在，那么直接退出，后续的执行函数将会继续处理软中断</span>
+ </div>
+ <div class="ql-code-block">
+  do_softirq();
+ </div>
+ <div class="ql-code-block">
+  preempt_enable_no_resched();
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">while</span> (<span class="ql-token hljs-number">0</span>)
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">handle_IRQ_event 函数</strong></h3>
+<p><br></p>
+<p>该函数较为简单：遍历 响应该中断号 的处理函数链。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">handle_IRQ_event(unsigned int irq, struct pt_regs *regs, struct irqaction *action)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> status = <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> retval = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(action-&gt;flags &amp; SA_INTERRUPT)) <span class="ql-token hljs-comment">// 若当前中断处理函数的标志位 为 SA_INTERRUPT，表名在回调函数时，需要开启硬中断的响应，也即执行：sti 指令（我们在混沌学堂中看到，当 CPU 执行中断门时会自动关闭硬中断标志位：EFLAGS 中的 IF 标志位）</span>
+ </div>
+ <div class="ql-code-block">
+  local_irq_enable();
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">do</span> { <span class="ql-token hljs-comment">// 循环调用该中断的处理函数链</span>
+ </div>
+ <div class="ql-code-block">
+  status |= action-&gt;flags;
+ </div>
+ <div class="ql-code-block">
+  retval |= action-&gt;handler(irq, action-&gt;dev_id, regs);
+ </div>
+ <div class="ql-code-block">
+  action = action-&gt;next;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">while</span> (action);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (status &amp; SA_SAMPLE_RANDOM) <span class="ql-token hljs-comment">// 当前硬中断的处理标识用于生成 随机数的熵，那么进行处理</span>
+ </div>
+ <div class="ql-code-block">
+  add_interrupt_randomness(irq);
+ </div>
+ <div class="ql-code-block">
+  local_irq_disable(); <span class="ql-token hljs-comment">// 关闭当前 CPU 的硬中断响应，此时 CPU 将不相应硬中断信号（NMI 不可屏蔽的硬中断处理除外）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> retval;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p></p>
+</body>
+</html>

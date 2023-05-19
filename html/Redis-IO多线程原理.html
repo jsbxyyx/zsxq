@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Redis IO多线程原理</h1>
+<p>2022-05-26T01:02:37.484+0800</p>
+<p><p><span style="color: rgb(236, 40, 52);">最近看到一堆鼓吹Redis 6.0 IO 多线程的高性能，所以提前分析下它的原理</span></p>
+<p>众所周知Redis的事件循环模型并没有使用libevent、libev、libuv等库，而是自己实现了一套称之为ae的事件循环模型，而在最新的redis中将原来的单线程模型改进为了多线程处理IO操作的线程，也即单线程接收客户端连接，多个IO线程同时处理这些客户端连接的Read、Write操作实现并行写增加了性能。但同时很多朋友并不知道其中的处理原理，并且经过笔者的阅览，对比与Netty和Tomcat的线程模型，笔者认为该模型有待优化。这篇文章我们着重讨论以下几个内容：</p>
+<ol>
+ <li>ae主线程轮询事件原理</li>
+ <li>服务端监听并处理客户端连接原理</li>
+ <li>IO多线程处理的过程</li>
+ <li>多线程处理的改进</li>
+</ol>
+<p>注：本文采用最新的redis 6.0的源码分析。</p>
+<p><strong>Redis ae主线程处理事件原理</strong></p>
+<p>我们先来看在server.c文件的main函数中执行的过程。我们看到由主线程调用aeMain函数进行轮询处理事件，我们这里省略了对于事件循环的初始化过程，把关注点放在事件处理上。而aeMain函数中使用了一个循环调用aeProcessEvents函数来处理eventLoop中准备好的事件，同时使用AE_ALL_EVENTS标志位标识处理所有事件，AE_CALL_BEFORE_SLEEP和AE_CALL_AFTER_SLEEP标志位标识在执行aeApiPoll函数的前后调用回调函数：beforesleep和aftersleep。详细实现如下。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">main</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">argc</span>, <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">**</span><span style="color: rgb(184, 191, 198);">argv</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeMain</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">el</span>);</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">aeMain</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;stop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 循环处理事件，直到显示指定停止</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">!eventLoop-&gt;stop</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeProcessEvents</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(184, 191, 198);">AE_ALL_EVENTS|</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">AE_CALL_BEFORE_SLEEP|</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">AE_CALL_AFTER_SLEEP</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>接下来我们来看aeProcessEvents函数的实现过程。我们看到首先判断eventLoop-&gt;maxfd和标志位，maxfd保存了当前注册到事件循环中的最大文件描述符，当该描述符存在的情况下，肯定有事件被注册了，那么可以直接执行，同时我们看到aeApiPoll函数调用前后回调了beforesleep和aftersleep函数，因为aeApiPoll函数底层可能是poll、select、epoll等函数，根据tvp来设置睡眠时间，所以这里的回调函数名为睡眠前后回调函数，该函数会把准备好的事件放入eventLoop-&gt;fired数组中，我们通过循环获取该数组中的aeFileEvent对象，根据准备好的事件类型来调用不同的函数，也即如果是读那么调用rfileProc，如果是写那么调用wfileProc函数。详细实现如下，其中笔者省略掉了一些变量的定义保留了核心操作。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">aeProcessEvents</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 处理事件</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">eventLoop-&gt;maxfd</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span> <span style="color: rgb(184, 191, 198);">||</span></p>
+<p>&nbsp;&nbsp;&nbsp;((<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_TIME_EVENTS</span>) <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_DONT_WAIT</span>))) {</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 调用睡眠前回调函数，因为aeApiPoll函数底层可能是poll、select、epoll等函数，根据tvp来设置睡眠时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">eventLoop-&gt;beforesleep</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_CALL_BEFORE_SLEEP</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;beforesleep</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取所有准备好的事件，结果存放在aeEventLoop结构中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">numevents</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">aeApiPoll</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(184, 191, 198);">tvp</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取事件完成后回调aftersleep回调函数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">eventLoop-&gt;aftersleep</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_CALL_AFTER_SLEEP</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;aftersleep</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 循环处理所有事件</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">numevents</span>; <span style="color: rgb(184, 191, 198);">j++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// aeEventLoop结构中的fired数组保存了所有准备好的事件</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeFileEvent</span> <span style="color: rgb(184, 191, 198);">*fe</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;eventLoop-&gt;events</span>[<span style="color: rgb(184, 191, 198);">eventLoop-&gt;fired</span>[<span style="color: rgb(184, 191, 198);">j</span>].<span style="color: rgb(184, 191, 198);">fd</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 处理读事件</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!invert</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">fe-&gt;mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_READABLE</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fe-&gt;rfileProc</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>,<span style="color: rgb(184, 191, 198);">fd</span>,<span style="color: rgb(184, 191, 198);">fe-&gt;clientData</span>,<span style="color: rgb(184, 191, 198);">mask</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fired++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fe</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;eventLoop-&gt;events</span>[<span style="color: rgb(184, 191, 198);">fd</span>]; <span style="color: rgb(218, 146, 74);">/* Refresh in case of resize. */</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 处理写事件</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fe-&gt;mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!fired</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">fe-&gt;wfileProc</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">fe-&gt;rfileProc</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fe-&gt;wfileProc</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>,<span style="color: rgb(184, 191, 198);">fd</span>,<span style="color: rgb(184, 191, 198);">fe-&gt;clientData</span>,<span style="color: rgb(184, 191, 198);">mask</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fired++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processed++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 执行时间事件</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_TIME_EVENTS</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processed</span> <span style="color: rgb(184, 191, 198);">+=</span> <span style="color: rgb(184, 191, 198);">processTimeEvents</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">processed</span>; <span style="color: rgb(218, 146, 74);">/* return the number of processed file/time events */</span></p>
+<p>}</p>
+<p>接下来我们来看aeApiPoll函数，该函数用于从内核中获取准备好的事件对象，并将其放入eventLoop-&gt;fired数组中，我们这里选取Linux平台下epoll函数的实现过程。我们看到首先调用epoll_wait函数从内核中获取准备好的事件，然后遍历这些事件，将epoll层面的标志位EPOLLIN（读事件）、EPOLLOUT（写事件）转变为Redis层面的标志位AE_READABLE（读事件）、AE_WRITABLE（写事件），随后将eventLoop-&gt;fired数组中相应的aeFileEvent结构位的fd和mask初始化。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">aeApiPoll</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">timeval</span> <span style="color: rgb(184, 191, 198);">*tvp</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取api状态结构</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeApiState</span> <span style="color: rgb(184, 191, 198);">*state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;apidata</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">retval</span>, <span style="color: rgb(184, 191, 198);">numevents</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 从内核中获取准备好的事件对象，该对象保存在state-&gt;events数组中，tvp指明了睡眠时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">epoll_wait</span>(<span style="color: rgb(184, 191, 198);">state-&gt;epfd</span>,<span style="color: rgb(184, 191, 198);">state-&gt;events</span>,<span style="color: rgb(184, 191, 198);">eventLoop-&gt;setsize</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tvp</span> <span style="color: rgb(184, 191, 198);">?</span> (<span style="color: rgb(184, 191, 198);">tvp-&gt;tv_sec*</span><span style="color: rgb(100, 171, 143);">1000</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">tvp-&gt;tv_usec/</span><span style="color: rgb(100, 171, 143);">1000</span>) : <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 当前有准备好的事件，retval变量保存了准备好的事件数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">j</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">numevents</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">retval</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 遍历所有的事件</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">numevents</span>; <span style="color: rgb(184, 191, 198);">j++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 这里我们采用C语言中对指针的加法来完成数组的遍历</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">epoll_event</span> <span style="color: rgb(184, 191, 198);">*e</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">state-&gt;events+j</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 通过事件类型来设置在redis层面使用的事件类型</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">e-&gt;events</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">EPOLLIN</span>) <span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">AE_READABLE</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">e-&gt;events</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">EPOLLOUT</span>) <span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">e-&gt;events</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">EPOLLERR</span>) <span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE|AE_READABLE</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">e-&gt;events</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">EPOLLHUP</span>) <span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE|AE_READABLE</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将fired数组中相应位置的aeFileEvent结构的fd和mask初始化</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;fired</span>[<span style="color: rgb(184, 191, 198);">j</span>].<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">e-&gt;data</span>.<span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;fired</span>[<span style="color: rgb(184, 191, 198);">j</span>].<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">mask</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">numevents</span>;</p>
+<p>}</p>
+<p><strong>Redis Server 套接字初始化过程</strong></p>
+<p>本小节我们来看看server端用于监听客户端套接字的事件，我们看到同样在main函数中调用initServer函数初始化redis服务端，在该函数中调用aeCreateFileEvent函数将监听客户端连接的fd注册到循环组中。实现原理如下。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">main</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">argc</span>, <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">**</span><span style="color: rgb(184, 191, 198);">argv</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 初始化redis服务器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">initServer</span>();</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">initServer</span>(<span style="color: rgb(28, 198, 133);">void</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 循环初始化ae事件循环监听客户端的端口，通常我们这里只监听一个端口</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">ipfd_count</span>; <span style="color: rgb(184, 191, 198);">j++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 向ae事件循环组中注册该fd事件为AE_READABLE读事件，同时指定回调函数为acceptTcpHandler</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">aeCreateFileEvent</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">el</span>, <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">ipfd</span>[<span style="color: rgb(184, 191, 198);">j</span>], <span style="color: rgb(184, 191, 198);">AE_READABLE</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">acceptTcpHandler</span>,<span style="color: rgb(184, 191, 198);">NULL</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AE_ERR</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">serverPanic</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"Unrecoverable error creating server.ipfd file event."</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>接下来我们来看aeCreateFileEvent函数的实现原理。我们看到fd保存了eventLoop-&gt;events的下标，我们首先调用aeApiAddEvent函数将该fd和它感兴趣的事件集注册到事件循环中，随后根据读写事件集注册aeFileEvent结构的读写回调事件，我们这里以read和accept操作作为例子，所以我们这里设置的是acceptTcpHandler函数。详细实现如下。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">aeCreateFileEvent</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mask</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeFileProc</span> <span style="color: rgb(184, 191, 198);">*proc</span>, <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">clientData</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 首先检测fd索引不能超过最大数组下标</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;setsize</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">errno</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ERANGE</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">AE_ERR</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取下标对应的aeFileEvent事件结构体</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeFileEvent</span> <span style="color: rgb(184, 191, 198);">*fe</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;eventLoop-&gt;events</span>[<span style="color: rgb(184, 191, 198);">fd</span>];</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将其添加到事件循环中，mask指明了感兴趣的事件集</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">aeApiAddEvent</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(184, 191, 198);">mask</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">AE_ERR</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 保存事件集并绑定事件执行函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fe-&gt;mask</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">mask</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_READABLE</span>) <span style="color: rgb(184, 191, 198);">fe-&gt;rfileProc</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">proc</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE</span>) <span style="color: rgb(184, 191, 198);">fe-&gt;wfileProc</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">proc</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fe-&gt;clientData</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">clientData</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果当前下标超过最大下标，那么当前下边为事件循环所持有的最大下标</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;maxfd</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;maxfd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">AE_OK</span>;</p>
+<p>}</p>
+<p>最后我们来看aeApiAddEvent函数的实现过程。我们这里同样以epoll函数为例，我们看到首先根据之前fd是否存在于epoll中来选择op为EPOLL_CTL_ADD新增操作还是EPOLL_CTL_MOD修改操作，然后将redis的事件集转变为epoll的事件集，随后调用epoll_ctl将该fd及其事件集放入内核中。详细实现如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">aeApiAddEvent</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mask</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取ae状态结构体</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeApiState</span> <span style="color: rgb(184, 191, 198);">*state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;apidata</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">epoll_event</span> <span style="color: rgb(141, 141, 240);">ee</span> <span style="color: rgb(184, 191, 198);">=</span> {<span style="color: rgb(100, 171, 143);">0</span>};</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 根据该fd的状态来选择是添加还是修改，如果之前已经注册过该fd，那么events[fd].mask不为AE_NONE，那么将是修改操作所以op为EPOLL_CTL_MOD，否则为EPOLL_CTL_ADD</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">op</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;events</span>[<span style="color: rgb(184, 191, 198);">fd</span>].<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AE_NONE</span> <span style="color: rgb(184, 191, 198);">?</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EPOLL_CTL_ADD</span> : <span style="color: rgb(184, 191, 198);">EPOLL_CTL_MOD</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ee</span>.<span style="color: rgb(184, 191, 198);">events</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 混合之前注册的事件集，如果是新增，那么这里只有mask</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;events</span>[<span style="color: rgb(184, 191, 198);">fd</span>].<span style="color: rgb(184, 191, 198);">mask</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将Redis的事件集转换为Epoll使用的事件集</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_READABLE</span>) <span style="color: rgb(184, 191, 198);">ee</span>.<span style="color: rgb(184, 191, 198);">events</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">EPOLLIN</span>; <span style="color: rgb(218, 146, 74);">// 读事件</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE</span>) <span style="color: rgb(184, 191, 198);">ee</span>.<span style="color: rgb(184, 191, 198);">events</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">EPOLLOUT</span>; <span style="color: rgb(218, 146, 74);">// 写事件</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ee</span>.<span style="color: rgb(184, 191, 198);">data</span>.<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将该fd注册到epoll中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">epoll_ctl</span>(<span style="color: rgb(184, 191, 198);">state-&gt;epfd</span>,<span style="color: rgb(184, 191, 198);">op</span>,<span style="color: rgb(184, 191, 198);">fd</span>,<span style="color: rgb(184, 191, 198);">&amp;ee</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>) <span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>}</p>
+<p><strong>Redis Server 处理客户端连接过程</strong></p>
+<p>我们知道当ae事件循环从事件循环中获取到准备好的事件，那么将会根据事件集类型回调其操作，我们在上一节看到服务端fd注册了读事件，同时设置了回调事件为acceptTcpHandler函数，Java Coder注意下，这里不像Java的Selector将事件细分为OP_ACCEPT、OP_CONNECT、OP_WRITE、OP_READ事件，对于epoll而言它只知道读写事件，而我们这里将回调函数设置为不同的函数从而实现了不同事件的处理过程。这一节我们来看看当redis接收到客户端连接后如何处理。</p>
+<p>我们先来看acceptTcpHandler函数处理，当客户端连接后将会回调该函数，我们看到循环调用anetTcpAccep处理客户端连接，同时为了保证一次处理的连接数，这里使用了最大值MAX_ACCEPTS_PER_CALL来限制一次接受的客户端连接，该值默认为1000。接收到连接后随后调用connCreateAcceptedSocket创建connection结构体，随后调用acceptCommonHandler函数处理该连接。详细实现如下</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">acceptTcpHandler</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*el</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">privdata</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mask</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">cport</span>, <span style="color: rgb(184, 191, 198);">cfd</span>, <span style="color: rgb(184, 191, 198);">max</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">MAX_ACCEPTS_PER_CALL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">cip</span>[<span style="color: rgb(184, 191, 198);">NET_IP_STR_LEN</span>];</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 限制每次处理的客户端连接最大值为MAX_ACCEPTS_PER_CALL 1000</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(184, 191, 198);">max--</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 接受客户端连接接</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cfd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">anetTcpAccept</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">neterr</span>, <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(184, 191, 198);">cip</span>, <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">cip</span>), <span style="color: rgb(184, 191, 198);">&amp;cport</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果发生错误那么返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cfd</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 处理客户端连接</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">acceptCommonHandler</span>(<span style="color: rgb(184, 191, 198);">connCreateAcceptedSocket</span>(<span style="color: rgb(184, 191, 198);">cfd</span>),<span style="color: rgb(100, 171, 143);">0</span>,<span style="color: rgb(184, 191, 198);">cip</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>接下来我们来看anetTcpAccept函数如何处理客户端连接。我们看到该函数调用anetGenericAccept来接收客户端连接，在anetGenericAccept函数中通过调用accept函数接收客户端连接，由于我们将该fd设置为了非阻塞，所以如果没有客户端连接，那么将会返回-1。详细实现如下。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">anetTcpAccept</span>(<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">s</span>, <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">ip</span>, <span style="color: rgb(28, 198, 133);">size_t</span> <span style="color: rgb(184, 191, 198);">ip_len</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">port</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">anetGenericAccept</span>(<span style="color: rgb(184, 191, 198);">err</span>,<span style="color: rgb(184, 191, 198);">s</span>,(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span><span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">&amp;sa</span>,<span style="color: rgb(184, 191, 198);">&amp;salen</span>)) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">anetGenericAccept</span>(<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">s</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> <span style="color: rgb(184, 191, 198);">*sa</span>, <span style="color: rgb(184, 191, 198);">socklen_t</span> <span style="color: rgb(184, 191, 198);">*len</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(100, 171, 143);">1</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 调用该函数获取客户端连接</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">accept</span>(<span style="color: rgb(184, 191, 198);">s</span>,<span style="color: rgb(184, 191, 198);">sa</span>,<span style="color: rgb(184, 191, 198);">len</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">errno</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">EINTR</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">anetSetError</span>(<span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(210, 107, 107);">"accept: %s"</span>, <span style="color: rgb(184, 191, 198);">strerror</span>(<span style="color: rgb(184, 191, 198);">errno</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>}</p>
+<p>接下来我们来看connCreateAcceptedSocket函数如何根据客户端连接fd创建connection结构体，我们看到首先调用connCreateSocket函数创建connection结构，该函数首先分配connection结构的内存空间，随后设置type字段为&amp;CT_Socket，该结构中定义了大量回调函数，将会在后面处理客户端连接时调用，随后保存当前客户端fd，同时设置状态为CONN_STATE_ACCEPTING表示正在处理中。详细实现如下。</p>
+<p><span style="color: rgb(184, 191, 198);">connection</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">connCreateAcceptedSocket</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建connection结构</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">connection</span> <span style="color: rgb(184, 191, 198);">*conn</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connCreateSocket</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 保存fd并将connection结构的状态设置为CONN_STATE_ACCEPTING，表示正在处理中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">conn-&gt;fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">conn-&gt;state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">CONN_STATE_ACCEPTING</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">conn</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">connection</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">connCreateSocket</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 分配结构体内存</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">connection</span> <span style="color: rgb(184, 191, 198);">*conn</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">zcalloc</span>(<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">connection</span>));</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置类型为CT_Socket，该CT_Socket中定义了回调函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">conn-&gt;type</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;CT_Socket</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 初始化fd为-1</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">conn-&gt;fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">conn</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 回调函数定义</span></p>
+<p><span style="color: rgb(184, 191, 198);">ConnectionType</span> <span style="color: rgb(184, 191, 198);">CT_Socket</span> <span style="color: rgb(184, 191, 198);">=</span> {</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">ae_handler</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketEventHandler</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">close</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketClose</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">write</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketWrite</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">read</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketRead</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">accept</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketAccept</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">connect</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketConnect</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">set_write_handler</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketSetWriteHandler</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">set_read_handler</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketSetReadHandler</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">get_last_error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketGetLastError</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">blocking_connect</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketBlockingConnect</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">sync_write</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketSyncWrite</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">sync_read</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketSyncRead</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">sync_readline</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketSyncReadLine</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">get_type</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connSocketGetType</span></p>
+<p>};</p>
+<p>最后我们来看acceptCommonHandler函数如何处理connCreateAcceptedSocket函数中创建的处于CONN_STATE_ACCEPTING状态的connection结构体。我们看到首先调用createClient函数创建客户端连接结构体client。详细实现如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">acceptCommonHandler</span>(<span style="color: rgb(184, 191, 198);">connection</span> <span style="color: rgb(184, 191, 198);">*conn</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>, <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">ip</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建客户端连接结构体client</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">c</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">createClient</span>(<span style="color: rgb(184, 191, 198);">conn</span>)) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>我们来看createClient函数创建客户端连接的核心步骤。我们看到首先分配客户端结构client的内存，随后配置客户端fd为非阻塞式IO，配置TcpNoDelay，设置保活配置，随后设置客户端连接处理器为readQueryFromClient，最后将客户端连接到全局客户端列表。详细实现如下，当然笔者这里省略了对结构体client的其他属性的初始化过程。</p>
+<p><span style="color: rgb(184, 191, 198);">client</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">createClient</span>(<span style="color: rgb(184, 191, 198);">connection</span> <span style="color: rgb(184, 191, 198);">*conn</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 分配客户端结构内存</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">client</span> <span style="color: rgb(184, 191, 198);">*c</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">zmalloc</span>(<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">client</span>));</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">conn</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 配置非阻塞式IO</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">connNonBlock</span>(<span style="color: rgb(184, 191, 198);">conn</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 配置TcpNoDelay</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">connEnableTcpNoDelay</span>(<span style="color: rgb(184, 191, 198);">conn</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置保活配置</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">tcpkeepalive</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">connKeepAlive</span>(<span style="color: rgb(184, 191, 198);">conn</span>,<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">tcpkeepalive</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置客户端连接处理器为readQueryFromClient</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">connSetReadHandler</span>(<span style="color: rgb(184, 191, 198);">conn</span>, <span style="color: rgb(184, 191, 198);">readQueryFromClient</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将client结构设置为connection结构的私有数据PrivateData</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">connSetPrivateData</span>(<span style="color: rgb(184, 191, 198);">conn</span>, <span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将客户端连接到全局客户端列表</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">conn</span>) <span style="color: rgb(184, 191, 198);">linkClient</span>(<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">c</span>;</p>
+<p>}</p>
+<p>我们知道客户端对象接收到了连接，也需要将其放入ae事件循环中，我们通过这些函数调用并没有看到这个操作，那么是哪里的函数调用没有看到呢？答案是必须的，不然怎么接收客户端的读请求，我们来看connSetReadHandler(conn, readQueryFromClient);这个函数的实现原理。可以看到该函数直接调用我们之前看到的CT_Socket结构体定义的set_read_handler函数。而该函数将readQueryFromClient函数设置为连接的read_handler，我们在前面聊ae循环处理事件原理时，了解到当该客户端连接可读时将会调用该函数，同时调用aeCreateFileEvent将该客户端fd添加到事件循环中，并将事件集设置为AE_READABLE。这时当客户端数据到来时将由ae事件循环来调用readQueryFromClient函数来处理。详细源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">inline</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">connSetReadHandler</span>(<span style="color: rgb(184, 191, 198);">connection</span> <span style="color: rgb(184, 191, 198);">*conn</span>, <span style="color: rgb(184, 191, 198);">ConnectionCallbackFunc</span> <span style="color: rgb(184, 191, 198);">func</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">conn-&gt;type-&gt;set_read_handler</span>(<span style="color: rgb(184, 191, 198);">conn</span>, <span style="color: rgb(184, 191, 198);">func</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// CT_Socket结构体定义</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">connSocketSetReadHandler</span>(<span style="color: rgb(184, 191, 198);">connection</span> <span style="color: rgb(184, 191, 198);">*conn</span>, <span style="color: rgb(184, 191, 198);">ConnectionCallbackFunc</span> <span style="color: rgb(184, 191, 198);">func</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">func</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">conn-&gt;read_handler</span>) <span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">C_OK</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">conn-&gt;read_handler</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">func</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!conn-&gt;read_handler</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeDeleteFileEvent</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">el</span>,<span style="color: rgb(184, 191, 198);">conn-&gt;fd</span>,<span style="color: rgb(184, 191, 198);">AE_READABLE</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">aeCreateFileEvent</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">el</span>,<span style="color: rgb(184, 191, 198);">conn-&gt;fd</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">AE_READABLE</span>,<span style="color: rgb(184, 191, 198);">conn-&gt;type-&gt;ae_handler</span>,<span style="color: rgb(184, 191, 198);">conn</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AE_ERR</span>) <span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">C_ERR</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">C_OK</span>;</p>
+<p>}</p>
+<p>最后我们来看readQueryFromClient函数如何处理客户端的数据，我们看到首先调用postponeClientRead函数尝试将客户端连接放入到read pending队列中，随后由IO 线程来并行处理，如果调用成功，直接返回，否则我们调用connRead函数读取客户端命令，然后调用processInputBuffer函数处理该命令。详细源码如下。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">readQueryFromClient</span>(<span style="color: rgb(184, 191, 198);">connection</span> <span style="color: rgb(184, 191, 198);">*conn</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将客户端连接放入到read pending队列中，随后由IO 线程来并行处理</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">postponeClientRead</span>(<span style="color: rgb(184, 191, 198);">c</span>)) <span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 读取客户端数据</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">connRead</span>(<span style="color: rgb(184, 191, 198);">c-&gt;conn</span>, <span style="color: rgb(184, 191, 198);">c-&gt;querybuf+qblen</span>, <span style="color: rgb(184, 191, 198);">readlen</span>);</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 处理客户端数据</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processInputBuffer</span>(<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>}</p>
+<p>我们来看postponeClientRead如何将客户端放入到read pending队列。我们看到判断条件为五个，读者这里特别关注CLIENT_PENDING_READ这个标识符，该标识符用于表示该客户端不会再次放入clients_pending_read队列。详细源码及解释如下。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">postponeClientRead</span>(<span style="color: rgb(184, 191, 198);">client</span> <span style="color: rgb(184, 191, 198);">*c</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">io_threads_active</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(218, 146, 74);">// IO线程激活</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">io_threads_do_reads</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(218, 146, 74);">// 配置从IO线程读取命令</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">!clientsArePaused</span>() <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(218, 146, 74);">// redis服务没有设置客户端暂停处理</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">!ProcessingEventsWhileBlocked</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(218, 146, 74);">// 没有设置阻塞时处理事件</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">c-&gt;flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> (<span style="color: rgb(184, 191, 198);">CLIENT_MASTER|CLIENT_SLAVE|CLIENT_PENDING_READ</span>))) <span style="color: rgb(218, 146, 74);">// 当前客户端不属于MASTER或者CLIENT_SLAVE，同时状态也不属于CLIENT_PENDING_READ</span></p>
+<p>&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将该客户端状态设置为CLIENT_PENDING_READ表明挂起待IO线程读取数据</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">c-&gt;flags</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">CLIENT_PENDING_READ</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将该客户端放入全局clients_pending_read队列中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listAddNodeHead</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">clients_pending_read</span>,<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>Redis IO线程初始化和执行过程</strong></p>
+<p>我们还是先来IO线程的初始化过程，初始化动作同样在server.c的main函数中执行。我们看到在main函数中调用InitServerLast完成server的最终初始化，在InitServerLast中调用了initThreadedIO函数初始化了IO线程，在initThreadedIO方法中我们创建了io_threads_list数组，该列表保存了每个IO线程需要处理的客户端，也即数组中的每一项也是一个列表，io_threads_pending数组用于标识IO线程的工作状态，默认初始化为0，io_threads数组用于保存各个线程的id，线程的执行体为IOThreadMain。详细源码如下。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">main</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">argc</span>, <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">**</span><span style="color: rgb(184, 191, 198);">argv</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">InitServerLast</span>();</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">InitServerLast</span>() {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">initThreadedIO</span>();</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">initThreadedIO</span>(<span style="color: rgb(28, 198, 133);">void</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">io_threads_num</span>; <span style="color: rgb(184, 191, 198);">i++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建待处理客户端连接列表</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">io_threads_list</span>[<span style="color: rgb(184, 191, 198);">i</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listCreate</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(200, 143, 208);">continue</span>; <span style="color: rgb(218, 146, 74);">/* Thread 0 is the main thread. */</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 保存线程id</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_t</span> <span style="color: rgb(184, 191, 198);">tid</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_mutex_init</span>(<span style="color: rgb(184, 191, 198);">&amp;io_threads_mutex</span>[<span style="color: rgb(184, 191, 198);">i</span>],<span style="color: rgb(184, 191, 198);">NULL</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将处理标志位初始化为0</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">io_threads_pending</span>[<span style="color: rgb(184, 191, 198);">i</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_mutex_lock</span>(<span style="color: rgb(184, 191, 198);">&amp;io_threads_mutex</span>[<span style="color: rgb(184, 191, 198);">i</span>]);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 启动线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">pthread_create</span>(<span style="color: rgb(184, 191, 198);">&amp;tid</span>,<span style="color: rgb(184, 191, 198);">NULL</span>,<span style="color: rgb(184, 191, 198);">IOThreadMain</span>,(<span style="color: rgb(28, 198, 133);">void*</span>)(<span style="color: rgb(28, 198, 133);">long</span>)<span style="color: rgb(184, 191, 198);">i</span>) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">serverLog</span>(<span style="color: rgb(184, 191, 198);">LL_WARNING</span>,<span style="color: rgb(210, 107, 107);">"Fatal: Can't initialize IO thread."</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">exit</span>(<span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 保存线程id</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">io_threads</span>[<span style="color: rgb(184, 191, 198);">i</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tid</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>接下来我们来看线程创建成功后执行的线程执行体IOThreadMain函数执行过程。我们看到如果当前线程的io_threads_pending为0那么自旋直到io_threads_pending不为0，读者注意该操作容易导致服务端CPU利用率较高，当客户端连接被主线程挂起到当前线程的io_threads_list项时，将会把io_threads_pending设置为非0数，这时当前线程开始处理该连接，同时根据连接的状态IO_THREADS_OP_WRITE或者IO_THREADS_OP_READ来调用写或者读操作，我们这里标识的即为IO_THREADS_OP_READ读操作，这时会再次调用readQueryFromClient函数读取客户端数据，读者这里要特别注意该函数再次调用时将不会再次将自己挂起到read pending队列，因为这时的状态已经被设置为了CLIENT_PENDING_READ，详细请参考前面聊的postponeClientRead函数的实现。详细源码如下。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(141, 141, 240);">IOThreadMain</span>(<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">myid</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(100, 171, 143);">1</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 自旋直到io_threads_pending中当前线程项不为0</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">1000000</span>; <span style="color: rgb(184, 191, 198);">j++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">io_threads_pending</span>[<span style="color: rgb(184, 191, 198);">id</span>] <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 执行当前线程自己的io_threads_list中的客户端</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listIter</span> <span style="color: rgb(184, 191, 198);">li</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listNode</span> <span style="color: rgb(184, 191, 198);">*ln</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listRewind</span>(<span style="color: rgb(184, 191, 198);">io_threads_list</span>[<span style="color: rgb(184, 191, 198);">id</span>],<span style="color: rgb(184, 191, 198);">&amp;li</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 遍历所有列表上的客户端，根据读写事件调用readQueryFromClient或者writeToClient函数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>((<span style="color: rgb(184, 191, 198);">ln</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listNext</span>(<span style="color: rgb(184, 191, 198);">&amp;li</span>))) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">client</span> <span style="color: rgb(184, 191, 198);">*c</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listNodeValue</span>(<span style="color: rgb(184, 191, 198);">ln</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">io_threads_op</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">IO_THREADS_OP_WRITE</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">writeToClient</span>(<span style="color: rgb(184, 191, 198);">c</span>,<span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">io_threads_op</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">IO_THREADS_OP_READ</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">readQueryFromClient</span>(<span style="color: rgb(184, 191, 198);">c-&gt;conn</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">serverPanic</span>(<span style="color: rgb(210, 107, 107);">"io_threads_op value is unknown"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 清空列表并标识状态为0</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listEmpty</span>(<span style="color: rgb(184, 191, 198);">io_threads_list</span>[<span style="color: rgb(184, 191, 198);">id</span>]);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">io_threads_pending</span>[<span style="color: rgb(184, 191, 198);">id</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>Redis 主线程处理pending客户端连接原理</strong></p>
+<p>我们前面说到在readQueryFromClient函数中将客户端通过postponeClientRead函数放到了read pending队列，而在main函数中调用initThreadedIO函数创建了IO线程，而IO线程启动后将会执行IOThreadMain函数，该函数从io_threads_list队列中获取到客户端对象来执行读写操作，那么问题来了：谁负责将read pending队列的客户端结构放入到这些IO线程的io_threads_list队列呢？那必然是主线程。那么主线程又是在哪里放入的呢？这个就需要我们前面聊得ae在调用aeApiPoll获取准备好事件前的beforeSleep函数了。那么我们先来看该函数的原理。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">beforeSleep</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 处理read pending队列的客户端队列</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">handleClientsWithPendingReadsUsingThreads</span>();</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">handleClientsWithPendingReadsUsingThreads</span>(<span style="color: rgb(28, 198, 133);">void</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取clients_pending_read队列列表迭代器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listIter</span> <span style="color: rgb(184, 191, 198);">li</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listNode</span> <span style="color: rgb(184, 191, 198);">*ln</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listRewind</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">clients_pending_read</span>,<span style="color: rgb(184, 191, 198);">&amp;li</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">item_id</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 遍历所有待读取的客户端，并将其散列到不同IO线程处理列表中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>((<span style="color: rgb(184, 191, 198);">ln</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listNext</span>(<span style="color: rgb(184, 191, 198);">&amp;li</span>))) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">client</span> <span style="color: rgb(184, 191, 198);">*c</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listNodeValue</span>(<span style="color: rgb(184, 191, 198);">ln</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 通过取余方式散列获取IO线程下标</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">target_id</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">item_id</span> <span style="color: rgb(184, 191, 198);">%</span> <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">io_threads_num</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将该客户端放入该下标列表中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listAddNodeTail</span>(<span style="color: rgb(184, 191, 198);">io_threads_list</span>[<span style="color: rgb(184, 191, 198);">target_id</span>],<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">item_id++</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 所有连接放入到IO线程处理列表后将IO线程操作标识为IO_THREADS_OP_READ读操作</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">io_threads_op</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">IO_THREADS_OP_READ</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">io_threads_num</span>; <span style="color: rgb(184, 191, 198);">j++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置io_threads_pending为非零数，也即当前需要处理的客户端数量，这时线程将会响应该操作，开始处理客户端连接</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">count</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listLength</span>(<span style="color: rgb(184, 191, 198);">io_threads_list</span>[<span style="color: rgb(184, 191, 198);">j</span>]);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">io_threads_pending</span>[<span style="color: rgb(184, 191, 198);">j</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">count</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">//io_threads_list数组0下标处为main线程处理，也即main线程处理一部分读IO</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listRewind</span>(<span style="color: rgb(184, 191, 198);">io_threads_list</span>[<span style="color: rgb(100, 171, 143);">0</span>],<span style="color: rgb(184, 191, 198);">&amp;li</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>((<span style="color: rgb(184, 191, 198);">ln</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listNext</span>(<span style="color: rgb(184, 191, 198);">&amp;li</span>))) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">client</span> <span style="color: rgb(184, 191, 198);">*c</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listNodeValue</span>(<span style="color: rgb(184, 191, 198);">ln</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">readQueryFromClient</span>(<span style="color: rgb(184, 191, 198);">c-&gt;conn</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 清空主线程负责的下标为0的客户端列表，其他的下标由IO线程自己处理</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listEmpty</span>(<span style="color: rgb(184, 191, 198);">io_threads_list</span>[<span style="color: rgb(100, 171, 143);">0</span>]);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 自旋等嗲其他线程处理IO完毕</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(100, 171, 143);">1</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">pending</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">io_threads_num</span>; <span style="color: rgb(184, 191, 198);">j++</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pending</span> <span style="color: rgb(184, 191, 198);">+=</span> <span style="color: rgb(184, 191, 198);">io_threads_pending</span>[<span style="color: rgb(184, 191, 198);">j</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">pending</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 当所有IO线程将clients_pending_read的客户端读IO处理完毕后，在主线程中处理客户端命令</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(184, 191, 198);">listLength</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">clients_pending_read</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ln</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listFirst</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">clients_pending_read</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">client</span> <span style="color: rgb(184, 191, 198);">*c</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">listNodeValue</span>(<span style="color: rgb(184, 191, 198);">ln</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 去掉CLIENT_PENDING_READ标志位，并将其从clients_pending_read队列中移除</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">c-&gt;flags</span> <span style="color: rgb(184, 191, 198);">&amp;=</span> <span style="color: rgb(184, 191, 198);">~CLIENT_PENDING_READ</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">listDelNode</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">clients_pending_read</span>,<span style="color: rgb(184, 191, 198);">ln</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果设置暂停客户端请求那么继续循环</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">clientsArePaused</span>()) <span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 处理客户端命令</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">processPendingCommandsAndResetClient</span>(<span style="color: rgb(184, 191, 198);">c</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">C_ERR</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processInputBuffer</span>(<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果处理完毕且有数据需要写回，那么将客户端放入clients_pending_write队列等待IO线程完成写操作</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">c-&gt;flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">CLIENT_PENDING_WRITE</span>) <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">clientHasPendingReplies</span>(<span style="color: rgb(184, 191, 198);">c</span>))</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">clientInstallWriteHandler</span>(<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">stat_io_reads_processed</span> <span style="color: rgb(184, 191, 198);">+=</span> <span style="color: rgb(184, 191, 198);">processed</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">processed</span>;</p>
+<p>}</p>
+<p><strong>总结</strong></p>
+<p>最终我们可以得出以下结论：</p>
+<ol>
+ <li>Redis的主线程处理客户端连接操作</li>
+ <li>Redis的IO线程处理客户端的读、写操作</li>
+ <li>Redis IO线程处理时，Redis主线程处理部分连接完毕后需要等待IO线程处理客户端完成</li>
+ <li>Redis 线程模型可以进行改进，可以操作Tomcat或者Netty的Reactor模型进行改进，也即：</li>
+ <li class="ql-indent-1">一个线程接收请求</li>
+ <li class="ql-indent-1">IO线程负责处理读写操作</li>
+ <li class="ql-indent-1">操作线程用于单线程执行命令</li>
+ <li class="ql-indent-1">不同redis DB拥有自己的操作线程</li>
+</ol>
+<p>总而言之，Redis基于事件回调的操作，如果不仔细看源码将会非常迷糊，本文将Redis的线程模型完全讲解，其中以读请求和接收连接作为例子，对于写请求操作亦是如此。我们可以简单地用一段话来描述Redis的请求处理流程：Redis主线程一次性获取最大为1000个客户端连接，将其放入到read pending队列中，在下一次aeMain主循环中调用beforeSleep函数，该函数将read pending队列和write pending队列中的客户端散列到IO线程中执行读写操作，并且自身负责下标为0处的客户端，然后等待IO线程完毕后再执行。所以，多线程了个寂寞，仅仅只是减少了IO的时间，事实上主线程这段时间完全可以做些别的事情，CPU的指令流水线和微服务的消息队列是最好的实践，为何不采用流式处理，这样各个线程各司其职岂不快哉？不要问redis作者为什么，他可能会说我乐意，你别用啊。。。就像之前坚持使用CLOCK_REALTIME wall time一样。</p></p>
+</body>
+</html>

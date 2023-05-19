@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理十二 NioEventLoop 原理一</h1>
+<p>2022-03-15T08:04:03.426+0800</p>
+<p><p>前面我们描述了NioEventLoopGroup，实际上它就是一个管理者，用于管理NioEventLoop 的生命周期：创建并传递设置的参数到NioEventLoop 、关闭NioEventLoop 。所以实际干活的就是NioEventLoop ，所以它非常的重要，同时也相对复杂，该类是业务开发中经常使用到的EventLoop。</p>
+<p><strong>核心变量与构造器</strong></p>
+<p>我们知道在Java中实现IO多路复用的就是Selector，那么该类必然需要与该类进行耦合。我们可以从变量和构造器中了解如下几点：</p>
+<ol>
+ <li>在构造器中创建了Selector对象</li>
+ <li>同时对原生的selectedKeys和publicSelectedKeys进行了增强，至于增强了什么，读者可以这么理解：</li>
+ <li class="ql-indent-1">JDK原生自带的放置已经选择集的类型为HashSet</li>
+ <li class="ql-indent-1">那么操作HashSet，就需要计算hash值，同时在遍历时需要使用迭代器对象</li>
+ <li class="ql-indent-1">而这里增强的集合就是一个数组，我们不需要使用迭代器同时也不需要计算hash值（内部使用数组下标操作）</li>
+ <li>由于内部实现就是两个数组进行切换操作，所以笔者这里将其省略，感兴趣的读者可以打开源码一览究竟。</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">NioEventLoop</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">SingleThreadEventLoop</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CLEANUP_INTERVAL</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">256</span>; <span style="color: rgb(218, 146, 74);">// 默认清理周期</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">DISABLE_KEYSET_OPTIMIZATION</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SystemPropertyUtil</span>.<span style="color: rgb(184, 191, 198);">getBoolean</span>(<span style="color: rgb(210, 107, 107);">"io.netty.noKeySetOptimization"</span>, <span style="color: rgb(132, 182, 203);">false</span>); <span style="color: rgb(218, 146, 74);">// 标识是否对Selector进行优化，默认为false</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">MIN_PREMATURE_SELECTOR_RETURNS</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">3</span>; <span style="color: rgb(218, 146, 74);">// 在执行select操作时，执行循环的次数（后面在描述select方法时将会详细介绍）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">SELECTOR_AUTO_REBUILD_THRESHOLD</span>; <span style="color: rgb(218, 146, 74);">// 自动重新创建Selector的阈值（用于避免CPU 100%的bug）</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">IntSupplier</span> <span style="color: rgb(184, 191, 198);">selectNowSupplier</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IntSupplier</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">get</span>() <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">selectNow</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}; <span style="color: rgb(218, 146, 74);">// 用于封装selectNow的Supplier</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Callable&lt;</span><span style="color: rgb(28, 198, 133);">Integer</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">pendingTasksCallable</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Callable&lt;</span><span style="color: rgb(28, 198, 133);">Integer</span><span style="color: rgb(184, 191, 198);">&gt;</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">Integer</span> <span style="color: rgb(184, 191, 198);">call</span>() <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">NioEventLoop</span>.<span style="color: rgb(200, 143, 208);">super</span>.<span style="color: rgb(184, 191, 198);">pendingTasks</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}; <span style="color: rgb(218, 146, 74);">// 用于封装获取挂起的任务数的Callable</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 静态代码块，用于初始化静态变量：SELECTOR_AUTO_REBUILD_THRESHOLD</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">key</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(210, 107, 107);">"sun.nio.ch.bugLevel"</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">buglevel</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SystemPropertyUtil</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">key</span>); <span style="color: rgb(218, 146, 74);">// 获取设置的JDK bug等级，通常我们不设置该变量</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">buglevel</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">setProperty</span>(<span style="color: rgb(184, 191, 198);">key</span>, <span style="color: rgb(210, 107, 107);">""</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">SecurityException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">selectorAutoRebuildThreshold</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SystemPropertyUtil</span>.<span style="color: rgb(184, 191, 198);">getInt</span>(<span style="color: rgb(210, 107, 107);">"io.netty.selectorAutoRebuildThreshold"</span>, <span style="color: rgb(100, 171, 143);">512</span>); <span style="color: rgb(218, 146, 74);">// 默认自动重建Selector阈值为512</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">selectorAutoRebuildThreshold</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">MIN_PREMATURE_SELECTOR_RETURNS</span>) { <span style="color: rgb(218, 146, 74);">// 如果小于最小selector返回事件个数，那么设置为0</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectorAutoRebuildThreshold</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SELECTOR_AUTO_REBUILD_THRESHOLD</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">selectorAutoRebuildThreshold</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Selector</span> <span style="color: rgb(184, 191, 198);">selector</span>; <span style="color: rgb(218, 146, 74);">// JDK的Selector对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">SelectedSelectionKeySet</span> <span style="color: rgb(184, 191, 198);">selectedKeys</span>; <span style="color: rgb(218, 146, 74);">// 已经选择的SelectionKey</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">SelectorProvider</span> <span style="color: rgb(184, 191, 198);">provider</span>; <span style="color: rgb(218, 146, 74);">// 用于创建Selector对象的提供器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AtomicBoolean</span> <span style="color: rgb(184, 191, 198);">wakenUp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AtomicBoolean</span>(); <span style="color: rgb(218, 146, 74);">// 用于控制是否调用Selector.select()对线程阻塞</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">SelectStrategy</span> <span style="color: rgb(184, 191, 198);">selectStrategy</span>; <span style="color: rgb(218, 146, 74);">// 选择策略。用于控制执行事件时的方法，比如执行select，或者selectNow</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">volatile</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ioRatio</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">50</span>; <span style="color: rgb(218, 146, 74);">// 用于控制线程在执行Channel IO操作的时间和执行任务队列的事件时间占比，默认可以看到各占一半</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">cancelledKeys</span>; <span style="color: rgb(218, 146, 74);">// 用于保存取消的SelectionKey个数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">needsToSelectAgain</span>;&nbsp;<span style="color: rgb(218, 146, 74);">// 用于控制是否应该重新进行select操作</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造方法：初始化父类，这里设置最大挂起任务为 DEFAULT_MAX_PENDING_TASKS</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">NioEventLoop</span>(<span style="color: rgb(184, 191, 198);">NioEventLoopGroup</span> <span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(184, 191, 198);">SelectorProvider</span> <span style="color: rgb(184, 191, 198);">selectorProvider</span>,<span style="color: rgb(184, 191, 198);">SelectStrategy</span> <span style="color: rgb(184, 191, 198);">strategy</span>, <span style="color: rgb(184, 191, 198);">RejectedExecutionHandler</span> <span style="color: rgb(184, 191, 198);">rejectedExecutionHandler</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(132, 182, 203);">false</span>, <span style="color: rgb(184, 191, 198);">DEFAULT_MAX_PENDING_TASKS</span>, <span style="color: rgb(184, 191, 198);">rejectedExecutionHandler</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">selectorProvider</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"selectorProvider"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">strategy</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"selectStrategy"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">provider</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">selectorProvider</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selector</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">openSelector</span>(); <span style="color: rgb(218, 146, 74);">// 创建Selector实例</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectStrategy</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">strategy</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建Selector实例</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">Selector</span> <span style="color: rgb(184, 191, 198);">openSelector</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Selector</span> <span style="color: rgb(184, 191, 198);">selector</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selector</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">provider</span>.<span style="color: rgb(184, 191, 198);">openSelector</span>(); <span style="color: rgb(218, 146, 74);">// 直接通过提供器打开Selector</span></p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">IOException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ChannelException</span>(<span style="color: rgb(210, 107, 107);">"failed to open a new selector"</span>, <span style="color: rgb(184, 191, 198);">e</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">DISABLE_KEYSET_OPTIMIZATION</span>) {&nbsp;<span style="color: rgb(218, 146, 74);">// 如果关闭优化，那么直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">selector</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> { <span style="color: rgb(218, 146, 74);">// 否则创建SelectedSelectionKeySet对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SelectedSelectionKeySet</span> <span style="color: rgb(184, 191, 198);">selectedKeySet</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">SelectedSelectionKeySet</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">selectorImplClass</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Class</span>.<span style="color: rgb(184, 191, 198);">forName</span>(<span style="color: rgb(210, 107, 107);">"sun.nio.ch.SelectorImpl"</span>, <span style="color: rgb(132, 182, 203);">false</span>, <span style="color: rgb(184, 191, 198);">PlatformDependent</span>.<span style="color: rgb(184, 191, 198);">getSystemClassLoader</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 确保当前选择器的实现为SelectorImpl</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!selectorImplClass</span>.<span style="color: rgb(184, 191, 198);">isAssignableFrom</span>(<span style="color: rgb(184, 191, 198);">selector</span>.<span style="color: rgb(184, 191, 198);">getClass</span>())) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">selector</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取SelectorImpl类的selectedKeys（已经选择的SelectionKey）和publicSelectedKeys（SelectionKey的视图，只允许被移除，但是不允许被添加），并将它们设置为SelectedSelectionKeySet selectedKeySet</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Field</span> <span style="color: rgb(184, 191, 198);">selectedKeysField</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">selectorImplClass</span>.<span style="color: rgb(184, 191, 198);">getDeclaredField</span>(<span style="color: rgb(210, 107, 107);">"selectedKeys"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Field</span> <span style="color: rgb(184, 191, 198);">publicSelectedKeysField</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">selectorImplClass</span>.<span style="color: rgb(184, 191, 198);">getDeclaredField</span>(<span style="color: rgb(210, 107, 107);">"publicSelectedKeys"</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectedKeysField</span>.<span style="color: rgb(184, 191, 198);">setAccessible</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">publicSelectedKeysField</span>.<span style="color: rgb(184, 191, 198);">setAccessible</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectedKeysField</span>.<span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(184, 191, 198);">selector</span>, <span style="color: rgb(184, 191, 198);">selectedKeySet</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">publicSelectedKeysField</span>.<span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(184, 191, 198);">selector</span>, <span style="color: rgb(184, 191, 198);">selectedKeySet</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectedKeys</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">selectedKeySet</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectedKeys</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">trace</span>(<span style="color: rgb(210, 107, 107);">"Failed to instrument an optimized java.util.Set into: {}"</span>, <span style="color: rgb(184, 191, 198);">selector</span>, <span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">selector</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法run原理</strong></p>
+<p>我们在前面知道，事件循环线程将会执行子类复写的run方法，所以该方法将会是分析这个类的起点。执行流程如下：</p>
+<ol>
+ <li>根据selectNowSupplier和任务队列有无任务来计算将要进行的操作</li>
+ <li>根据设置的ioRatio（默认为50%）来执行Selector中注册Channel IO事件和任务队列中的任务（taskQueue、ScheduledTaskQueue、tailTasks）</li>
+ <li>检测事件循环是否已经关闭，如果关闭，那么将所有Selectionkey取消关闭</li>
+</ol>
+<p><span style="color: rgb(218, 146, 74);">// 选择策略接口</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">SelectStrategy</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 表明需要执行一个阻塞select操作</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">SELECT</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 表明执行一个非阻塞的selectNow操作</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONTINUE</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">2</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">calculateStrategy</span>(<span style="color: rgb(184, 191, 198);">IntSupplier</span> <span style="color: rgb(184, 191, 198);">selectSupplier</span>, <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">hasTasks</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span>;</p>
+<p>}</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 我们这里看默认选择策略即可</span></p>
+<p><span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultSelectStrategy</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">SelectStrategy</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">SelectStrategy</span> <span style="color: rgb(184, 191, 198);">INSTANCE</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultSelectStrategy</span>(); <span style="color: rgb(218, 146, 74);">// 单例模式</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">DefaultSelectStrategy</span>() { }</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">calculateStrategy</span>(<span style="color: rgb(184, 191, 198);">IntSupplier</span> <span style="color: rgb(184, 191, 198);">selectSupplier</span>, <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">hasTasks</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">hasTasks</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">selectSupplier</span>.<span style="color: rgb(184, 191, 198);">get</span>() : <span style="color: rgb(184, 191, 198);">SelectStrategy</span>.<span style="color: rgb(184, 191, 198);">SELECT</span>; <span style="color: rgb(218, 146, 74);">// 如果有任务，那么直接返回selectNow的准备好的事件个数，否则返回SELECT，表示执行阻塞的选择操作</span></p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">run</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">switch</span> (<span style="color: rgb(184, 191, 198);">selectStrategy</span>.<span style="color: rgb(184, 191, 198);">calculateStrategy</span>(<span style="color: rgb(184, 191, 198);">selectNowSupplier</span>, <span style="color: rgb(184, 191, 198);">hasTasks</span>())) { <span style="color: rgb(218, 146, 74);">// 根据selectNowSupplier和任务队列有无任务来计算将要进行的操作</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">SelectStrategy</span>.<span style="color: rgb(184, 191, 198);">CONTINUE</span>: <span style="color: rgb(218, 146, 74);">// 如果为CONTINUE，那么继续循环</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">SelectStrategy</span>.<span style="color: rgb(184, 191, 198);">SELECT</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">select</span>(<span style="color: rgb(184, 191, 198);">wakenUp</span>.<span style="color: rgb(184, 191, 198);">getAndSet</span>(<span style="color: rgb(132, 182, 203);">false</span>)); <span style="color: rgb(218, 146, 74);">// 执行select选择操作，注意这里将把wakenUp设置为false，并使用原来的值来进行select</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">wakenUp</span>.<span style="color: rgb(184, 191, 198);">get</span>()) { <span style="color: rgb(218, 146, 74);">// 如果设置了唤醒，那么执行唤醒方法（该方法的调用将会导致下一次执行select阻塞操作时立即返回）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selector</span>.<span style="color: rgb(184, 191, 198);">wakeup</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">default</span>: <span style="color: rgb(218, 146, 74);">// 默认不进行选择</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cancelledKeys</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">needsToSelectAgain</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ioRatio</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">ioRatio</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ioRatio</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">100</span>) { <span style="color: rgb(218, 146, 74);">// 如果设置100%的处理IO通道事件，那么首先执行SelectedKey然后再执行任务队列中的任务</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processSelectedKeys</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">runAllTasks</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {<span style="color: rgb(218, 146, 74);">// 否则计算processSelectedKeys执行IO事件的时间，然后设置执行任务队列的时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">ioStartTime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processSelectedKeys</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">ioTime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>() <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">ioStartTime</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">runAllTasks</span>(<span style="color: rgb(184, 191, 198);">ioTime</span> <span style="color: rgb(184, 191, 198);">*</span> (<span style="color: rgb(100, 171, 143);">100</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">ioRatio</span>) <span style="color: rgb(184, 191, 198);">/</span> <span style="color: rgb(184, 191, 198);">ioRatio</span>); <span style="color: rgb(218, 146, 74);">// 可以看到，这里ioRatio为50，那么假如执行了IO事件的时间为100ms，那么此时：100ms * (100-50) / 50 = 100ms 正好一半一半</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isShuttingDown</span>()) { <span style="color: rgb(218, 146, 74);">// 检测事件循环是否已经关闭，如果关闭，那么将所有Selectionkey取消关闭</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">closeAll</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">confirmShutdown</span>()) { <span style="color: rgb(218, 146, 74);">// 确认没任务执行且状态正确，那么结束循环</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">t</span>) { <span style="color: rgb(218, 146, 74);">// 捕捉所有移除进行日志记录</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(<span style="color: rgb(210, 107, 107);">"Unexpected exception in the selector loop."</span>, <span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 避免可能出现的连续的抛出异常导致CPU占用过多</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">sleep</span>(<span style="color: rgb(100, 171, 143);">1000</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">InterruptedException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><br></p>
+<p><strong>核心方法select原理</strong></p>
+<p>该方法用于执行Selector的select函数，来获取注册到Selector中准备好的事件，参数oldWakenUp表示之前wakeup的旧值。流程如下：</p>
+<ol>
+ <li>通过周期性任务调度超时时间来计算select timeout超时时间</li>
+ <li>检测超时</li>
+ <li>检测任务队列中是否存在任务执行，如果存在，那么执行selectNow，避免任务队列中的任务得不到执行</li>
+ <li>执行超时selector.select(timeoutMillis)等待</li>
+ <li>判断是否：用户唤醒当前线程、队列中是否存在任务、是否有通道事件准备就绪，从而结束当前循环</li>
+ <li>根据selectCnt来检测是否发生selector空转的bug，对Selector重新构建</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">select</span>(<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">oldWakenUp</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">IOException</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Selector</span> <span style="color: rgb(184, 191, 198);">selector</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">selector</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">selectCnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(218, 146, 74);">// 计算for循环次数，用于与MIN_PREMATURE_SELECTOR_RETURNS变量进行日志分析（读者注意这里的selectCnt用于记录的是：在超时时间内select函数被唤醒的次数，详细参考以下代码）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">currentTimeNanos</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">selectDeadLineNanos</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">currentTimeNanos</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">delayNanos</span>(<span style="color: rgb(184, 191, 198);">currentTimeNanos</span>); <span style="color: rgb(218, 146, 74);">// 计算select timeout超时时间(读者可以想想这么怎么计算？考虑下周期性调度任务的超时？)</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeoutMillis</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">selectDeadLineNanos</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">currentTimeNanos</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(100, 171, 143);">500000L</span>) <span style="color: rgb(184, 191, 198);">/</span> <span style="color: rgb(100, 171, 143);">1000000L</span>; <span style="color: rgb(218, 146, 74);">// 计算超时时间毫秒数 1000000L 为纳秒转为毫秒，前面的+ 500000L是为了对计算的毫秒数向上取整</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">timeoutMillis</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 超时时间不存在，那么检测是否是第一次循环（通过selectCnt），如果是，那么直接执行selectNow即可</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">selectCnt</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selector</span>.<span style="color: rgb(184, 191, 198);">selectNow</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectCnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">hasTasks</span>() <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">wakenUp</span>.<span style="color: rgb(184, 191, 198);">compareAndSet</span>(<span style="color: rgb(132, 182, 203);">false</span>, <span style="color: rgb(132, 182, 203);">true</span>)) { <span style="color: rgb(218, 146, 74);">// 任务队列中存在任务（taskqueue或者tailTask）且cas设置wakeup标志位为true成功，那么执行selectNow后结束循环</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selector</span>.<span style="color: rgb(184, 191, 198);">selectNow</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectCnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">selectedKeys</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">selector</span>.<span style="color: rgb(184, 191, 198);">select</span>(<span style="color: rgb(184, 191, 198);">timeoutMillis</span>); <span style="color: rgb(218, 146, 74);">// 执行超时select等待</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectCnt</span> <span style="color: rgb(184, 191, 198);">++</span>; <span style="color: rgb(218, 146, 74);">// 自增循环等待次数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">selectedKeys</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">oldWakenUp</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">wakenUp</span>.<span style="color: rgb(184, 191, 198);">get</span>() <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">hasTasks</span>() <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">hasScheduledTasks</span>()) {&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// - 已经由通道事件产生</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// - 外部函数设置了唤醒操作</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// - 任务队列中存在任务</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// - 存在可以周期性调度任务</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 那么结束循环</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">interrupted</span>()) { <span style="color: rgb(218, 146, 74);">// 线程被中断，那么记录日志结束循环</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">isDebugEnabled</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">debug</span>(<span style="color: rgb(210, 107, 107);">"Selector.select() returned prematurely because "</span> <span style="color: rgb(184, 191, 198);">+</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"Thread.currentThread().interrupt() was called. Use "</span> <span style="color: rgb(184, 191, 198);">+</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"NioEventLoop.shutdownGracefully() to shutdown the NioEventLoop."</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectCnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">time</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">time</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">TimeUnit</span>.<span style="color: rgb(184, 191, 198);">MILLISECONDS</span>.<span style="color: rgb(184, 191, 198);">toNanos</span>(<span style="color: rgb(184, 191, 198);">timeoutMillis</span>) <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">currentTimeNanos</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 达到超时时间，那么重置selectCnt（再次强调：selectCnt记录的是超时时间内select函数返回循环的次数）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectCnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">SELECTOR_AUTO_REBUILD_THRESHOLD</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectCnt</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">SELECTOR_AUTO_REBUILD_THRESHOLD</span>) { <span style="color: rgb(218, 146, 74);">// 设置了重新构建Selector的阈值，同时当前循环次数大于了SELECTOR_AUTO_REBUILD_THRESHOLD，那么此时判定出现了selector空转的bug。那么记录日志重新创建selector</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"Selector.select() returned prematurely {} times in a row; rebuilding Selector {}."</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectCnt</span>, <span style="color: rgb(184, 191, 198);">selector</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">rebuildSelector</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selector</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">selector</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 上面我们重新构建了selector，那么立即执行一次selectNow来更新selectedKeys集合</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selector</span>.<span style="color: rgb(184, 191, 198);">selectNow</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectCnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">currentTimeNanos</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">time</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">selectCnt</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">MIN_PREMATURE_SELECTOR_RETURNS</span>) { <span style="color: rgb(218, 146, 74);">// 循环次数大于设置的PREMATURE次数，那么记录日志</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">isDebugEnabled</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">debug</span>(<span style="color: rgb(210, 107, 107);">"Selector.select() returned prematurely {} times in a row for Selector {}."</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectCnt</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(184, 191, 198);">selector</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">CancelledKeyException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">isDebugEnabled</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">debug</span>(<span style="color: rgb(184, 191, 198);">CancelledKeyException</span>.<span style="color: rgb(200, 143, 208);">class</span>.<span style="color: rgb(184, 191, 198);">getSimpleName</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">" raised by a Selector {} - JDK bug?"</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selector</span>, <span style="color: rgb(184, 191, 198);">e</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">SCHEDULE_PURGE_INTERVAL</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">TimeUnit</span>.<span style="color: rgb(184, 191, 198);">SECONDS</span>.<span style="color: rgb(184, 191, 198);">toNanos</span>(<span style="color: rgb(100, 171, 143);">1</span>); <span style="color: rgb(218, 146, 74);">// 如果没有周期性任务，那么默认进行1s的超时等待</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 计算select timeout超时时间</span></p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">delayNanos</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">currentTimeNanos</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ScheduledFutureTask&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">scheduledTask</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">peekScheduledTask</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">scheduledTask</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">SCHEDULE_PURGE_INTERVAL</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">scheduledTask</span>.<span style="color: rgb(184, 191, 198);">delayNanos</span>(<span style="color: rgb(184, 191, 198);">currentTimeNanos</span>);</p>
+<p>}</p></p>
+</body>
+</html>

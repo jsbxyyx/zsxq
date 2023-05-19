@@ -1,0 +1,1418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux kill 信号原理</h1>
+<p>2022-10-21T13:46:45.075+0800</p>
+<p><p><br></p>
+<p>有个学生问了我：kill -9 为什么有时候杀不掉进程，我说：不是杀不掉，是因为进程没有响应这个信号，可能 CPU 太过繁忙没有调度到这个要杀掉的进程，所以没有响应该信号，所以感觉没杀掉，但是如果该进程被调度且陷入到内核态后必然会响应该信号。本文将详细描述 Linux 信号的处理过程。</p>
+<p>注意：由于 linux 不区别 进程与线程，因为线程就是共享内存地址空间的特殊进程，所以笔者这里统一称为 进程和进程组，笔者自行根据代码描述看线程或者进程上下文，提示：看下copy_process函数（详见：混沌学堂）</p>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">sys_kill 函数</strong></h2>
+<p><br></p>
+<p>该函数为 kill 的系统调用入口，可以看到我们将用户态传入的 pid 和 sig 信号数字表示 封装进 siginfo 中，然后直接调用 kill_something_info 完成进一步处理。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  asmlinkage <span class="ql-token hljs-type">long</span> <span class="ql-token hljs-title">sys_kill(int pid, int sig)</span> {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct siginfo info;</span>
+ </div>
+ <div class="ql-code-block">
+  info.si_signo = sig;
+ </div>
+ <div class="ql-code-block">
+  info.si_errno = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  info.si_code = SI_USER; <span class="ql-token hljs-comment">// 表示用户态发送的信号</span>
+ </div>
+ <div class="ql-code-block">
+  info.si_pid = current-&gt;tgid;
+ </div>
+ <div class="ql-code-block">
+  info.si_uid = current-&gt;uid;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> kill_something_info(sig, &amp;info, pid);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">kill_something_info 函数</strong></h2>
+<p><br></p>
+<p>该函数很简单，根据 pid 的值选择发送信号到哪里：</p>
+<p>1、pid 为 0 ，表示 发送信号给当前进程的 进程组</p>
+<p>2、pid 为 -1， 表示发送给除 1 号进程 和 当前进程组 以外的所有进程</p>
+<p>3、pid 小于 0，表示信号被发送到目标进程组，进程 id 由 pid的绝对值表示</p>
+<p>4、pid 大于 0， 发送给目标进程</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">kill_something_info(int sig, struct siginfo *info, int pid)</span>{
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> ret;
+ </div>
+ <div class="ql-code-block">
+  rcu_read_lock();
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!pid) { <span class="ql-token hljs-comment">// pid 为 0 表示 发送信号给当前进程组</span>
+ </div>
+ <div class="ql-code-block">
+  ret = kill_pgrp_info(sig, info, task_pgrp(current));
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (pid == <span class="ql-token hljs-number">-1</span>) { <span class="ql-token hljs-comment">// pid 为 -1 表示发送给除 1 号进程 和 当前进程组 以外的所有进程</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> retval = <span class="ql-token hljs-number">0</span>, count = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct task_struct * p;</span>
+ </div>
+ <div class="ql-code-block">
+  read_lock(&amp;tasklist_lock);
+ </div>
+ <div class="ql-code-block">
+  for_each_process(p) { <span class="ql-token hljs-comment">// 遍历进程并找到符合条件的进程发送信号</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (p-&gt;pid &gt; <span class="ql-token hljs-number">1</span> &amp;&amp; p-&gt;tgid != current-&gt;tgid) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> err = group_send_sig_info(sig, info, p);
+ </div>
+ <div class="ql-code-block">
+  ++count;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (err != -EPERM)
+ </div>
+ <div class="ql-code-block">
+  retval = err;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  read_unlock(&amp;tasklist_lock);
+ </div>
+ <div class="ql-code-block">
+  ret = count ? retval : -ESRCH;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (pid &lt; <span class="ql-token hljs-number">0</span>) { <span class="ql-token hljs-comment">// pid 小于 0，表示信号被发送到目标进程组，进程 id 由 pid的绝对值表示</span>
+ </div>
+ <div class="ql-code-block">
+  ret = kill_pgrp_info(sig, info, find_pid(-pid));
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// pid 大于 0 发送给目标进程</span>
+ </div>
+ <div class="ql-code-block">
+  ret = kill_pid_info(sig, info, find_pid(pid));
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  rcu_read_unlock();
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> ret;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">kill_pgrp_info 函数</strong></h2>
+<p><br></p>
+<p>该函数用于向目标进程组发送信号。很简单，遍历进程组中的所有进程 调用 group_send_sig_info 函数给每个进程发送信号。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> retval;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;read_lock(&amp;tasklist_lock);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;retval = __kill_pgrp_info(sig, info, pgrp);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;read_unlock(&amp;tasklist_lock);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> retval;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> __kill_pgrp_info(<span class="ql-token hljs-type">int</span> sig, <span class="ql-token hljs-keyword">struct</span> siginfo *info, <span class="ql-token hljs-keyword">struct</span> pid *pgrp){
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct task_struct *p =</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> retval, success;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;success = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;retval = -ESRCH;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;do_each_pid_task(pgrp, PIDTYPE_PGID, p) { <span class="ql-token hljs-comment">// 遍历进程组中的每个进程发送信号</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> err = group_send_sig_info(sig, info, p);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;success |= !err;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;retval = err;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; } while_each_pid_task(pgrp, PIDTYPE_PGID, p);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> success ? <span class="ql-token hljs-number">0</span> : retval;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">kill_pid_info 函数</strong></h2>
+<p><br></p>
+<p>该函数用于处理发送信号给单个进程。可以看到最终也是通过 group_send_sig_info 函数发送信号。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">kill_pid_info(int sig, struct siginfo *info, struct pid *pid)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> error;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct task_struct *p;</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;rcu_read_lock();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (unlikely(sig_needs_tasklist(sig)))
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;read_lock(&amp;tasklist_lock);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;p = pid_task(pid, PIDTYPE_PID); <span class="ql-token hljs-comment">// 根据pid 获取到当前进程结构体</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;error = -ESRCH;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (p)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;error = group_send_sig_info(sig, info, p); <span class="ql-token hljs-comment">// 发送信号</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (unlikely(sig_needs_tasklist(sig)))
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;read_unlock(&amp;tasklist_lock);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;rcu_read_unlock();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> error;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">group_send_sig_info 函数</strong></h2>
+<p><br></p>
+<p>该函数用于完成实际信号的发送。struct task_struct *p 表示接受信号的目标进程。实际完成发送操作的函数为 __group_send_sig_info 流程如下：</p>
+<p>1、处理 stop 停止信号</p>
+<p>2、若信号被忽略，那么直接返回</p>
+<p>3、若信号为 非实时信号，且当前信号已经设置，那么直接返回</p>
+<p>4、将该信号放入进程信号处理队列</p>
+<p>5、唤醒进程</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> flags;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> ret;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ret = check_kill_permission(sig, info, p);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (!ret &amp;&amp; sig) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;ret = -ESRCH;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (lock_task_sighand(p, &amp;flags)) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;ret = __group_send_sig_info(sig, info, p);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;unlock_task_sighand(p, &amp;flags);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> ret;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> &nbsp;__group_send_sig_info(<span class="ql-token hljs-type">int</span> sig, <span class="ql-token hljs-keyword">struct</span> siginfo *info, <span class="ql-token hljs-keyword">struct</span> task_struct *p) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> ret = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;assert_spin_locked(&amp;p-&gt;sighand-&gt;siglock);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;handle_stop_signal(sig, p); <span class="ql-token hljs-comment">// 处理 stop 停止信号</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (sig_ignored(p, sig)) <span class="ql-token hljs-comment">// 信号被忽略，那么直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> ret;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (LEGACY_QUEUE(&amp;p-&gt;signal-&gt;shared_pending, sig)) <span class="ql-token hljs-comment">// 非实时信号，且当前信号已经设置，那么直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> ret;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 将该信号放入进程信号处理队列</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ret = send_signal(sig, info, p, &amp;p-&gt;signal-&gt;shared_pending);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (unlikely(ret))
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> ret;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;__group_complete_signal(sig, p); <span class="ql-token hljs-comment">// 唤醒进程</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">handle_stop_signal 函数</strong></h2>
+<p><br></p>
+<p>该函数用于停止信号相关处理。可以看到该函数处理：</p>
+<p>1、sig_kernel_stop 宏定义的停止信号</p>
+<p>2、SIGCONT 信号</p>
+<p>3、SIGKILL 信号</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 判断信号是否为停止信号。 信号数值 小于 32 （通常我们使用的非实时信号均 小于 32，比如 kill -9）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define sig_kernel_stop(sig) \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> (((sig) &lt; SIGRTMIN) &amp;&amp; siginmask(sig, SIG_KERNEL_STOP_MASK)) </span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 用于判断信号是否属于：SIGSTOP、SIGTSTP、SIGTTIN、SIGTTOU（这些信号描述可以参考 man 7 signal）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define SIG_KERNEL_STOP_MASK (\</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> rt_sigmask(SIGSTOP) &nbsp; | rt_sigmask(SIGTSTP) &nbsp; | \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> rt_sigmask(SIGTTIN) &nbsp; | rt_sigmask(SIGTTOU) &nbsp; )</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">handle_stop_signal(int sig, struct task_struct *p)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct task_struct *t;</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (p-&gt;signal-&gt;flags &amp; SIGNAL_GROUP_EXIT) <span class="ql-token hljs-comment">// 进程正在终止，那么直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (sig_kernel_stop(sig)) { <span class="ql-token hljs-comment">// 属于停止信号，那么将 SIGCONT 信号从所有进程组中的进程信号队列移出，因为 该信号表示进程继续执行</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;rm_from_queue(sigmask(SIGCONT), &amp;p-&gt;signal-&gt;shared_pending); &nbsp;<span class="ql-token hljs-comment">// 首先移除 共享信号队列</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;t = p;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">do</span> { <span class="ql-token hljs-comment">// 遍历进程组，移出 SIGCONT 信号</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;rm_from_queue(sigmask(SIGCONT), &amp;t-&gt;pending); <span class="ql-token hljs-comment">// 然后移出进程 自己的队列</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;t = next_thread(t); <span class="ql-token hljs-comment">// 该函数获取进程组中的进程</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; } <span class="ql-token hljs-keyword">while</span> (t != p);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (sig == SIGCONT) { <span class="ql-token hljs-comment">// 如果当前为 SIGCONT 信号，那么从 共享信号队列 和 进程自己的信号队列 移出 所有停止信号</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (unlikely(p-&gt;signal-&gt;group_stop_count &gt; <span class="ql-token hljs-number">0</span>)) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;p-&gt;signal-&gt;group_stop_count = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;p-&gt;signal-&gt;flags = SIGNAL_STOP_CONTINUED;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;spin_unlock(&amp;p-&gt;sighand-&gt;siglock);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;do_notify_parent_cldstop(p, CLD_STOPPED);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;spin_lock(&amp;p-&gt;sighand-&gt;siglock);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;rm_from_queue(SIG_KERNEL_STOP_MASK, &amp;p-&gt;signal-&gt;shared_pending);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;t = p;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">do</span> { <span class="ql-token hljs-comment">// 遍历所有进程，移出停止信号</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">int</span> state;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;rm_from_queue(SIG_KERNEL_STOP_MASK, &amp;t-&gt;pending);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;state = TASK_STOPPED;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (sig_user_defined(t, SIGCONT) &amp;&amp; !sigismember(&amp;t-&gt;blocked, SIGCONT)) { <span class="ql-token hljs-comment">// SIGCONT 定义了 SIGCONT 信号的处理函数，且当前进程没有阻塞 SIGCONT 信号（blocked 集 用于表示阻塞信号）那么设置 TIF_SIGPENDING 标志，让当前进程在被唤醒后等待，信号设置成功才能处理（后面我们会看到，进程被唤醒后，将等待 当前持有的 自旋锁，所以不会立即处理信号，而是 当前 持有的自旋锁 释放后）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;set_tsk_thread_flag(t, TIF_SIGPENDING);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;state |= TASK_INTERRUPTIBLE;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;wake_up_state(t, state); <span class="ql-token hljs-comment">// 唤醒停止的进程</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;t = next_thread(t);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; } <span class="ql-token hljs-keyword">while</span> (t != p);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (p-&gt;signal-&gt;flags &amp; SIGNAL_STOP_STOPPED) { <span class="ql-token hljs-comment">// 当前进程已经被停止，那么此时被信号 SIGCONT 唤醒后，要求继续执行，此时通知 父进程，当前进程被唤醒 CLD_CONTINUED 表示 唤醒父进程的原因，这里表示 子进程 被 SIGCONT信号 唤醒 执行</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;p-&gt;signal-&gt;flags = SIGNAL_STOP_CONTINUED;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;p-&gt;signal-&gt;group_exit_code = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;spin_unlock(&amp;p-&gt;sighand-&gt;siglock);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;do_notify_parent_cldstop(p, CLD_CONTINUED);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;spin_lock(&amp;p-&gt;sighand-&gt;siglock);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; } <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">// 当前进程没有停止，但是处理的过程中可能会有停止信号。这里清除标志位</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;p-&gt;signal-&gt;flags = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (sig == SIGKILL) { <span class="ql-token hljs-comment">// SIGKILL 信号，也清除标志位，表示所有 停止信号 被 SIGKILL 清除</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;p-&gt;signal-&gt;flags = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">sig_ignored 函数</strong></h2>
+<p><br></p>
+<p>该函数用于判断信号是否应该被忽略。详细描述如下。读者可以根据 man -7 signal 中 action 一列 查看。这里只不过是实现而已。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 以下信号忽略处理函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define SIG_KERNEL_IGNORE_MASK (\</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> &nbsp; &nbsp; &nbsp; &nbsp;rt_sigmask(SIGCONT) &nbsp; | rt_sigmask(SIGCHLD) &nbsp; | \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> rt_sigmask(SIGWINCH) | rt_sigmask(SIGURG) &nbsp; )</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">sig_ignored(struct task_struct *t, int sig)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">void</span> __user * handler;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (t-&gt;ptrace &amp; PT_PTRACED) <span class="ql-token hljs-comment">// 追踪进程将总是相应信号</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 被阻塞的信号永远不会被忽略，因为在解除阻塞时，信号处理程序可能会发生变化</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (sigismember(&amp;t-&gt;blocked, sig))
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 看看 信号处理函数 是否为 SIG_IGN 函数 &nbsp; 或者 信号处理函数为默认函数 且 是否为 SIGCONT、SIGCHLD、SIGWINCH、SIGURG 这些信号如果用户没有设置 对应处理函数，那么默认为忽略（man -7 signal 中有对应描述）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;handler = t-&gt;sighand-&gt;action[sig<span class="ql-token hljs-number">-1</span>].sa.sa_handler;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> &nbsp; handler == SIG_IGN ||
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; (handler == SIG_DFL &amp;&amp; sig_kernel_ignore(sig));
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">LEGACY_QUEUE 宏</strong></h2>
+<p><br></p>
+<p>该宏用于判断当前信号是否为 实时信号：</p>
+<p>1、若为 实时信号（ sig &lt; SIGRTMIN 为非实时信号，也即 只会响应一次），那么每个信号都会被处理，此时将会进入 send_signal 函数添加到队列中</p>
+<p>2、若为 非实时信号（sig &gt; SIGRTMIN 为实时信号，每个信号都会被处理），那么判断是否已经将信号添加到队列中，若已经添加，那么直接返回</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define LEGACY_QUEUE(sigptr, sig) \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> (((sig) &lt; SIGRTMIN) &amp;&amp; sigismember(&amp;(sigptr)-&gt;signal, (sig)))</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (LEGACY_QUEUE(&amp;p-&gt;signal-&gt;shared_pending, sig))
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> ret; &nbsp;<span class="ql-token hljs-comment">// 非实时信号，且已经添加到队列，那么直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 看 _sig 的位图值是否为 1</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">sigismember(sigset_t *set, int _sig)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> sig = _sig - <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (_NSIG_WORDS == <span class="ql-token hljs-number">1</span>)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span> &amp; (<span class="ql-token hljs-built_in">set</span>-&gt;sig[<span class="ql-token hljs-number">0</span>] &gt;&gt; sig);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">else</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span> &amp; (<span class="ql-token hljs-built_in">set</span>-&gt;sig[sig / _NSIG_BPW] &gt;&gt; (sig % _NSIG_BPW));
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">send_signal 函数</strong></h2>
+<p><br></p>
+<p>该函数用于向 struct sigpending *signals 队列中添加待处理的信号 struct siginfo *info。处理流程如下：</p>
+<p>1、将信号传递给监听信号集</p>
+<p>2、若 信号 处理 指定为 SEND_SIG_FORCED（强制信号由 force_sig_specific 函数指定，比如我们在 使用ptrace 跟踪进程时，就可以使用该函数强制将进程停止），那么直接添加到信号集合（&amp;signals-&gt;signal 对应信号位 置位 1）中即可返回</p>
+<p>3、否则，我们分配一个节点来保存信号信息，然后将节点放入 &amp;signals-&gt;list 中即可。若队列分配失败，则判断 当前信号为 实时信号且不是由用户调用 kill 系统调用发出的，那么返回 EAGAIN 返回值，外部调用方会进入 abort 流程 。若分配成功，那么添加到信号集合（&amp;signals-&gt;signal 对应信号位 置位 1）中</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">send_signal(int sig, struct siginfo *info, struct task_struct *t,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> struct sigpending *signals)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct sigqueue * q =</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> ret = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 将信号传递给监听信号集（若我们没有开启改特性，那么默认为空，这里了解集合）【作者：黄俊 微信：bx_java】</span>
+ </div>
+ <div class="ql-code-block">
+  signalfd_notify(t, sig);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 若指定了强制设置信号，那么直接添加到信号集合中即可</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (info == SEND_SIG_FORCED)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> out_set;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 否则，我们分配一个节点来保存信号信息</span>
+ </div>
+ <div class="ql-code-block">
+  q = __sigqueue_alloc(t, GFP_ATOMIC, (sig &lt; SIGRTMIN &amp;&amp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; (is_si_special(info) ||
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;info-&gt;si_code &gt;= <span class="ql-token hljs-number">0</span>)));
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (q) { <span class="ql-token hljs-comment">// 若分配失败，表名内存不够，此时只能尽量的保存最后一个信号</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">// 将信号信息放到 队列节点 struct sigqueue * q 中</span>
+ </div>
+ <div class="ql-code-block">
+  list_add_tail(&amp;q-&gt;<span class="ql-token hljs-built_in">list</span>, &amp;signals-&gt;<span class="ql-token hljs-built_in">list</span>);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">switch</span> ((<span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span>) info) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">case</span> (<span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span>) SEND_SIG_NOINFO:
+ </div>
+ <div class="ql-code-block">
+  q-&gt;info.si_signo = sig;
+ </div>
+ <div class="ql-code-block">
+  q-&gt;info.si_errno = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  q-&gt;info.si_code = SI_USER;
+ </div>
+ <div class="ql-code-block">
+  q-&gt;info.si_pid = current-&gt;pid;
+ </div>
+ <div class="ql-code-block">
+  q-&gt;info.si_uid = current-&gt;uid;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">case</span> (<span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span>) SEND_SIG_PRIV:
+ </div>
+ <div class="ql-code-block">
+  q-&gt;info.si_signo = sig;
+ </div>
+ <div class="ql-code-block">
+  q-&gt;info.si_errno = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  q-&gt;info.si_code = SI_KERNEL;
+ </div>
+ <div class="ql-code-block">
+  q-&gt;info.si_pid = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  q-&gt;info.si_uid = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">default</span>:
+ </div>
+ <div class="ql-code-block">
+  copy_siginfo(&amp;q-&gt;info, info);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (!is_si_special(info)) { <span class="ql-token hljs-comment">// 若超出队列大小，且当前信号为 实时信号且不是由用户调用 kill 系统调用发出的，那么返回 EAGAIN 返回值，外部调用方会进入 abort 流程</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (sig &gt;= SIGRTMIN &amp;&amp; info-&gt;si_code != SI_USER)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EAGAIN;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  out_set: <span class="ql-token hljs-comment">// 将信号添加到 处理集 中</span>
+ </div>
+ <div class="ql-code-block">
+  sigaddset(&amp;signals-&gt;signal, sig);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> ret;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// i386 32位机</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define _NSIG 64 // 信号数量</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define _NSIG_BPW 32 // long 数据位宽</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define _NSIG_WORDS (_NSIG / _NSIG_BPW) // 此时需要两个 long 值才能保存所有信号</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">typedef</span> <span class="ql-token hljs-class">struct {</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> sig[_NSIG_WORDS]; <span class="ql-token hljs-comment">// 待处理信号位图</span>
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-type">sigset_t</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 对当前 _sig 的位图值设置为 1</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">sigaddset(sigset_t *set, int _sig)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> sig = _sig - <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (_NSIG_WORDS == <span class="ql-token hljs-number">1</span>)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">set</span>-&gt;sig[<span class="ql-token hljs-number">0</span>] |= <span class="ql-token hljs-number">1UL</span> &lt;&lt; sig;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">else</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">set</span>-&gt;sig[sig / _NSIG_BPW] |= <span class="ql-token hljs-number">1UL</span> &lt;&lt; (sig % _NSIG_BPW);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">小结</strong></h2>
+<p><br></p>
+<p>现在我们可以看到通过 struct sigpending *signals 中的 signal 变量 来表示进程的信号位，通过 list 变量 来表示信号队列，队列中保存具体信号信息。结构体如下。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct sigpending {</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct list_head list;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">sigset_t</span> signal;
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">__group_complete_signal 函数</strong></h2>
+<p><br></p>
+<p>该函数在信号被成功添加入信号队列中后调用。用于唤醒进程。我们看到查找合适的进程算法为：遍历一圈，找到能处理该信号的进程，比如没有屏蔽 当前信号的进程。随后我们判断信号是否为致命信号，如果是，那么唤醒所有进程处理致命信号让他们退出。源码如下。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 判断当前进程是否需要唤醒</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">wants_signal(int sig, struct task_struct *p)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (sigismember(&amp;p-&gt;blocked, sig)) <span class="ql-token hljs-comment">// 当前进程阻塞了当前信号</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (p-&gt;flags &amp; PF_EXITING) <span class="ql-token hljs-comment">// 进程正在退出</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (sig == SIGKILL) <span class="ql-token hljs-comment">// 信号为强制退出信号</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (p-&gt;state &amp; (TASK_STOPPED | TASK_TRACED)) <span class="ql-token hljs-comment">// 进程已经停止或者正在被追踪</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> task_curr(p) || !signal_pending(p); <span class="ql-token hljs-comment">// 当前进程为正在执行的进程 或者 进程没有在等待处理信号（后面我们会看到该函数 检测标志位 TIF_SIGPENDING）</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 判断当前信号是否为致命信号（不属于 SIG_KERNEL_IGNORE_MASK 和 SIG_KERNEL_STOP_MASK 信号 同时 信号处理动作为默认动作，比如 SIGKILL 就满足该特性 ）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define sig_fatal(t, signr) \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> (!siginmask(signr, SIG_KERNEL_IGNORE_MASK|SIG_KERNEL_STOP_MASK) &amp;&amp; \</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"> (t)-&gt;sighand-&gt;action[(signr)-1].sa.sa_handler == SIG_DFL)</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> __group_complete_signal(<span class="ql-token hljs-type">int</span> sig, <span class="ql-token hljs-keyword">struct</span> task_struct *p)
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct task_struct *t;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (wants_signal(sig, p)) <span class="ql-token hljs-comment">// 若当前进程需要被唤醒，那么把当前进程设置为唤醒进程</span>
+ </div>
+ <div class="ql-code-block">
+  t = p;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (thread_group_empty(p)) <span class="ql-token hljs-comment">// 只有一个进程，不需要唤醒它。它将在再次运行之前将未阻塞的信号出队处理（注意：这个条件是上述的条件判断失败后再判断执行，所以上一步的判断操作已经 决定了当前进程不想被唤醒，比如：阻塞了信号）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 否则唤醒一个合适的进程来处理该信号</span>
+ </div>
+ <div class="ql-code-block">
+  t = p-&gt;signal-&gt;curr_target; <span class="ql-token hljs-comment">// 取当前进程组中用于开始查找合适的进程起始点</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (t == <span class="ql-token hljs-literal">NULL</span>) <span class="ql-token hljs-comment">// 若不存在，把当前进程作为起始查找的进程</span>
+ </div>
+ <div class="ql-code-block">
+  t = p-&gt;signal-&gt;curr_target = p;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">while</span> (!wants_signal(sig, t)) { &nbsp;<span class="ql-token hljs-comment">// 从 t 进程开始 遍历找到一个能处理该信号的进程</span>
+ </div>
+ <div class="ql-code-block">
+  t = next_thread(t);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (t == p-&gt;signal-&gt;curr_target)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 遍历了一周，还是没有找到能处理该信号的进程，那么此时不需要唤醒进程。任何符合条件的进程将在处理自己的操作后，很快看到队列中的信号并处理</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  p-&gt;signal-&gt;curr_target = t; <span class="ql-token hljs-comment">// 保存上一次查找的进程，下一次从该进程开始查找</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (sig_fatal(p, sig) &amp;&amp; &nbsp;<span class="ql-token hljs-comment">// 当前信号为 致命信号</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;!(p-&gt;signal-&gt;flags &amp; SIGNAL_GROUP_EXIT) &amp;&amp; <span class="ql-token hljs-comment">// 当前进程没有被要求退出</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;!sigismember(&amp;t-&gt;real_blocked, sig) &amp;&amp; <span class="ql-token hljs-comment">// 当前进程没有临时阻塞该信号</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; (sig == SIGKILL || !(t-&gt;ptrace &amp; PT_PTRACED))) { <span class="ql-token hljs-comment">// 信号为 SIGKILL 或者 没有被追踪</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">// 注意：致命信号将会导致整个进程组退出</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!sig_kernel_coredump(sig)) { <span class="ql-token hljs-comment">// 当前信号不需要 dump 进程 堆栈信息</span>
+ </div>
+ <div class="ql-code-block">
+  p-&gt;signal-&gt;flags = SIGNAL_GROUP_EXIT; <span class="ql-token hljs-comment">// 设置进程信号处理标志位 整组退出（SIGNAL_GROUP_EXIT表示 整个进程组退出）</span>
+ </div>
+ <div class="ql-code-block">
+  p-&gt;signal-&gt;group_exit_code = sig;
+ </div>
+ <div class="ql-code-block">
+  p-&gt;signal-&gt;group_stop_count = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  t = p;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">do</span> { <span class="ql-token hljs-comment">// 遍历所有进程向他们的信号集合中设置 SIGKILL 信号，并唤醒他们响应该信号（该信号将会退出导致进程退出）</span>
+ </div>
+ <div class="ql-code-block">
+  sigaddset(&amp;t-&gt;pending.signal, SIGKILL);
+ </div>
+ <div class="ql-code-block">
+  signal_wake_up(t, <span class="ql-token hljs-number">1</span>);
+ </div>
+ <div class="ql-code-block">
+  t = next_thread(t);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">while</span> (t != p);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 此时需要做一个 core dump 导出进程组的堆栈信息。我们让除选中的进程之外的所有进程都进入组停止状态，这样在调度之前什么都不会发生，从共享队列中取出信号，并进行 core dump</span>
+ </div>
+ <div class="ql-code-block">
+  rm_from_queue(SIG_KERNEL_STOP_MASK, &amp;t-&gt;pending); <span class="ql-token hljs-comment">// 从当前进程信号队列中移出 停止 信号</span>
+ </div>
+ <div class="ql-code-block">
+  rm_from_queue(SIG_KERNEL_STOP_MASK, &amp;p-&gt;signal-&gt;shared_pending); <span class="ql-token hljs-comment">// 从当前进程组共享信号队列中移出 停止 信号</span>
+ </div>
+ <div class="ql-code-block">
+  p-&gt;signal-&gt;group_stop_count = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  p-&gt;signal-&gt;group_exit_task = t; <span class="ql-token hljs-comment">// 当前进程作为组退出进程处理 core dump</span>
+ </div>
+ <div class="ql-code-block">
+  t = p;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">do</span> { <span class="ql-token hljs-comment">// 唤醒进程组中的所有进程</span>
+ </div>
+ <div class="ql-code-block">
+  p-&gt;signal-&gt;group_stop_count++; <span class="ql-token hljs-comment">// 记录进程组需要停止的 进程</span>
+ </div>
+ <div class="ql-code-block">
+  signal_wake_up(t, <span class="ql-token hljs-number">0</span>);
+ </div>
+ <div class="ql-code-block">
+  t = next_thread(t);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">while</span> (t != p);
+ </div>
+ <div class="ql-code-block">
+  wake_up_process(p-&gt;signal-&gt;group_exit_task); <span class="ql-token hljs-comment">// 唤醒处理 core dump 的进程</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 此时，信号已经放入信号队列，那么通知当前进程处理该信号</span>
+ </div>
+ <div class="ql-code-block">
+  signal_wake_up(t, sig == SIGKILL);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">signal_wake_up 函数</strong></h2>
+<p><br></p>
+<p>该函数用于唤醒指定进程。我们看到，如果是致命信号，那么设置 resume 为 1，当前进程属于 TASK_STOPPED 停止进程 和 被追踪的进程 时 是否仍然被唤醒来响应信号。wake_up_state 函数就不需要分析了，因为那是另外一个模块 sched 调度器的东西，这里只需要知道其中将会唤醒 mask 指定状态的进程即可。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">signal_wake_up(struct task_struct *t, int resume)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">int</span> mask;
+ </div>
+ <div class="ql-code-block">
+  set_tsk_thread_flag(t, TIF_SIGPENDING); <span class="ql-token hljs-comment">// 设置线程处理信号标志位</span>
+ </div>
+ <div class="ql-code-block">
+  mask = TASK_INTERRUPTIBLE;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (resume) <span class="ql-token hljs-comment">// 当前进程属于 TASK_STOPPED 停止进程 和 被追踪的进程 时 是否仍然唤醒</span>
+ </div>
+ <div class="ql-code-block">
+  mask |= TASK_STOPPED | TASK_TRACED;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!wake_up_state(t, mask))
+ </div>
+ <div class="ql-code-block">
+  kick_process(t);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 设置 thread_info flag 的对应标志位</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">set_tsk_thread_flag(struct task_struct *tsk, int flag)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  set_ti_thread_flag(task_thread_info(tsk), flag);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define TIF_SIGPENDING 2 // 在 flag 的 第三位（数组下标从0开始）</span>
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">进程何时处理信号？</strong></h2>
+<p><br></p>
+<p>我们来看系统调用代码。注释很详细，自行研究，不会的详见 混沌学堂 第一期、第二期。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  ENTRY(system_call)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;pushl %eax <span class="ql-token hljs-meta"># save orig_eax</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;SAVE_ALL
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-title">GET_THREAD_INFO(%ebp)</span> <span class="ql-token hljs-comment">// 获取 thread_info 结构，其中可以拿到当前进程的 task_struct 结构 。也即：ebp 将保存 thread_info 的地址</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;cmpl $<span class="ql-token hljs-params">(nr_syscalls)</span>, %eax &nbsp;<span class="ql-token hljs-comment">// 看系统调用号是否超出界限</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;jae syscall_badsys
+ </div>
+ <div class="ql-code-block">
+  syscall_call:
+ </div>
+ <div class="ql-code-block">
+  call *<span class="ql-token hljs-title">sys_call_table(,%eax,4)</span> <span class="ql-token hljs-comment">// 调用系统调用</span>
+ </div>
+ <div class="ql-code-block">
+  movl %eax,<span class="ql-token hljs-title">PT_EAX(%esp)</span> <span class="ql-token hljs-comment">// 返回值放入 eax</span>
+ </div>
+ <div class="ql-code-block">
+  syscall_exit:
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-title">DISABLE_INTERRUPTS(CLBR_ANY)</span> <span class="ql-token hljs-comment">// 关闭中断</span>
+ </div>
+ <div class="ql-code-block">
+  testl $TF_MASK,<span class="ql-token hljs-title">PT_EFLAGS(%esp)</span> <span class="ql-token hljs-comment">// 检测是否设置了单步执行状态</span>
+ </div>
+ <div class="ql-code-block">
+  jz no_singlestep <span class="ql-token hljs-comment">// 我们看这里即可</span>
+ </div>
+ <div class="ql-code-block">
+  orl $_TIF_SINGLESTEP,<span class="ql-token hljs-title">TI_flags(%ebp)</span>
+ </div>
+ <div class="ql-code-block">
+  no_singlestep:
+ </div>
+ <div class="ql-code-block">
+  movl <span class="ql-token hljs-title">TI_flags(%ebp)</span>, %ecx &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">// 获取进程标志位</span>
+ </div>
+ <div class="ql-code-block">
+  testw $_TIF_ALLWORK_MASK, %cx <span class="ql-token hljs-comment">// 检测当前进程是否需要执行进一步的任务（#define _TIF_ALLWORK_MASK &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; (0x0000FFFF &amp; ~_TIF_SECCOMP)</span>
+ </div>
+ <div class="ql-code-block">
+  jne syscall_exit_work <span class="ql-token hljs-comment">// 若需要，那么跳转</span>
+ </div>
+ <div class="ql-code-block">
+  restore_all: &nbsp; &nbsp;<span class="ql-token hljs-comment">// 否则还原寄存器，返回用户空间</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 这里省略</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  syscall_exit_work:
+ </div>
+ <div class="ql-code-block">
+  testb $<span class="ql-token hljs-params">(_TIF_SYSCALL_TRACE|_TIF_SYSCALL_AUDIT|_TIF_SINGLESTEP)</span>, %cl <span class="ql-token hljs-comment">// 判断标志位低8位没有这三个标识符</span>
+ </div>
+ <div class="ql-code-block">
+  jz work_pending <span class="ql-token hljs-comment">// 存在任务，那么执行任务</span>
+ </div>
+ <div class="ql-code-block">
+  TRACE_IRQS_ON
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-title">ENABLE_INTERRUPTS(CLBR_ANY)</span> <span class="ql-token hljs-comment">// 开启中断</span>
+ </div>
+ <div class="ql-code-block">
+  movl %esp, %eax
+ </div>
+ <div class="ql-code-block">
+  movl $1, %edx
+ </div>
+ <div class="ql-code-block">
+  call do_syscall_trace
+ </div>
+ <div class="ql-code-block">
+  jmp resume_userspace <span class="ql-token hljs-comment">// 跳转恢复跳转用户空间</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-title">END(syscall_exit_work)</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  work_pending:
+ </div>
+ <div class="ql-code-block">
+  testb $_TIF_NEED_RESCHED, %cl <span class="ql-token hljs-comment">// 当前进程是否需要重调度</span>
+ </div>
+ <div class="ql-code-block">
+  jz work_notifysig <span class="ql-token hljs-comment">// 若不存在重调度，那么跳转执行 信号</span>
+ </div>
+ <div class="ql-code-block">
+  work_resched:
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 省略</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  work_notifysig:
+ </div>
+ <div class="ql-code-block">
+  movl %esp, %eax
+ </div>
+ <div class="ql-code-block">
+  xorl %edx, %edx
+ </div>
+ <div class="ql-code-block">
+  call do_notify_resume &nbsp;<span class="ql-token hljs-comment">// 处理信号</span>
+ </div>
+ <div class="ql-code-block">
+  jmp resume_userspace_sig <span class="ql-token hljs-comment">// 返回用户态</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-title">END(work_pending)</span>
+ </div>
+</div>
+<p><strong style="color: rgb(38, 38, 38);">do_notify_resume 函数</strong></p>
+<p>该函数为实际处理信号的函数，这里就不在详述，因为很简单，一看便知。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">do_notify_resume(struct pt_regs *regs, void *_unused, __u32 thread_info_flags)</span>{
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (thread_info_flags &amp; (_TIF_SIGPENDING | _TIF_RESTORE_SIGMASK))
+ </div>
+ <div class="ql-code-block">
+  do_signal(regs); <span class="ql-token hljs-comment">// 处理信号</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> fastcall <span class="ql-token hljs-title">do_signal(struct pt_regs *regs)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 在这里面回调用户态设置的处理函数，或者自身 调用 do_Exit 退出咯</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">TI_flags 在哪？</strong></h2>
+<p><br></p>
+<p>看如下代码描述，很简单。注意我们是在 i386 32 位机中。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct thread_info {</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct task_struct *task;</span> <span class="ql-token hljs-comment">/* main task structure */</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct exec_domain *exec_domain;</span> <span class="ql-token hljs-comment">/* execution domain */</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> flags; <span class="ql-token hljs-comment">/* low level flags */</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> status; <span class="ql-token hljs-comment">/* thread-synchronous flags */</span>
+ </div>
+ <div class="ql-code-block">
+  __u32 cpu; <span class="ql-token hljs-comment">/* current CPU */</span>
+ </div>
+ <div class="ql-code-block">
+  __s32 preempt_count; <span class="ql-token hljs-comment">/* 0 =&gt; preemptable, &lt;0 =&gt; BUG */</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">mm_segment_t</span> addr_limit; <span class="ql-token hljs-comment">/* thread address space:</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment"> &nbsp; 0-0xBFFFFFFF for user-thead</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment"> &nbsp; 0-0xFFFFFFFF for kernel-thread</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment"> */</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct restart_block &nbsp; &nbsp;restart_block;</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  __u8 supervisor_stack[<span class="ql-token hljs-number">0</span>];
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define TI_FLAGS 0x00000008 // 数数偏移量，正好是 4 + 4（ i386 哦）</span>
+ </div>
+</div>
+<p><br></p></p>
+</body>
+</html>

@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理四 MultithreadEventExecutorGroup 原理二</h1>
+<p>2022-02-09T03:09:13.636+0800</p>
+<p><p><strong>ThreadPerTaskExecutor原理</strong></p>
+<p>ThreadPerTaskExecutor为MultithreadEventExecutorGroup默认的Executor执行器，该执行器我们在前面看到将会在newChild(executor, args)方法中传递给子执行器完成对子执行器EventExecutor对象的创建，同时用于启动线程来执行子执行器任务。我们看到该执行器同它的名字一样，在execute方法中通过ThreadFactory线程工厂创建一个新的线程来处理传递过来的任务command。而又由于EventExecutor子执行器对象只需要一个线程来处理它的任务（只有一个执行器的组），所以这里很容易推理得出：有多少个子执行器，那么这里就会产生出多少个线程。那么为何不用线程池？线程池用于缓存线程，减少每次执行任务时对线程的创建和销毁时间，那么这里需要么？答案是否定的，因为我们只会提交与EventExecutor数组长度相同的子执行器任务。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ThreadPerTaskExecutor</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Executor</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ThreadPerTaskExecutor</span>(<span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">threadFactory</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"threadFactory"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">threadFactory</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">execute</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">command</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">threadFactory</span>.<span style="color: rgb(184, 191, 198);">newThread</span>(<span style="color: rgb(184, 191, 198);">command</span>).<span style="color: rgb(184, 191, 198);">start</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>DefaultThreadFactory原理</strong></p>
+<p>我们看到默认的线程对象通过poolId和nextId来生成线程名前缀，然后根据构造函数来设置线程的属性：守护线程、线程优先级、线程组。这里需要注意以下两点：</p>
+<ol>
+ <li>我们对传入的Runnable执行对象进行了包装，将其包装为DefaultRunnableDecorator，目的是为了在任务执行完毕后对ThreadLocal进行清理</li>
+ <li>创建的线程对象为FastThreadLocalThread</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultThreadFactory</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">ThreadFactory</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span> <span style="color: rgb(184, 191, 198);">poolId</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span>();&nbsp;<span style="color: rgb(218, 146, 74);">// 线程池ID，用于生成线程名</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span> <span style="color: rgb(184, 191, 198);">nextId</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span>(); <span style="color: rgb(218, 146, 74);">// 线程ID，用于生成线程名</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">prefix</span>; <span style="color: rgb(218, 146, 74);">// 生成的线程名前缀</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">daemon</span>; <span style="color: rgb(218, 146, 74);">// 是否为守护线程</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">priority</span>;<span style="color: rgb(218, 146, 74);">// 线程优先级</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ThreadGroup</span> <span style="color: rgb(184, 191, 198);">threadGroup</span>;<span style="color: rgb(218, 146, 74);">// 线程组</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 完整构造器。在对参数进行校验后，保存生成线程前缀、是否为daemon守护线程、优先级、所属线程组</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">DefaultThreadFactory</span>(<span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">poolName</span>, <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">daemon</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">priority</span>, <span style="color: rgb(184, 191, 198);">ThreadGroup</span> <span style="color: rgb(184, 191, 198);">threadGroup</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">poolName</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"poolName"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">priority</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">MIN_PRIORITY</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">priority</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">MAX_PRIORITY</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"priority: "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">priority</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">" (expected: Thread.MIN_PRIORITY &lt;= priority &lt;= Thread.MAX_PRIORITY)"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">prefix</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">poolName</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">'-'</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">poolId</span>.<span style="color: rgb(184, 191, 198);">incrementAndGet</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">'-'</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">daemon</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">daemon</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">priority</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">priority</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">threadGroup</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">threadGroup</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 生成新的线程对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">newThread</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">r</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">t</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newThread</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultRunnableDecorator</span>(<span style="color: rgb(184, 191, 198);">r</span>), <span style="color: rgb(184, 191, 198);">prefix</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">nextId</span>.<span style="color: rgb(184, 191, 198);">incrementAndGet</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置线程属性</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">isDaemon</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!daemon</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">setDaemon</span>(<span style="color: rgb(132, 182, 203);">false</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">daemon</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">setDaemon</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">getPriority</span>() <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">priority</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">setPriority</span>(<span style="color: rgb(184, 191, 198);">priority</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Exception</span> <span style="color: rgb(184, 191, 198);">ignored</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// Doesn't matter even if failed to set.</span></p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">t</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建线程对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">newThread</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">r</span>, <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">name</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">FastThreadLocalThread</span>(<span style="color: rgb(184, 191, 198);">threadGroup</span>, <span style="color: rgb(184, 191, 198);">r</span>, <span style="color: rgb(184, 191, 198);">name</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 用于装饰需要执行的Runnable任务，标准的装饰者模式。这里主要对任务进行封装，在任务执行完毕后，移除ThreadLocal的存储，避免内存泄漏</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultRunnableDecorator</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Runnable</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">r</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">DefaultRunnableDecorator</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">r</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">r</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">r</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">r</span>.<span style="color: rgb(184, 191, 198);">run</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">FastThreadLocal</span>.<span style="color: rgb(184, 191, 198);">removeAll</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>FastThreadLocalThread原理</strong></p>
+<p>前面我们看到默认线程工厂创建的线程对象为FastThreadLocalThread，而该线程工厂又是在ThreadPerTaskExecutor执行器中调用，而ThreadPerTaskExecutor线程工厂又在MultithreadEventExecutorGroup中传递给了子执行器，那么很明显，我们的子执行器在操作任务时，创建的线程对象就是FastThreadLocalThread，读者这里注意：Netty中的执行线程对象就是该类的实例。</p>
+<p>我们看到该类继承自Thread类，因为Thread类定义了一个Java线程对象，所以只能通过继承该类对其进行扩展。我们看到这里面主要扩展了对InternalThreadLocalMap的操作，那么InternalThreadLocalMap又是什么？它和线程自带的ThreadLocal.ThreadLocalMap有何区别？别急，先了解这个类，下一节笔者会详细介绍，只需要知道这里扩展了这个InternalThreadLocalMap类即可。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">FastThreadLocalThread</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Thread</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>;</p>
+<p>​</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">setThreadLocalMap</span>(<span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">threadLocalMap</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>FastThreadLocal原理</strong></p>
+<p>我们看看这个名字，前面叫做FastThreadLocalThread，这里又叫FastThreadLocal，无外乎就是Fast，快，到底哪里快呢？这还得从JDK自带的ThreadLocal.ThreadLocalMap说起。我们知道ThreadLocalMap为JDK的ThreadLocal类中的一个内部类，我们可以创建一个ThreadLocal对象，然后在线程中保存线程本地变量。那么我们来看看这个放入过程：</p>
+<ol>
+ <li>根据ThreadLocalMap是否存在来决定是否创建ThreadLocalMap集合</li>
+ <li>在放入过程中通过key.threadLocalHashCode &amp; (len-1)计算当前ThreadLocal与value的映射放入的下标。同理，在获取时也会该算法来获取下标处对应的Entry映射</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ThreadLocal</span><span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置线程本地变量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(184, 191, 198);">T</span> <span style="color: rgb(184, 191, 198);">value</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">t</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">currentThread</span>(); <span style="color: rgb(218, 146, 74);">// 获取当前线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">map</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">getMap</span>(<span style="color: rgb(184, 191, 198);">t</span>); <span style="color: rgb(218, 146, 74);">// 获取线程map</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">map</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) <span style="color: rgb(218, 146, 74);">// map不为空，那么直接放入</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">map</span>.<span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">value</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">createMap</span>(<span style="color: rgb(184, 191, 198);">t</span>, <span style="color: rgb(184, 191, 198);">value</span>); <span style="color: rgb(218, 146, 74);">// 否则创建线程map</span></p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取线程map。可以看到这里直接取线程对象的ThreadLocal.ThreadLocalMap对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">getMap</span>(<span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">threadLocals</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建线程map，可以看到这里初始化了ThreadLocalMap对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">createMap</span>(<span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">t</span>, <span style="color: rgb(184, 191, 198);">T</span> <span style="color: rgb(184, 191, 198);">firstValue</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">threadLocals</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ThreadLocalMap</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">firstValue</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 用于处理ThreadLocal和value映射的线程map</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ThreadLocalMap</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">Entry</span>[] <span style="color: rgb(184, 191, 198);">table</span>; <span style="color: rgb(218, 146, 74);">// 保存映射的数组</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ThreadLocalMap</span>(<span style="color: rgb(184, 191, 198);">ThreadLocal&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">firstKey</span>, <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">firstValue</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">table</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Entry</span>[<span style="color: rgb(184, 191, 198);">INITIAL_CAPACITY</span>]; <span style="color: rgb(218, 146, 74);">// 创建数组</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">firstKey</span>.<span style="color: rgb(184, 191, 198);">threadLocalHashCode</span> <span style="color: rgb(184, 191, 198);">&amp;</span> (<span style="color: rgb(184, 191, 198);">INITIAL_CAPACITY</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(100, 171, 143);">1</span>); <span style="color: rgb(218, 146, 74);">// 计算当前ThreadLocal中对应value的下标</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">table</span>[<span style="color: rgb(184, 191, 198);">i</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Entry</span>(<span style="color: rgb(184, 191, 198);">firstKey</span>, <span style="color: rgb(184, 191, 198);">firstValue</span>); <span style="color: rgb(218, 146, 74);">// 将映射关系放入下标所在的entry中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">setThreshold</span>(<span style="color: rgb(184, 191, 198);">INITIAL_CAPACITY</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将指定的映射关系放入对应的数组下标</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(184, 191, 198);">ThreadLocal&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">key</span>, <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">value</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Entry</span>[] <span style="color: rgb(184, 191, 198);">tab</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">table</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">len</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tab</span>.<span style="color: rgb(184, 191, 198);">length</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">key</span>.<span style="color: rgb(184, 191, 198);">threadLocalHashCode</span> <span style="color: rgb(184, 191, 198);">&amp;</span> (<span style="color: rgb(184, 191, 198);">len-</span><span style="color: rgb(100, 171, 143);">1</span>); <span style="color: rgb(218, 146, 74);">// 根据hash值计算该映射关系应该放置的索引下标</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;... <span style="color: rgb(218, 146, 74);">// 省略掉发生冲突二次寻址的过程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tab</span>[<span style="color: rgb(184, 191, 198);">i</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Entry</span>(<span style="color: rgb(184, 191, 198);">key</span>, <span style="color: rgb(184, 191, 198);">value</span>); <span style="color: rgb(218, 146, 74);">// 创建新的entry</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 根据ThreadLocal对象来获取映射值</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">Entry</span> <span style="color: rgb(184, 191, 198);">getEntry</span>(<span style="color: rgb(184, 191, 198);">ThreadLocal&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">key</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">key</span>.<span style="color: rgb(184, 191, 198);">threadLocalHashCode</span> <span style="color: rgb(184, 191, 198);">&amp;</span> (<span style="color: rgb(184, 191, 198);">table</span>.<span style="color: rgb(184, 191, 198);">length</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>我们先来看FastThreadLocal类的原理。我们先来看放入方法。根据源码我们得出以下结论：</p>
+<ol>
+ <li>FastThreadLocal中的variablesToRemoveIndex下标通常为0，同时在该下标处存放着一个Set集合，该集合用于保存所有在InternalThreadLocalMap中保存值的FastThreadLocal</li>
+ <li>保存FastThreadLocal的映射值的核心类为InternalThreadLocalMap</li>
+ <li>在生成FastThreadLocal对象时，将会给FastThreadLocal生成一个唯一的下标index，通过该下标，我们就不需要像原生JDK的ThreadLocalMap一样，通过计算hash值来取余数找到需要放置的下标</li>
+ <li>在放置对象时，我们可以根据是否放置的值为InternalThreadLocalMap.UNSET占位符来决定是否从InternalThreadLocalMap中移除映射</li>
+ <li>在移除映射时，我们先将映射值从InternalThreadLocalMap取出，然后设置InternalThreadLocalMap中对应该FastThreadLocal index下标处为UNSET占位对象。然后根据移除的对象值是否存在来决定回调onRemoval钩子函数</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">FastThreadLocal</span><span style="color: rgb(184, 191, 198);">&lt;V&gt;</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">variablesToRemoveIndex</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">nextVariableIndex</span>(); <span style="color: rgb(218, 146, 74);">// 该类创建时生成的唯一id，通常为0</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">index</span>; <span style="color: rgb(218, 146, 74);">// 当前FastThreadLocal在InternalThreadLocalMap中的下标</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">FastThreadLocal</span>() { <span style="color: rgb(218, 146, 74);">// 创建对象时生成唯一的下标</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">index</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">nextVariableIndex</span>();</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">value</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">value</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">UNSET</span>) { <span style="color: rgb(218, 146, 74);">// value不是占位对象UNSET，那么直接设置</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">get</span>(), <span style="color: rgb(184, 191, 198);">value</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 否则执行清理操作</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">remove</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>, <span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">value</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">value</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">UNSET</span>) {&nbsp;<span style="color: rgb(218, 146, 74);">// 由于该方法是通用方法，所以这里还得检测一次占位对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">threadLocalMap</span>.<span style="color: rgb(184, 191, 198);">setIndexedVariable</span>(<span style="color: rgb(184, 191, 198);">index</span>, <span style="color: rgb(184, 191, 198);">value</span>)) { <span style="color: rgb(218, 146, 74);">// 注意：这里直接根据index下标设置值即可</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addToVariablesToRemove</span>(<span style="color: rgb(184, 191, 198);">threadLocalMap</span>, <span style="color: rgb(200, 143, 208);">this</span>); <span style="color: rgb(218, 146, 74);">// 设置成功，那么将当前FastThreadLocal对象添加到threadLocalMap对应的variablesToRemoveIndex下标处，表明需要进行清理的FastThreadLocal（这里通常为0下标）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">remove</span>(<span style="color: rgb(184, 191, 198);">threadLocalMap</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将FastThreadLocal&lt;?&gt; variable添加到InternalThreadLocalMap threadLocalMap对应的下标处</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">addToVariablesToRemove</span>(<span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>, <span style="color: rgb(184, 191, 198);">&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">variable</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">v</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>.<span style="color: rgb(184, 191, 198);">indexedVariable</span>(<span style="color: rgb(184, 191, 198);">variablesToRemoveIndex</span>); <span style="color: rgb(218, 146, 74);">// 获取对应的下标值</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Set&lt;FastThreadLocal&lt;?&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">variablesToRemove</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">v</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">UNSET</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">v</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 如果集合不存在，那么创建集合</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">variablesToRemove</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Collections</span>.<span style="color: rgb(184, 191, 198);">newSetFromMap</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IdentityHashMap&lt;FastThreadLocal&lt;?&gt;</span>, <span style="color: rgb(28, 198, 133);">Boolean</span><span style="color: rgb(184, 191, 198);">&gt;</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">threadLocalMap</span>.<span style="color: rgb(184, 191, 198);">setIndexedVariable</span>(<span style="color: rgb(184, 191, 198);">variablesToRemoveIndex</span>, <span style="color: rgb(184, 191, 198);">variablesToRemove</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 否则将已经存在的v转为Set&lt;FastThreadLocal&lt;?&gt;&gt;集合</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">variablesToRemove</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">Set&lt;FastThreadLocal&lt;?&gt;&gt;</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Set&lt;FastThreadLocal&lt;?&gt;&gt;</span>) <span style="color: rgb(184, 191, 198);">v</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将FastThreadLocal对象放入集合</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">variablesToRemove</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">variable</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 清理当前FastThreadLocal在InternalThreadLocalMap中的存储</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">remove</span>(<span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">threadLocalMap</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">v</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>.<span style="color: rgb(184, 191, 198);">removeIndexedVariable</span>(<span style="color: rgb(184, 191, 198);">index</span>); <span style="color: rgb(218, 146, 74);">// 从threadLocalMap对应的index下标中移除该对象，并设置为UNSET，返回该对象值</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">removeFromVariablesToRemove</span>(<span style="color: rgb(184, 191, 198);">threadLocalMap</span>, <span style="color: rgb(200, 143, 208);">this</span>); <span style="color: rgb(218, 146, 74);">// 由于该FastThreadLocal的映射值已经从InternalThreadLocalMap中移除，那么需要将其从下标为variablesToRemoveIndex处的Set集合中移除</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">v</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">UNSET</span>) { <span style="color: rgb(218, 146, 74);">// 如果移除成功，那么回调钩子方法（默认为空，子类可以重写来完成自己的逻辑）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">onRemoval</span>((<span style="color: rgb(184, 191, 198);">V</span>) <span style="color: rgb(184, 191, 198);">v</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Exception</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">PlatformDependent</span>.<span style="color: rgb(184, 191, 198);">throwException</span>(<span style="color: rgb(184, 191, 198);">e</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将指定的FastThreadLocal从InternalThreadLocalMap中对应下标为variablesToRemoveIndex（通常为0）中的Set集合中移除</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">removeFromVariablesToRemove</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>, <span style="color: rgb(184, 191, 198);">FastThreadLocal&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">variable</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取set集合并掉用其remove方法移除</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">v</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>.<span style="color: rgb(184, 191, 198);">indexedVariable</span>(<span style="color: rgb(184, 191, 198);">variablesToRemoveIndex</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">v</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">UNSET</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">v</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Set&lt;FastThreadLocal&lt;?&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">variablesToRemove</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">Set&lt;FastThreadLocal&lt;?&gt;&gt;</span>) <span style="color: rgb(184, 191, 198);">v</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">variablesToRemove</span>.<span style="color: rgb(184, 191, 198);">remove</span>(<span style="color: rgb(184, 191, 198);">variable</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 直接移除操作，可以看到直接获取当前线程的InternalThreadLocalMap对象，然后调用上述的remove(InternalThreadLocalMap threadLocalMap) 方法</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">remove</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">remove</span>(<span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">getIfSet</span>());</p>
+<p>&nbsp;}</p>
+<p>可能读者会想：下标为0处的集合到底有何用？为何在当前线程添加映射时需要将FastThreadLocal放入该集合。我们继续看removeAll静态方法的移除操作。根据源码我们得出结论：</p>
+<ol>
+ <li>我们在当前线程中可以创建多个FastThreadLocal，而一个线程只有一个InternalThreadLocalMap</li>
+ <li>当我们在添加FastThreadLocal映射值时，就会将其放入InternalThreadLocalMap下标为0处的set集合</li>
+ <li>这时当我们需要移除该线程所有的FastThreadLocal映射时，就可以获取该集合将其中的保存的InternalThreadLocalMap的值全部移除</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">FastThreadLocal</span><span style="color: rgb(184, 191, 198);">&lt;V&gt;</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">removeAll</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">getIfSet</span>(); <span style="color: rgb(218, 146, 74);">// 获取当前线程的InternalThreadLocalMap</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">threadLocalMap</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">v</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>.<span style="color: rgb(184, 191, 198);">indexedVariable</span>(<span style="color: rgb(184, 191, 198);">variablesToRemoveIndex</span>); <span style="color: rgb(218, 146, 74);">// 获取下标为0的set集合，该集合保留了当前线程所有的FastThreadLocal变量</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">v</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">v</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">UNSET</span>) { <span style="color: rgb(218, 146, 74);">// 集合存在，那么遍历调用FastThreadLocal的remove方法移除</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@SuppressWarnings</span>(<span style="color: rgb(210, 107, 107);">"unchecked"</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Set&lt;FastThreadLocal&lt;?&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">variablesToRemove</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">Set&lt;FastThreadLocal&lt;?&gt;&gt;</span>) <span style="color: rgb(184, 191, 198);">v</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">FastThreadLocal&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">variablesToRemoveArray</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">variablesToRemove</span>.<span style="color: rgb(184, 191, 198);">toArray</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">FastThreadLocal</span>[<span style="color: rgb(184, 191, 198);">variablesToRemove</span>.<span style="color: rgb(184, 191, 198);">size</span>()]);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">FastThreadLocal&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">tlv</span>: <span style="color: rgb(184, 191, 198);">variablesToRemoveArray</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tlv</span>.<span style="color: rgb(184, 191, 198);">remove</span>(<span style="color: rgb(184, 191, 198);">threadLocalMap</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> { <span style="color: rgb(218, 146, 74);">// 最后调用InternalThreadLocalMap的remove静态方法，完成最终的清理操作（其实就是将FastThreadLocalThread的InternalThreadLocalMap threadLocalMap置空，因为这个map已经无用了）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">remove</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>FastThreadLocal的核心是InternalThreadLocalMap，我们继续来看InternalThreadLocalMap的原理。根据源码我们得出以下结论：</p>
+<ol>
+ <li>InternalThreadLocalMap继承自UnpaddedInternalThreadLocalMap，对于保存index和value的核心变量 Object[] indexedVariables在UnpaddedInternalThreadLocalMap中定义</li>
+ <li>我们知道保存变量的核心为InternalThreadLocalMap，那么这时我们可以知道FastThreadLocalThread中保存有InternalThreadLocalMap的引用，那么这时移除和获取都可以直接通过该引用操作。那么如果是普通Thread线程呢？那么我们也可以兼容：只需要将InternalThreadLocalMap放入到普通的Thread类的ThreadLocalMap即可。这时我们在UnpaddedInternalThreadLocalMap中定义了ThreadLocal<span style="color: inherit;">&lt;InternalThreadLocalMap&gt;</span> slowThreadLocalMap来完成该操作</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">UnpaddedInternalThreadLocalMap</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ThreadLocal&lt;InternalThreadLocalMap&gt;</span> <span style="color: rgb(184, 191, 198);">slowThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ThreadLocal&lt;InternalThreadLocalMap&gt;</span>(); <span style="color: rgb(218, 146, 74);">// 兼容原生的JDK ThreadLocal ，注意这里的类型为InternalThreadLocalMap，这是何意？继续往下看</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span> <span style="color: rgb(184, 191, 198);">nextIndex</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AtomicInteger</span>(); <span style="color: rgb(218, 146, 74);">// 原子性生成下一个索引下标</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">Object</span>[] <span style="color: rgb(184, 191, 198);">indexedVariables</span>; <span style="color: rgb(218, 146, 74);">// 核心变量，用于保存ThreadLocal的变量值（还记得前面的FastThreadLocal的index下标么）</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">UnpaddedInternalThreadLocalMap</span>(<span style="color: rgb(28, 198, 133);">Object</span>[] <span style="color: rgb(184, 191, 198);">indexedVariables</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">indexedVariables</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">indexedVariables</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">InternalThreadLocalMap</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">UnpaddedInternalThreadLocalMap</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">UNSET</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(28, 198, 133);">Object</span>(); <span style="color: rgb(218, 146, 74);">// 表明未使用的InternalThreadLocalMap下标占位符</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器初始化父类的Object[] indexedVariables数组，可以看到默认数组长度为32</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">newIndexedVariableTable</span>());</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">Object</span>[] <span style="color: rgb(184, 191, 198);">newIndexedVariableTable</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">Object</span>[] <span style="color: rgb(184, 191, 198);">array</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(28, 198, 133);">Object</span>[<span style="color: rgb(100, 171, 143);">32</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Arrays</span>.<span style="color: rgb(184, 191, 198);">fill</span>(<span style="color: rgb(184, 191, 198);">array</span>, <span style="color: rgb(184, 191, 198);">UNSET</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">array</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取当前线程所属的InternalThreadLocalMap对象。根据当前线程类型是否为FastThreadLocalThread，从而调用fastGet或者slowGet获取InternalThreadLocalMap。因为只有FastThreadLocalThread内部直接拥有InternalThreadLocalMap引用。</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">get</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">thread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">currentThread</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">thread</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">FastThreadLocalThread</span>) {&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">fastGet</span>((<span style="color: rgb(184, 191, 198);">FastThreadLocalThread</span>) <span style="color: rgb(184, 191, 198);">thread</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">slowGet</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 从当前FastThreadLocalThread属性变量中获取InternalThreadLocalMap对象，如果不存在，那么在这里将会进行初始化</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">fastGet</span>(<span style="color: rgb(184, 191, 198);">FastThreadLocalThread</span> <span style="color: rgb(184, 191, 198);">thread</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">thread</span>.<span style="color: rgb(184, 191, 198);">threadLocalMap</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">threadLocalMap</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread</span>.<span style="color: rgb(184, 191, 198);">setThreadLocalMap</span>(<span style="color: rgb(184, 191, 198);">threadLocalMap</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">threadLocalMap</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 当前线程不是FastThreadLocalThread，那么从线程原生的ThreadLocalMap中获取InternalThreadLocalMap，当然，如果这里不存在，那么将会初始化InternalThreadLocalMap对象，然后再将其放入原生的ThreadLocal中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">slowGet</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ThreadLocal&lt;InternalThreadLocalMap&gt;</span> <span style="color: rgb(184, 191, 198);">slowThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">UnpaddedInternalThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">slowThreadLocalMap</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span> <span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">slowThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">get</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">InternalThreadLocalMap</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">slowThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(184, 191, 198);">ret</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ret</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将当前线程中的InternalThreadLocalMap移除。这里同样分为FastThreadLocalThread和普通线程。如果是FastThreadLocalThread那么直接设置保存的引用为null即可，如果是普通Thread，那么直接调用原生ThreadLocal的remove方法即可</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">remove</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">thread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">currentThread</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">thread</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">FastThreadLocalThread</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;((<span style="color: rgb(184, 191, 198);">FastThreadLocalThread</span>) <span style="color: rgb(184, 191, 198);">thread</span>).<span style="color: rgb(184, 191, 198);">setThreadLocalMap</span>(<span style="color: rgb(132, 182, 203);">null</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">slowThreadLocalMap</span>.<span style="color: rgb(184, 191, 198);">remove</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>}</p>
+<p><strong>小结</strong></p>
+<p>我们这里主要对比下普通的ThreadLocal和FastThreadLocal的原理：</p>
+<ol>
+ <li>普通的ThreadLocalMap在存储和移除ThreadLocal和Value值的映射时需要进行hash取余操作</li>
+ <li>FastThreadLocal在初始化对象时就保留了一个index下标，这时存储和移除时就不需要取余，只需要通过保存的index下标获取即可，这就是为什么叫做FastThreadLocal</li>
+</ol>
+<p><strong>shutdownGracefully方法原理</strong></p>
+<p>该方法将由外部线程调用，用于结束执行器组中的子执行器。我们看到该方法的实现较为简单，仅仅遍历了子执行器数组，然后调用他们的shutdownGracefully方法，通过返回terminationFuture对象，我们在前面看到过该对象将会在所有子执行器完成关闭后，设置为完成状态。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;</span> <span style="color: rgb(141, 141, 240);">shutdownGracefully</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">quietPeriod</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">l</span>: <span style="color: rgb(184, 191, 198);">children</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">l</span>.<span style="color: rgb(184, 191, 198);">shutdownGracefully</span>(<span style="color: rgb(184, 191, 198);">quietPeriod</span>, <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">unit</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">terminationFuture</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;</span> <span style="color: rgb(141, 141, 240);">terminationFuture</span>() { <span style="color: rgb(218, 146, 74);">// 返回terminationFuture实例</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">terminationFuture</span>;</p>
+<p>}</p>
+<p><strong>awaitTermination方法原理</strong></p>
+<p>该方法用于同步等待所有子执行器全部终止。timeout参数用于指定等待时长。我们看到实现过程如下：</p>
+<ol>
+ <li>根据超时时间和单位计算出基于当前时间退出等待的截止时间deadline</li>
+ <li>遍历所有的子执行器，并调用他们的awaitTermination方法等待，在调用子类方法过程中，对等待的时间进行修正，因为每次等待过后将会消耗一段等待时间，所以需要减掉该时间</li>
+ <li>等待过程中对deadline进行检测，如果发现超时，那么将退出等待</li>
+ <li>调用isTerminated方法返回子执行器是否已经终止</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">awaitTermination</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>)</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">deadline</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">unit</span>.<span style="color: rgb(184, 191, 198);">toNanos</span>(<span style="color: rgb(184, 191, 198);">timeout</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">loop</span>: <span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">l</span>: <span style="color: rgb(184, 191, 198);">children</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeLeft</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">deadline</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">timeLeft</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span> <span style="color: rgb(184, 191, 198);">loop</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">l</span>.<span style="color: rgb(184, 191, 198);">awaitTermination</span>(<span style="color: rgb(184, 191, 198);">timeLeft</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span>.<span style="color: rgb(184, 191, 198);">NANOSECONDS</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">isTerminated</span>();</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">isTerminated</span>() {&nbsp;<span style="color: rgb(218, 146, 74);">// 判断子执行器是否终止，可以看到遍历自执行器数组，如果有一个未终止，那么均返回false</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">l</span>: <span style="color: rgb(184, 191, 198);">children</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!l</span>.<span style="color: rgb(184, 191, 198);">isTerminated</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

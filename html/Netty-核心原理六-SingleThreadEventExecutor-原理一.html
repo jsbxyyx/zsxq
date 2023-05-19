@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理六 SingleThreadEventExecutor 原理一</h1>
+<p>2022-02-24T10:14:52.634+0800</p>
+<p><p><br></p>
+<p><strong>SingleThreadEventExecutor 原理</strong></p>
+<p>AbstractScheduledEventExecutor实现了周期性任务调度的支持，该类继承自AbstractScheduledEventExecutor，同时提供了在单线程中执行所有提交任务的功能方法。</p>
+<p><strong>核心变量与构造器</strong></p>
+<p>通过这些变量和构造器我们知道如下几点：</p>
+<ol>
+ <li>SingleThreadEventExecutor中有执行状态state</li>
+ <li>有一个任务执行队列 Queue<span style="color: inherit;">&lt;Runnable&gt;</span> taskQueue，默认为长度为maxPendingTasks的LinkedBlockingQueue</li>
+ <li>有一个Set<span style="color: inherit;">&lt;Runnable&gt;</span> shutdownHooks，用于在关闭时执行其中的Runnable动作</li>
+ <li>有一个DefaultThreadProperties内部类实现了ThreadProperties，该接口将提供给外部获取线程的属性，我们看到默认的线程属性仅仅只是包装了Thread对象中的方法</li>
+</ol>
+<p><span style="color: rgb(218, 146, 74);">// 标识接口，用于表明执行提交的任务拥有着顺序性</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">OrderedEventExecutor</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">EventExecutor</span> {</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">SingleThreadEventExecutor</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractScheduledEventExecutor</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">OrderedEventExecutor</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 最大挂起执行的任务。可以看到这里最小为16，默认为整形最大值</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">DEFAULT_MAX_PENDING_EXECUTOR_TASKS</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Math</span>.<span style="color: rgb(184, 191, 198);">max</span>(<span style="color: rgb(100, 171, 143);">16</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SystemPropertyUtil</span>.<span style="color: rgb(184, 191, 198);">getInt</span>(<span style="color: rgb(210, 107, 107);">"io.netty.eventexecutor.maxPendingTasks"</span>, <span style="color: rgb(28, 198, 133);">Integer</span>.<span style="color: rgb(184, 191, 198);">MAX_VALUE</span>));</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 执行器状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ST_NOT_STARTED</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ST_STARTED</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">2</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ST_SHUTTING_DOWN</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">3</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ST_SHUTDOWN</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">4</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ST_TERMINATED</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">5</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 用于唤醒和执行空操作的空任务</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">WAKEUP_TASK</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Runnable</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// Do nothing.</span></p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;};</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">NOOP_TASK</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Runnable</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// Do nothing.</span></p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;};</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// JUC的基础。用于封装state变量和threadProperties变量的原子性修改操作</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AtomicIntegerFieldUpdater&lt;SingleThreadEventExecutor&gt;</span> <span style="color: rgb(184, 191, 198);">STATE_UPDATER</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AtomicReferenceFieldUpdater&lt;SingleThreadEventExecutor</span>, <span style="color: rgb(184, 191, 198);">ThreadProperties&gt;</span> <span style="color: rgb(184, 191, 198);">PROPERTIES_UPDATER</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Queue&lt;Runnable&gt;</span> <span style="color: rgb(184, 191, 198);">taskQueue</span>; <span style="color: rgb(218, 146, 74);">// 任务队列</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">volatile</span> <span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">thread</span>; <span style="color: rgb(218, 146, 74);">// 执行线程对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">volatile</span> <span style="color: rgb(184, 191, 198);">ThreadProperties</span> <span style="color: rgb(184, 191, 198);">threadProperties</span>; <span style="color: rgb(218, 146, 74);">// 线程属性</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>; <span style="color: rgb(218, 146, 74);">// 执行器对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">volatile</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">interrupted</span>; <span style="color: rgb(218, 146, 74);">// 标识线程是否被中断</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Semaphore</span> <span style="color: rgb(184, 191, 198);">threadLock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Semaphore</span>(<span style="color: rgb(100, 171, 143);">0</span>); <span style="color: rgb(218, 146, 74);">// 线程锁信号量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Set&lt;Runnable&gt;</span> <span style="color: rgb(184, 191, 198);">shutdownHooks</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">LinkedHashSet&lt;Runnable&gt;</span>(); <span style="color: rgb(218, 146, 74);">// 在关闭时执行的操作链表</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">addTaskWakesUp</span>;&nbsp;<span style="color: rgb(218, 146, 74);">// 是否允许添加任务唤醒线程</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxPendingTasks</span>; <span style="color: rgb(218, 146, 74);">// 最大挂起的任务</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">RejectedExecutionHandler</span> <span style="color: rgb(184, 191, 198);">rejectedExecutionHandler</span>; <span style="color: rgb(218, 146, 74);">// 拒绝函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">volatile</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ST_NOT_STARTED</span>; <span style="color: rgb(218, 146, 74);">// 当前执行器状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">volatile</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">gracefulShutdownQuietPeriod</span>; <span style="color: rgb(218, 146, 74);">// 静默期持续事件</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">volatile</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">gracefulShutdownTimeout</span>; <span style="color: rgb(218, 146, 74);">// 关闭超时时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">gracefulShutdownStartTime</span>; <span style="color: rgb(218, 146, 74);">// 关闭开始时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Promise&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">terminationFuture</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultPromise&lt;</span><span style="color: rgb(28, 198, 133);">Void</span><span style="color: rgb(184, 191, 198);">&gt;</span>(<span style="color: rgb(184, 191, 198);">GlobalEventExecutor</span>.<span style="color: rgb(184, 191, 198);">INSTANCE</span>); <span style="color: rgb(218, 146, 74);">// 用于外部线程等待关闭的Promise</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器：指定了默认的ThreadPerTaskExecutor执行器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">SingleThreadEventExecutor</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventExecutorGroup</span> <span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>, <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">addTaskWakesUp</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ThreadPerTaskExecutor</span>(<span style="color: rgb(184, 191, 198);">threadFactory</span>), <span style="color: rgb(184, 191, 198);">addTaskWakesUp</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器：指定了默认的最大挂起执行任务和拒绝函数：抛出任务拒绝异常</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">SingleThreadEventExecutor</span>(<span style="color: rgb(184, 191, 198);">EventExecutorGroup</span> <span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">addTaskWakesUp</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(184, 191, 198);">addTaskWakesUp</span>, <span style="color: rgb(184, 191, 198);">DEFAULT_MAX_PENDING_EXECUTOR_TASKS</span>, <span style="color: rgb(184, 191, 198);">RejectedExecutionHandlers</span>.<span style="color: rgb(184, 191, 198);">reject</span>());</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 最终构造器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">SingleThreadEventExecutor</span>(<span style="color: rgb(184, 191, 198);">EventExecutorGroup</span> <span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">addTaskWakesUp</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxPendingTasks</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">RejectedExecutionHandler</span> <span style="color: rgb(184, 191, 198);">rejectedHandler</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">parent</span>); <span style="color: rgb(218, 146, 74);">// 初始化执行器组</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">addTaskWakesUp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">addTaskWakesUp</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">maxPendingTasks</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Math</span>.<span style="color: rgb(184, 191, 198);">max</span>(<span style="color: rgb(100, 171, 143);">16</span>, <span style="color: rgb(184, 191, 198);">maxPendingTasks</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">executor</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ObjectUtil</span>.<span style="color: rgb(184, 191, 198);">checkNotNull</span>(<span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(210, 107, 107);">"executor"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">taskQueue</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newTaskQueue</span>(<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">maxPendingTasks</span>); <span style="color: rgb(218, 146, 74);">// 创建任务队列</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">rejectedExecutionHandler</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ObjectUtil</span>.<span style="color: rgb(184, 191, 198);">checkNotNull</span>(<span style="color: rgb(184, 191, 198);">rejectedHandler</span>, <span style="color: rgb(210, 107, 107);">"rejectedHandler"</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 默认为指定数量的LinkedBlockingQueue</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">Queue&lt;Runnable&gt;</span> <span style="color: rgb(184, 191, 198);">newTaskQueue</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxPendingTasks</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">LinkedBlockingQueue&lt;Runnable&gt;</span>(<span style="color: rgb(184, 191, 198);">maxPendingTasks</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 内部类用于获取当前执行器所属线程对象的属性</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultThreadProperties</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">ThreadProperties</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">t</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">DefaultThreadProperties</span>(<span style="color: rgb(184, 191, 198);">Thread</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">t</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">t</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">State</span> <span style="color: rgb(184, 191, 198);">state</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">getState</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">priority</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">getPriority</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isInterrupted</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">isInterrupted</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isDaemon</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">isDaemon</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">name</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">getName</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">id</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">getId</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">StackTraceElement</span>[] <span style="color: rgb(184, 191, 198);">stackTrace</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">getStackTrace</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isAlive</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">t</span>.<span style="color: rgb(184, 191, 198);">isAlive</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法execute实现原理</strong></p>
+<p>我们知道核心的方法便是execute，因为Executor接口定义了如何执行任务，子类将会通过该方法向事件执行器中添加执行的任务。我们看到处理流程如下：</p>
+<ol>
+ <li>检测任务是否为空</li>
+ <li>根据当前线程是否为当前执行器的执行线程来选择是否直接添加任务，还是调用startThread尝试启动该事件执行器的线程来执行任务，然后将任务添加到任务队列中。我们知道，如果线程还未启动的话，那么无法执行任务，所以我们需要尝试startThread，那么就需要该方法允许重入。同时，由于我们的任务队列是LinkedBlockingQueue，那么天生线程安全，所以可以多任务来操作</li>
+ <li>判断当前事件执行器是否已经关闭，从而将任务从队列中移除，同时抛出拒绝异常</li>
+ <li>如果设置addTaskWakesUp为false，那么根据wakesUpForTask方法的返回值来选择是否唤醒线程</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">execute</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"task"</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 根据当前线程是否为当前执行器的执行线程来选择是否直接添加任务，还是调用startThread尝试启动该事件执行器的线程来执行任务，然后将任务添加到任务队列中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">inEventLoop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inEventLoop</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">inEventLoop</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addTask</span>(<span style="color: rgb(184, 191, 198);">task</span>);</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">startThread</span>(); <span style="color: rgb(218, 146, 74);">// 启动任务线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addTask</span>(<span style="color: rgb(184, 191, 198);">task</span>); <span style="color: rgb(218, 146, 74);">// 将任务添加到任务队列</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isShutdown</span>() <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">removeTask</span>(<span style="color: rgb(184, 191, 198);">task</span>)) { <span style="color: rgb(218, 146, 74);">// 判断当前事件执行器是否已经关闭，从而将任务从队列中移除，同时抛出拒绝异常</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">reject</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!addTaskWakesUp</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">wakesUpForTask</span>(<span style="color: rgb(184, 191, 198);">task</span>)) { <span style="color: rgb(218, 146, 74);">// 如果设置addTaskWakesUp为false，那么根据wakesUpForTask方法的返回值来选择是否唤醒线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wakeup</span>(<span style="color: rgb(184, 191, 198);">inEventLoop</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 该方法当前版本总是返回true</span></p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">wakesUpForTask</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><strong>核心方法addTask实现原理</strong></p>
+<p>该方法相对简单，判断任务为空后，调用offerTask方法将任务添加到队列，如果添加失败，那么抛出任务拒绝异常。在offerTask中，将会判断事件执行器状态，从而看看是否拒绝或者添加任务。</p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">addTask</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"task"</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!offerTask</span>(<span style="color: rgb(184, 191, 198);">task</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">reject</span>(<span style="color: rgb(184, 191, 198);">task</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">offerTask</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isShutdown</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">reject</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">taskQueue</span>.<span style="color: rgb(184, 191, 198);">offer</span>(<span style="color: rgb(184, 191, 198);">task</span>);</p>
+<p>}</p>
+<p><br></p>
+<p><strong>核心方法startThread实现原理</strong></p>
+<p>该方法用于启动事件执行器的线程。流程如下：</p>
+<ol>
+ <li>尝试原子性的将状态state从ST_NOT_STARTED修改为ST_STARTED，如果成功，那么调用doStartThread启动线程</li>
+ <li>创建Runnable任务执行</li>
+ <li>在Runnable中获取当前线程并检测中断，如果设置了中断标记位，那么中断当前线程</li>
+ <li>更新最后执行任务的时间</li>
+ <li>执行子类需要重写的run方法：SingleThreadEventExecutor.this.run()。通过try catch捕捉所有子类执行run的异常。保证当前线程不会因为子类的异常而退出</li>
+ <li>当执行完成后需要将执行器状态修改为ST_SHUTTING_DOWN</li>
+ <li>执行confirmShutdown方法，运行所有剩余的任务和关闭钩子函数</li>
+ <li>调用cleanup钩子函数执行资源清理操作</li>
+ <li>修改事件执行器状态为终止状态，同时释放线程锁信号量</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">startThread</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">STATE_UPDATER</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(200, 143, 208);">this</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">ST_NOT_STARTED</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">STATE_UPDATER</span>.<span style="color: rgb(184, 191, 198);">compareAndSet</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">ST_NOT_STARTED</span>, <span style="color: rgb(184, 191, 198);">ST_STARTED</span>)) { <span style="color: rgb(218, 146, 74);">// 原子性更新state</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">doStartThread</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">doStartThread</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">assert</span> <span style="color: rgb(184, 191, 198);">thread</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">executor</span>.<span style="color: rgb(184, 191, 198);">execute</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Runnable</span>() { <span style="color: rgb(218, 146, 74);">// 直接通过执行器执行任务</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取当前线程并检测中断，如果设置了中断标记位，那么中断当前线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">currentThread</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">interrupted</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread</span>.<span style="color: rgb(184, 191, 198);">interrupt</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">success</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">updateLastExecutionTime</span>(); <span style="color: rgb(218, 146, 74);">// 更新最后执行任务的时间，也即获取当前时间对lastExecutionTime进行赋值</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> { <span style="color: rgb(218, 146, 74);">// 执行子类需要重写的run方法。通过try catch捕捉所有子类执行run的异常。保证当前线程不会因为子类的异常而退出</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SingleThreadEventExecutor</span>.<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">run</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">success</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(<span style="color: rgb(210, 107, 107);">"Unexpected exception from an event executor: "</span>, <span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 当执行完成后需要将执行器状态修改为ST_SHUTTING_DOWN，由此可见，上述的run方法一旦返回，那么当前执行器就等同于关闭，这时很容易猜到子类的SingleThreadEventExecutor.this.run()便是处理业务的核心操作</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">oldState</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">STATE_UPDATER</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">SingleThreadEventExecutor</span>.<span style="color: rgb(200, 143, 208);">this</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">oldState</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">ST_SHUTTING_DOWN</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">STATE_UPDATER</span>.<span style="color: rgb(184, 191, 198);">compareAndSet</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SingleThreadEventExecutor</span>.<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">oldState</span>, <span style="color: rgb(184, 191, 198);">ST_SHUTTING_DOWN</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果成功执行SingleThreadEventExecutor.this.run()，而不是因为抛出异常而退出，那么这时需要检测gracefulShutdownStartTime是否为0，如果此时gracefulShutdownStartTime为0，那么表明子类没有调用confirmShutdown()方法，这时触发一个错误日志</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">success</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">gracefulShutdownStartTime</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">error</span>(<span style="color: rgb(210, 107, 107);">"Buggy "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">EventExecutor</span>.<span style="color: rgb(200, 143, 208);">class</span>.<span style="color: rgb(184, 191, 198);">getSimpleName</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">" implementation; "</span> <span style="color: rgb(184, 191, 198);">+</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SingleThreadEventExecutor</span>.<span style="color: rgb(200, 143, 208);">class</span>.<span style="color: rgb(184, 191, 198);">getSimpleName</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">".confirmShutdown() must be called "</span> <span style="color: rgb(184, 191, 198);">+</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"before run() implementation terminates."</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 执行confirmShutdown方法，运行所有剩余的任务和关闭钩子函数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">confirmShutdown</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cleanup</span>(); <span style="color: rgb(218, 146, 74);">// 执行资源清理操作，子类可以实现该钩子函数来完成资源释放</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 修改事件执行器状态为终止状态，同时释放线程锁信号量</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">STATE_UPDATER</span>.<span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(184, 191, 198);">SingleThreadEventExecutor</span>.<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">ST_TERMINATED</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">threadLock</span>.<span style="color: rgb(184, 191, 198);">release</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!taskQueue</span>.<span style="color: rgb(184, 191, 198);">isEmpty</span>()) { <span style="color: rgb(218, 146, 74);">// 任务队列不为空，那么触发警告日志</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"An event executor terminated with "</span> <span style="color: rgb(184, 191, 198);">+</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"non-empty task queue ("</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">taskQueue</span>.<span style="color: rgb(184, 191, 198);">size</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">')'</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">terminationFuture</span>.<span style="color: rgb(184, 191, 198);">setSuccess</span>(<span style="color: rgb(132, 182, 203);">null</span>); <span style="color: rgb(218, 146, 74);">// 设置终止Future成功完成</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;});</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 子类重写该方法执行处理操作</span></p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">run</span>();</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 子类实现该钩子方法完成自己的资源清理</span></p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">cleanup</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// NOOP</span></p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>并发编程前序一</h1>
+<p>2022-01-15T11:36:37.856+0800</p>
+<p><p>在网上、书上，常常提及并发编程，然后吸引眼球，在前面加了一个高字，然后变成了高并发编程。笔者觉得，并发编程为基础知识点，当在计算机中运行的任务数远大于执行指令的CPU个数时，方可称之为高并发。这时读者是否应该抓住GC Root：并发编程？本文将作为并发编程的前序系列，对线程、进程、接口设计等等基础进行详细解答，同样，请读者进行逻辑分析与知识推理，同时建立点、线、面关联，务必使用混沌学习法的融合记忆与推理来学习。通过本文，建立底层计算机思维的GC Root。</p>
+<p>本文也将作为在后面编写Netty、Tomcat的线程模型设计架构的基础，所以务必掌握其中的精髓，这些都是点，将会由使用他们的框架进行线的整合。</p>
+<p><strong>并发与并行</strong></p>
+<p>同样，我们先进行知识推理：</p>
+<ol>
+ <li>计算机三大基础组件：CPU、内存、硬盘</li>
+ <li>CPU用于控制其他组件，同时执行指令</li>
+ <li>内存用于存放运行的任务的 数据 + 指令（告诉CPU要干啥）</li>
+ <li>硬盘用于持久化存放任务的 数据 + 指令（怎么与内存的功能一样？是的，必须一样）</li>
+ <li>硬盘与内存的作用相同，理论上我们只需要 CPU + 内存/硬盘 即可，那么为啥偏偏需要这两者？是由于硬盘用于持久化，硬盘的数据并不会因为掉电而丢失，这就好理解了，所以硬盘必须。那么继续来看内存的作用，硬盘由于需要持久化，所以设计和实现必然速度远远慢于CPU，那么为了弥补这一缺陷，引入了速度远快于硬盘的内存，这时又由于内存因为速度设计，所以不得不放弃持久化的功能，所以两者互相弥补，增加运行速度。读者有没有发现内存是硬盘中的数据（程序的指令和数据）缓存。</li>
+ <li>这时，我们可以很容易的推理：在系统中集成多个CPU，大容量内存，同时可以将这些任务从硬盘中放到内存，然后多个CPU分别执行它们即可，这时将会极大增加计算机性能</li>
+</ol>
+<p>那么，此时我们可以根据以上结论对并发与并行进行定义：</p>
+<ol>
+ <li>当内存中的任务数正好等于CPU的核心数，那么理想情况下所有CPU都各自获取到了要执行的任务，那么，在同一时间将会有CPU核心数个数的任务在执行，这称之为 并行</li>
+ <li>当内存中的任务数正好大于CPU的核心数，那么理想情况下所有CPU都各自获取到了要执行的任务，这时将会有多余的任务得不到CPU执行，而CPU将会对这些多余的任务和当前执行的任务进行切换（调度）来分时（eg：1S = 1000ms， 500 ms 执行 A， 500 ms 执行 B，这时将一段时间切割给不同任务执行，这称之为分时执行）执行它们，这称之为 并发</li>
+</ol>
+<p>小结：</p>
+<ol>
+ <li>内存是硬盘中的数据（程序的指令和数据）缓存，为了加速而设计</li>
+ <li>并行：同一时间 同时 执行多个任务</li>
+ <li>并发：分时执行多个任务</li>
+ <li>当分时足够小时，我们也可以称之为伪并行（eg：1s = 1000ms，切割为1ns一个任务，这时我们也可称之为并行，取决于定义的分时的间隔大小）</li>
+</ol>
+<p><strong>多进程的意义</strong></p>
+<p>前面我们笼统的说了任务这个概念，现在我们将其具象化为 进程。我们知道一个程序是存放在硬盘中的一堆01二进制数据，而这些数据中由两部分组成：数据、指令，数据用于作为程序在运行时操作的目标，指令用于指示CPU完成数据的输入、运算、输出。</p>
+<p>那么什么是进程？答案就是已经加载放入了内存中的程序，这时CPU可以对其进行调度执行，也即运行中的程序为进程。那么我们是不是得有个东西来代表进程，同时保存进程的数据：进程的内存分布、进程的状态、进程的ID等等，那么我们将这些数据专门放到一片连续内存（C语言的结构体~），这个结构体便称之为PCB（进程控制块），而操作系统将会根据这些控制块来选择进程执行。</p>
+<p>这时不难看出，进程的意义就是：封装执行中的程序的信息、提供PCB交由操作系统来调度执行。所以，就会有这样一个结论：进程是操作系统分配资源的基本单位。</p>
+<p><strong>多线程的意义</strong></p>
+<p>我们有了进程之后，可以表示一个运行中的程序，保留了该程序的内存信息、ID信息、CPU状态信息、打开文件信息、信号处理器信息（当发送信号时的处理函数，eg：kill -9 便是向线程发送了一个信号，那么就可以找到处理该信号的处理函数来操作进程）。那么人们开始发现，如果一个A任务，它需要完成多个子任务：A1、A2、A3。那么如果按照原先的方式，我们应该创建三个进程，来同时完成，这时会加快任务的处理速度，但是，随之而来的现象便是：性能较差，不知道读者能否发现，A1、A2、A3这三个任务和A任务的进程内存数据、处理函数、打开文件、信号处理函数均是一模一样的，不同在于执行的指令区域不太一样，也即在A任务的指令中分离：A1、A2、A3三个区域的代码，分别让三个进程执行不同的代码区域即可（eg：Runnable的三个实例，Function的三个函数），而我们知道每个进程都有着自己独立的数据，这时如果从A任务创建了三个子进程，这就以为A的所有数据均需要复制出三份，这不仅消耗了时间，同时也浪费了内存。于是乎，人们搞出了一个概念：线程，我们也称之为轻量级进程（注意这个概念，它也是进程，只不过很轻量，轻量在哪里？往下继续看）。</p>
+<p>如何实现线程呢?我们知道，一个技术出来就是为了解决某个问题的，我们上面的问题在于：多个进程的内存数据、处理函数、打开文件、信号处理函数、甚至二进制执行代码都是相同的，不能共享。那么我们直接让他们共享不就行了？确实就是这样的，我们创建了A1、A2、A3，可以指定让他们共享：内存数据、处理函数、打开文件、信号处理函数、二进制执行代码，然后规定他们执行二进制代码的某些区域的代码即可。这就是线程实现方式，我们来看个创建线程时，进入系统调用的复制标志位（clone flag 克隆标志位）。以下代码摘自glibc的源码，也即封装了系统调用的sdk，由于我们还没有分析到这里，读者只需要知道我们可以通过包装了系统调用的该方法来快速创建线程，而不需要理会这些内核的参数和调用过程。代码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">create_thread</span> (<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pthread</span> <span style="color: rgb(184, 191, 198);">*pd，</span> <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pthread_attr</span> <span style="color: rgb(184, 191, 198);">*attr，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(184, 191, 198);">stopped_start，</span> <span style="color: rgb(184, 191, 198);">STACK_VARIABLES_PARMS，</span> <span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">thread_ran</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 根据来自Linux内核的描述，可以看到其实内核创建线程就是传入这些标志位来创建了进程，而正是由于这些标志位导致进程共享空间和属性，所以它们称之为线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">clone_flags</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">CLONE_VM</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_FS</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_FILES</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_SYSVSEM</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_SIGHAND</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_THREAD</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_SETTLS</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_PARENT_SETTID</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_CHILD_CLEARTID</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 调用ARCH_CLONE开始创建线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">__glibc_unlikely</span> (<span style="color: rgb(184, 191, 198);">ARCH_CLONE</span> (<span style="color: rgb(184, 191, 198);">&amp;start_thread，</span> <span style="color: rgb(184, 191, 198);">STACK_VARIABLES_ARGS，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">clone_flags，</span> <span style="color: rgb(184, 191, 198);">pd，</span> <span style="color: rgb(184, 191, 198);">&amp;pd-&gt;tid，</span> <span style="color: rgb(184, 191, 198);">tp，</span> <span style="color: rgb(184, 191, 198);">&amp;pd-&gt;tid</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>))</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">errno</span>;</p>
+<p>}</p>
+<p>我们从上面的代码看到，当我们使用ARCH_CLONE告诉操作系统创建线程时，放入了这一系列的clone_flags。来看看这些flag有何含义：</p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CSIGNAL</span> &nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">0x000000ff</span> <span style="color: rgb(218, 146, 74);">// 退出时发送信号</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_VM</span> &nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">0x00000100</span> <span style="color: rgb(218, 146, 74);">// 共享虚拟内存</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_FS</span> &nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">0x00000200</span> <span style="color: rgb(218, 146, 74);">// 共享文件系统</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_FILES</span>&nbsp;<span style="color: rgb(100, 171, 143);">0x00000400</span> &nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 共享打开的文件</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_SIGHAND</span> <span style="color: rgb(100, 171, 143);">0x00000800</span> <span style="color: rgb(218, 146, 74);">// 共享信号和信号处理函数</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_IDLETASK</span> <span style="color: rgb(100, 171, 143);">0x00001000</span> <span style="color: rgb(218, 146, 74);">// 新的进程ID是否为0，内核专用</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_PTRACE</span> <span style="color: rgb(100, 171, 143);">0x00002000</span> <span style="color: rgb(218, 146, 74);">// 父进程被trace子进程也被trace </span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_VFORK</span> <span style="color: rgb(100, 171, 143);">0x00004000</span> <span style="color: rgb(218, 146, 74);">// 子进程调用mm_release时唤醒父进程</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_PARENT</span> <span style="color: rgb(100, 171, 143);">0x00008000</span>&nbsp;<span style="color: rgb(218, 146, 74);">// 子进程和创建子进程的进程形成兄弟关系，而不是父子关系</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_THREAD</span> <span style="color: rgb(100, 171, 143);">0x00010000</span> <span style="color: rgb(218, 146, 74);">// 设置同一个进程组</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_NEWNS</span> <span style="color: rgb(100, 171, 143);">0x00020000</span> <span style="color: rgb(218, 146, 74);">//子进程是否拥有一个新的namespace </span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_SYSVSEM</span> <span style="color: rgb(100, 171, 143);">0x00040000</span> <span style="color: rgb(218, 146, 74);">// 共享system v </span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_SETTLS</span> <span style="color: rgb(100, 171, 143);">0x00080000</span> <span style="color: rgb(218, 146, 74);">// 是否为子进程创建TLS </span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_PARENT_SETTID</span> <span style="color: rgb(100, 171, 143);">0x00100000</span>&nbsp;<span style="color: rgb(218, 146, 74);">// 是否把子进程的PID复制到参数parent_tidptr指向的用户态变量 </span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_CHILD_CLEARTID</span> <span style="color: rgb(100, 171, 143);">0x00200000</span>&nbsp;<span style="color: rgb(218, 146, 74);">// 是否清除子进程在内存空间的clear_child_tid位置的ID</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_DETACHED</span> <span style="color: rgb(100, 171, 143);">0x00400000</span> <span style="color: rgb(218, 146, 74);">// 未使用</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_UNTRACED</span> <span style="color: rgb(100, 171, 143);">0x00800000</span> <span style="color: rgb(218, 146, 74);">// 不能强制使用CLONE_PTRACE来跟踪子进程</span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_CHILD_SETTID</span> <span style="color: rgb(100, 171, 143);">0x01000000</span> <span style="color: rgb(218, 146, 74);">// 保存子线程在其内存child_tidptr位置的ID </span></p>
+<p><span style="color: rgb(184, 191, 198);">#define</span> <span style="color: rgb(184, 191, 198);">CLONE_STOPPED</span> <span style="color: rgb(100, 171, 143);">0x02000000</span> <span style="color: rgb(218, 146, 74);">// 子进程会初始为stop状态，必须通过SIGCONT信号来resume</span></p>
+<p>很明显了，为何叫轻量级进程（线程），不就是多个进程共享了资源么？这时就更容易解释了：由于共享资源导致了多个CPU执行指令时可以访问相同的数据，这就需要保证互斥操作了。</p>
+<p><strong>编程语言中的线程与进程</strong></p>
+<p>在了解了并发编程、并发、并行、线程、进程的概念后，这一小节我们以C语言和Java语言来举例，看看创建的进程和线程和描述的是否相同，这里读者需要把上面描述的结论进行详细掌握：进程与进程之间数据完全独立（当然这里排除你编程让进程共享内存）、线程与线程之间共享数据（轻量级进程）。</p>
+<p><strong>C语言</strong></p>
+<p>以下代码给出了两个例子：实例一用于创建线程、实例二用于创建进程。我们在前面看到了当调用pthread_create函数创建线程时，将会传入clone flags表明创建出来的进程需要共享哪些内容，这时这个进程为轻量级进程（线程），而对于进程创建而言调用的函数为fork，该函数将直接调用内核的系统调用，不会传递clone flags，这就意味着父子进程将完全隔离，父进程的所有数据都需要复制给子进程。不难看出，这时创建线程的性能高于创建进程（而创建线程也等同于创建进程，只不过这些进程共享数据内容）。</p>
+<p>正因为线程需要共享数据，这时我们不得不在func函数中增加互斥锁来保证线程安全，这合情合理，毕竟共享了数据。而对于进程而言，创建出来相当于与父子进程毫无关系，所以我们需要使用if else分支来分割父子进程的执行代码，但是并不需要使用互斥锁，因为他们数据、代码均是隔离的。</p>
+<p><span style="color: rgb(218, 146, 74);">// 实例一（创建线程）</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;stdio.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;pthread.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;stdlib.h&gt;</span></p>
+<p><span style="color: rgb(184, 191, 198);">pthread_mutex_t</span> <span style="color: rgb(184, 191, 198);">mutex</span> ; <span style="color: rgb(218, 146, 74);">// 声明互斥体</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">count=</span><span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(218, 146, 74);">// 声明公用变量</span></p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">func</span>()</p>
+<p>{ <span style="color: rgb(218, 146, 74);">// 声明线程调用函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_mutex_lock</span>(<span style="color: rgb(184, 191, 198);">&amp;mutex</span>); <span style="color: rgb(218, 146, 74);">// 获取互斥锁</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">count++</span>; <span style="color: rgb(218, 146, 74);">// 变量自增</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_mutex_unlock</span>(<span style="color: rgb(184, 191, 198);">&amp;mutex</span>); <span style="color: rgb(218, 146, 74);">// 释放互斥锁</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">main</span>()</p>
+<p>{ <span style="color: rgb(218, 146, 74);">// 主函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 声明的pthread_t代表线程的stub，通过这个变量来操作线程</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_t</span> <span style="color: rgb(184, 191, 198);">thread1，</span> <span style="color: rgb(184, 191, 198);">thread2</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_mutex_init</span>(<span style="color: rgb(184, 191, 198);">&amp;mutex，NULL</span>); <span style="color: rgb(218, 146, 74);">// 初始化互斥体</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建两个线程同时调用func</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>(<span style="color: rgb(184, 191, 198);">pthread_create</span>(<span style="color: rgb(184, 191, 198);">&amp;thread1，NULL，</span>(<span style="color: rgb(28, 198, 133);">void*</span>)<span style="color: rgb(184, 191, 198);">func，NULL</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>)</p>
+<p>&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">printf</span>(<span style="color: rgb(210, 107, 107);">"create Thread1 error !\n"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">exit</span>(<span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>(<span style="color: rgb(184, 191, 198);">pthread_create</span>(<span style="color: rgb(184, 191, 198);">&amp;thread2，NULL，</span>(<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span>)<span style="color: rgb(184, 191, 198);">func，NULL</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>)</p>
+<p>&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">printf</span>(<span style="color: rgb(210, 107, 107);">"create Thread2 error!\n"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">exit</span>(<span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 主函数等待两个线程完成</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_join</span>(<span style="color: rgb(184, 191, 198);">thread1，NULL</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_join</span>(<span style="color: rgb(184, 191, 198);">thread2，NULL</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_mutex_destroy</span>(<span style="color: rgb(184, 191, 198);">&amp;mutex</span>); <span style="color: rgb(218, 146, 74);">// 释放互斥体</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>}</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 实例二（创建进程）</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;sys/types.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;stdio.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;stdlib.h&gt;</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">main</span>()</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pid_t</span> <span style="color: rgb(184, 191, 198);">pid</span>; <span style="color: rgb(218, 146, 74);">// 保存子进程id</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>((<span style="color: rgb(184, 191, 198);">pid=fork</span>())<span style="color: rgb(184, 191, 198);">==</span><span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(218, 146, 74);">// 返回的pid为0，表示当前返回的子进程（这里注意下上面提到的要点：由于进程之间数据全部隔离，但是由于子进程是由当前进程复制的，所以子进程拥有和父进程一模一样的数据，但是子进程返回pid为0，而父进程返回的pid为子进程id。所以，这里我们用if else判断句来分离父子进程的执行代码）</span></p>
+<p>&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">printf</span>(<span style="color: rgb(210, 107, 107);">"child pid is %d\n"</span>,<span style="color: rgb(184, 191, 198);">getpid</span>());&nbsp;<span style="color: rgb(218, 146, 74);">// 子进程的代码（这里读者可以考虑下为何子进程的pid为0，而父进程返回后pid为子进程的ID？）</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span>(<span style="color: rgb(184, 191, 198);">pid&gt;</span><span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p>&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">printf</span>(<span style="color: rgb(210, 107, 107);">"father pid is %d\n"</span>,<span style="color: rgb(184, 191, 198);">getpid</span>());&nbsp;<span style="color: rgb(218, 146, 74);">// 父进程的代码</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span>&nbsp;<span style="color: rgb(218, 146, 74);">// 如果返回的pid小于0，那么表明创建失败</span></p>
+<p>&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">perror</span>(<span style="color: rgb(210, 107, 107);">"fork error"</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">printf</span>(<span style="color: rgb(210, 107, 107);">"%s"</span>,<span style="color: rgb(210, 107, 107);">"out"</span>); <span style="color: rgb(218, 146, 74);">// 这段代码父子进程共享数据</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>}</p>
+<p><strong>Java语言</strong></p>
+<p>Java采用多线程模型，本身无法直接创建进程，而以下代码给出了两个实例：实例一用于创建线程，实例二用于创建进程。我们知道，Java语言通过Thread类来表示一个线程对象，同时传入了一个Runnable对象作为线程执行体。进程的创建则是直接通过Runtime类直接执行cmd命令，这时将会在jvm层面通过执行fork函数来创建进程。</p>
+<p><span style="color: rgb(218, 146, 74);">// 实例一（创建线程）</span></p>
+<p><span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Thread</span>(()<span style="color: rgb(184, 191, 198);">-&gt;</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">out</span>.<span style="color: rgb(184, 191, 198);">println</span>(<span style="color: rgb(210, 107, 107);">"child thread"</span>)).<span style="color: rgb(184, 191, 198);">start</span>();</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 实例二（创建进程）</span></p>
+<p><span style="color: rgb(184, 191, 198);">Runtime</span>.<span style="color: rgb(184, 191, 198);">getRuntime</span>().<span style="color: rgb(184, 191, 198);">exec</span>(<span style="color: rgb(210, 107, 107);">"ls"</span>);</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// Linux Runtime.getRuntime().exec源码</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">pid_t</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(141, 141, 240);">startChild</span>(<span style="color: rgb(184, 191, 198);">JNIEnv</span> <span style="color: rgb(184, 191, 198);">*env</span>, <span style="color: rgb(184, 191, 198);">jobject</span> <span style="color: rgb(184, 191, 198);">process</span>, <span style="color: rgb(184, 191, 198);">ChildStuff</span> <span style="color: rgb(184, 191, 198);">*c</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">*helperpath</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">switch</span> (<span style="color: rgb(184, 191, 198);">c-&gt;mode</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">MODE_VFORK</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">vforkChild</span>(<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">MODE_FORK</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">forkChild</span>(<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">#if</span> <span style="color: rgb(184, 191, 198);">defined</span>(<span style="color: rgb(184, 191, 198);">__solaris__</span>) <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">defined</span>(<span style="color: rgb(184, 191, 198);">_ALLBSD_SOURCE</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">MODE_POSIX_SPAWN</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">spawnChild</span>(<span style="color: rgb(184, 191, 198);">env</span>, <span style="color: rgb(184, 191, 198);">process</span>, <span style="color: rgb(184, 191, 198);">c</span>, <span style="color: rgb(184, 191, 198);">helperpath</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">#endif</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">default</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 上述源码扩展：forkChild(c)</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">pid_t</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(141, 141, 240);">forkChild</span>(<span style="color: rgb(184, 191, 198);">ChildStuff</span> <span style="color: rgb(184, 191, 198);">*c</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pid_t</span> <span style="color: rgb(184, 191, 198);">resultPid</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">resultPid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fork</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">resultPid</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 子进程代码</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">childProcess</span>(<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">assert</span>(<span style="color: rgb(184, 191, 198);">resultPid</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span>);&nbsp;<span style="color: rgb(218, 146, 74);">/* childProcess never returns */</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">resultPid</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><strong> 小结</strong></p>
+<p>这时我们得出以下结论：</p>
+<ol>
+ <li>线程在操作系统看来也是进程，只不过是共享了数据的进程</li>
+ <li>线程通过pthread_create函数来创建clone flags创建线程</li>
+ <li>进程通过fork函数来创建</li>
+ <li>线程共享数据，所以会导致数据安全性，必要时需要互斥</li>
+ <li>进程由于数据代码独立，所以天生进程安全</li>
+ <li>进程创建成本较高（需要复制父进程的内容）</li>
+ <li>线程创建成本较低（只需要在父线程的内存区域内分配栈内存，其他的共享）</li>
+ <li>不管在C语言还是Java，线程和进程都需要进行代码指令的划分：c语言通过传递函数指针和if else分支，java在JVM层面也是如此</li>
+ <li>进程是操作系统分配资源的基本单位，同时也是CPU调度执行的基本单位（线程是调度单位说法不准确，因为线程只是共享了内存数据的进程而已）</li>
+</ol>
+<p><br></p></p>
+</body>
+</html>

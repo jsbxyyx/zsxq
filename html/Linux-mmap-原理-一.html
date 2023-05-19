@@ -1,0 +1,1216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux mmap 原理 一</h1>
+<p>2022-11-27T10:59:54.240+0800</p>
+<p><p>本文将详细解释 mmap 系统调用的原理。</p>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">描述</strong></h2>
+<p><br></p>
+<p>我们先来看如下函数原型。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#include &lt;sys/mman.h&gt;</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> *<span class="ql-token hljs-title">mmap(void *addr, size_t length, int prot, int flags,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; int fd, off_t offset)</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">munmap(void *addr, size_t length)</span>;
+ </div>
+</div>
+<p>1、mmap() 函数表示在调用进程的虚拟地址空间中创建一个新的映射，新映射的起始地址由参数 addr 指定，length 参数指定映射的长度。</p>
+<p>2、如果 addr 为 NULL，则内核可以自由的选择创建映射的地址，这是创建新映射的最具备可移植性的方法（不同内核的实现对于地址选择可能存在某些约束）。如果 addr 不为NULL，那么内核将它作为一个关于映射位置的提示，在 Linux内核上，映射将在 addr 地址附近的页面边界上创建映射，新映射的地址作为调用的结果返回。</p>
+<p>3、当我们需要映射文件的内容时（与匿名映射相反，参见下面的MAP_ANONYMOUS），可以传入文件描述符 fd ，并且指定参数 offset 表示从 fd 表示的文件内容偏移量处开始映射，其中 offset 必须是 sysconf(_SC_PAGE_SIZE) 返回的页面大小的倍数，也即需要与页面对齐。</p>
+<p>4、prot 参数描述映射所需的内存保护属性（并且不能与文件的打开模式冲突）。它可以由以下属性描述：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  PROT_EXEC : 映射的页可以被执行
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  PROT_READ : 映射的页只读
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  PROT_WRITE : 映射的页只写
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  PROT_NONE : 映射的页不能被访问
+ </div>
+</div>
+<p>5、flags 参数用于表示映射的页面更新对映射同一区域的其他进程是否可见，以及是否将更新传递到底层文件。它可以由以下属性描述：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  MAP_SHARED : 在进程间共享此映射。映射的更新对于映射此文件的其他进程是可见的，并被传递到底层文件。在调用msync()或 munmap()之前，磁盘文件内容实际上可能不会被更新（因为内容还缓存在映射页面中）。
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  MAP_PRIVATE :创建一个进程私有的写时复制（COW）映射。对映射的更新对于映射同一文件的其他进程是不可见的，并且不会将修改传递到底层文件。
+ </div>
+</div>
+<p>此外，以下值中的零个或多个可以用在 flag 参数中，用于指定一些特殊的标识：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  MAP_ANONYMOUS:创建一个匿名映射吗，该映射与底层文件无关，仅仅创建页面，页面中的内容被初始化为零。fd 和 offset参数被忽略，但是，如果指定了 MAP_ANONYMOUS 标志位，一些内核实现要求fd为-1，创建可移植应用程序应该确保这一点。从 Linux 内核 2.4 开始，Linux上才支持 MAP_ANONYMOUS 与 MAP_SHARED 结合使用，此时可以实现内存共享机制。
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  MAP_FIXED:通知内核不要将 addr 参数解释为一个提示，此时必须将映射确切地放在 addr 参数指定的地址。addr 必须是页面大小的倍数。如果由 addr 和 len 指定的内存区域与任何现有映射的页面重叠，则将丢弃现有映射的重叠部分。如果指定的地址不能使用，mmap()将失败。由于映射固定地址的可移植性较差，因此不建议使用此选项。
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  MAP_HUGETLB(从 Linux 2.6.32 开始支持):从 HUGETLBFS 透明大页内存文件系统中分配内存
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  MAP_LOCKED(从 Linux 2.5.37 开始支持):用 mlock(2) 函数 将映射区域的页面锁定到内存中。在较老的内核中，这个标志被忽略。
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  MAP_NONBLOCK(从 Linux 2.5.46 开始支持):只有 与 MAP_POPULATE 标志位一起使用才有意义。不执行任何预读:仅为虚拟中已经存在的页创建页表项。从 Linux 2.6.23 开始，这个标志导致 MAP_POPULATE 不做任何事情。但相信总有一天 MAP_POPULATE 和 MAP_NONBLOCK 的组合可能会被重新实现。
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  MAP_POPULATE(从 Linux 2.5.46 开始支持):为映射填充页表，对于文件映射，这将导致文件的预读。以后对映射的访问将不会被 page fault 处理的阻塞，仅从Linux 2.6.23开始支持私有映射与该参数联合使用。
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  MAP_STACK(从 Linux 2.6.27 开始支持):表示 进程 或 线程堆栈的地址分配映射。这个标志目前是无操作的，但是在 glibc 函数库中的pthread 线程库实现中使用，因此如果某些架构需要对堆栈分配进行特殊处理，以后可以透明地实现对glibc的支持。
+ </div>
+</div>
+<p>6、munmap() 系统调用 删除指定地址范围的映射。当函数调用结束时，该映射区域也会自动解除映射，同时应该注意：关闭文件描述符 fd 不会解除该区域的映射。</p>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">sys_mmap2 函数</strong></h2>
+<p><br></p>
+<p>为保持简单，我们这里使用 Linux 2.6.0 的内核来分析 mmap 原理，有些参数如果只有超过该版本才支持，那么读者可以自行下载对应内核代码完成阅读。</p>
+<p>sys_mmap2 系统调用用于完成 mmap 的操作。流程较为简单：检测标志位与fd、然后执行映射。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  asmlinkage <span class="ql-token hljs-type">long</span> <span class="ql-token hljs-title">sys_mmap2(unsigned long addr, unsigned long len,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> unsigned long prot, unsigned long flags,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> unsigned long fd, unsigned long pgoff)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> do_mmap2(addr, len, prot, flags, fd, pgoff);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">long</span> <span class="ql-token hljs-title">do_mmap2(</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> unsigned long addr, unsigned long len,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> unsigned long prot, unsigned long flags,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> unsigned long fd, unsigned long pgoff)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> error = -EBADF;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct file * file =</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  flags &amp;= ~(MAP_EXECUTABLE | MAP_DENYWRITE); <span class="ql-token hljs-comment">// 当前内核不支持这两个标志位，所以将其清零</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(flags &amp; MAP_ANONYMOUS)) { <span class="ql-token hljs-comment">// 若没有指定匿名映射，那么检测 fd 指定的 file 是否存在，如果不存在直接推出</span>
+ </div>
+ <div class="ql-code-block">
+  file = fget(fd);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!file)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> out;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  down_write(&amp;current-&gt;mm-&gt;mmap_sem);
+ </div>
+ <div class="ql-code-block">
+  error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff); <span class="ql-token hljs-comment">// 完成实际映射操作</span>
+ </div>
+ <div class="ql-code-block">
+  up_write(&amp;current-&gt;mm-&gt;mmap_sem);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (file) <span class="ql-token hljs-comment">// 释放当前对 file 结构的引用</span>
+ </div>
+ <div class="ql-code-block">
+  fput(file);
+ </div>
+ <div class="ql-code-block">
+  out:
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> error;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">do_mmap_pgoff 函数</strong></h2>
+<p><br></p>
+<p>该函数用于实现完整的映射。流程如下：</p>
+<p>1、检测 文件映射 fd 的 file结构 是否支持 mmap 函数</p>
+<p>2、检测 映射长度、偏移量、映射次数 是否超出限制</p>
+<p>3、根据传入参数 获取一个 起始映射地址</p>
+<p>4、将传入的 prot 和 flags 标志位转为 vm_flags 标志位</p>
+<p>5、若指定 VM_LOCKED ，那么检测锁定页的限制</p>
+<p>6、检测文件映射属性并设置相关 vm_flags 标志位</p>
+<p>7、找到一个可以进行映射的 vma 和 它的 红黑树父节点</p>
+<p>8、检测映射空间总大小限制</p>
+<p>9、尝试进行 vma 的地址空间合并减少空间碎片</p>
+<p>10、若合并失败，那么分配一个新的 vma 结构 然后完成映射</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> <span class="ql-token hljs-title">do_mmap_pgoff(struct file * file, unsigned long addr,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> unsigned long len, unsigned long prot,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> unsigned long flags, unsigned long pgoff)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct mm_struct * mm =</span> current-&gt;mm;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct * vma, * prev;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct inode *inode;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">int</span> vm_flags;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> correct_wcount = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> error;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rb_node ** rb_link, * rb_parent;</span> <span class="ql-token hljs-comment">// vma 映射结构体的红黑树节点</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> charged = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (file) { <span class="ql-token hljs-comment">// 文件映射，那么需要使用 文件的 mmap 操作来完成，若文件不支持 映射，那么直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!file-&gt;f_op || !file-&gt;f_op-&gt;mmap)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENODEV;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((prot &amp; PROT_EXEC) &amp;&amp; (file-&gt;f_vfsmnt-&gt;mnt_flags &amp; MNT_NOEXEC))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EPERM;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!len) <span class="ql-token hljs-comment">// 映射长度为0，直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> addr;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  len = PAGE_ALIGN(len);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!len || len &gt; TASK_SIZE) <span class="ql-token hljs-comment">// 映射长度超出用户态的内存范围（映射长度不能超过用户态的内存大小，否则将会把内核态的信息进行映射）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((pgoff + (len &gt;&gt; PAGE_SHIFT)) &lt; pgoff) <span class="ql-token hljs-comment">// 映射的文件偏移量溢出</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (mm-&gt;map_count &gt; MAX_MAP_COUNT) <span class="ql-token hljs-comment">// 当前进程的映射超出了最大映射个数：#define MAX_MAP_COUNT (65536)</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  addr = get_unmapped_area(file, addr, len, pgoff, flags); <span class="ql-token hljs-comment">// 获取能够映射的 addr 地址</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (addr &amp; ~PAGE_MASK) <span class="ql-token hljs-comment">// addr 没有对齐到 页大小的边界处直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> addr;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  vm_flags = calc_vm_prot_bits(prot) | calc_vm_flag_bits(flags) |
+ </div>
+ <div class="ql-code-block">
+  mm-&gt;def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC; <span class="ql-token hljs-comment">// 将用户传递的 prot 和 flags 参数转为 vma 的标志位</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (flags &amp; MAP_LOCKED) { <span class="ql-token hljs-comment">// 若指定页面锁定操作，检测是否支持，若支持那么合并上 VM_LOCKED 标志位</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!capable(CAP_IPC_LOCK))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EPERM;
+ </div>
+ <div class="ql-code-block">
+  vm_flags |= VM_LOCKED;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vm_flags &amp; VM_LOCKED) { <span class="ql-token hljs-comment">// 若指定了 VM_LOCKED 标志为，那么检测 锁定的映射页大小 是否超出限制</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> locked = mm-&gt;locked_vm &lt;&lt; PAGE_SHIFT;
+ </div>
+ <div class="ql-code-block">
+  locked += len;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (locked &gt; current-&gt;rlim[RLIMIT_MEMLOCK].rlim_cur)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EAGAIN;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  inode = file ? file-&gt;f_dentry-&gt;d_inode : <span class="ql-token hljs-literal">NULL</span>; <span class="ql-token hljs-comment">// 由于 VFS 中，文件的实际操作需要由 inode来完成，所以这里取 文件的 inode 结构</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (file) { <span class="ql-token hljs-comment">// 完成文件映射检查</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">switch</span> (flags &amp; MAP_TYPE) { <span class="ql-token hljs-comment">// 取映射类型进行判断</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">case</span> MAP_SHARED: <span class="ql-token hljs-comment">// 执行进程间 fd 映射的共享</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((prot&amp;PROT_WRITE) &amp;&amp; !(file-&gt;f_mode&amp;FMODE_WRITE)) <span class="ql-token hljs-comment">// 指定了映射页可写，但文件当前不可写</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EACCES;
+ </div>
+ <div class="ql-code-block">
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (IS_APPEND(inode) &amp;&amp; (file-&gt;f_mode &amp; FMODE_WRITE)) <span class="ql-token hljs-comment">// 确保当前文件不允许 append 追加内容，因为这会改变文件内容得大小</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EACCES;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (locks_verify_locked(inode)) <span class="ql-token hljs-comment">// 当前 inode 没有存在任何锁</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EAGAIN;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  vm_flags |= VM_SHARED | VM_MAYSHARE; <span class="ql-token hljs-comment">// 合并共享标志位</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(file-&gt;f_mode &amp; FMODE_WRITE))
+ </div>
+ <div class="ql-code-block">
+  vm_flags &amp;= ~(VM_MAYWRITE | VM_SHARED);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">case</span> MAP_PRIVATE: <span class="ql-token hljs-comment">// 私有映射</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(file-&gt;f_mode &amp; FMODE_READ)) <span class="ql-token hljs-comment">// 文件不可读直接退出</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EACCES;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">default</span>:
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 完成非文件的映射，此时用于创建内存页映射到当前进程的虚拟地址中</span>
+ </div>
+ <div class="ql-code-block">
+  vm_flags |= VM_SHARED | VM_MAYSHARE; <span class="ql-token hljs-comment">// 先合并上共享标志位（这里笔者觉得没有必要先合并，因为实际上私有映射用得场景很多）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">switch</span> (flags &amp; MAP_TYPE) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">default</span>:
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">case</span> MAP_PRIVATE: <span class="ql-token hljs-comment">// 若用户指定私有映射，那么去掉标志位</span>
+ </div>
+ <div class="ql-code-block">
+  vm_flags &amp;= ~(VM_SHARED | VM_MAYSHARE);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">case</span> MAP_SHARED:
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  error = security_file_mmap(file, prot, flags); <span class="ql-token hljs-comment">// 检测权限的安全file映射，这里忽略</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (error)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> error;
+ </div>
+ <div class="ql-code-block">
+ </div>
+ <div class="ql-code-block">
+  error = -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  munmap_back: <span class="ql-token hljs-comment">// 开始执行映射</span>
+ </div>
+ <div class="ql-code-block">
+  vma = find_vma_prepare(mm, addr, &amp;prev, &amp;rb_link, &amp;rb_parent); &nbsp;<span class="ql-token hljs-comment">// 首先找到一个可以用于保存映射信息的 vma 结构</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma &amp;&amp; vma-&gt;vm_start &lt; addr + len) { <span class="ql-token hljs-comment">// 若 vma 已经存在，同时 映射长度大于 vma 管理的映射页，那么先将原有映射解除，然后再次尝试查找合适的 vma（造成这一现象很简单：映射的内存外碎片）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (do_munmap(mm, addr, len))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> munmap_back;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 检查映射的总地址空间限制</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((mm-&gt;total_vm &lt;&lt; PAGE_SHIFT) + len
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;&gt; current-&gt;rlim[RLIMIT_AS].rlim_cur)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 若标志位没有设置 不保留SWAP分区的页（MAP_NORESERVE） 或者 overcommit_memory 参数为 2 时（注意：overcommit_memory 可以取值 0 1 2，当 overcommit_memory = 0（默认值）， 表示内核将检查是否有足够的可用内存供应用进程使用，如果有足够的可用内存，内存申请允许，否则，内存申请失败，并把错误返回给应用进程。当 overcommit_memory = 1， 表示内核允许分配所有的物理内存，而不管当前的内存状态如何。当 overcommit_memory = 2， 表示内核允许分配超过所有物理内存和交换空间总和的虚拟内存）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(flags &amp; MAP_NORESERVE) || sysctl_overcommit_memory &gt; <span class="ql-token hljs-number">1</span>) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vm_flags &amp; VM_SHARED) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 进程共享页将 在 shmem_file_setup 中检查内存可用性，了解即可</span>
+ </div>
+ <div class="ql-code-block">
+  vm_flags |= VM_ACCOUNT;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (vm_flags &amp; VM_WRITE) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 私有可写映射，检查内存可用性</span>
+ </div>
+ <div class="ql-code-block">
+  charged = len &gt;&gt; PAGE_SHIFT; <span class="ql-token hljs-comment">// 映射长度对齐到4kb，看看所需页面数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (security_vm_enough_memory(charged))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  vm_flags |= VM_ACCOUNT;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 若当前不是文件映射 且 不是进程间共享页映射 且 当前找到合适分配的 vma 的父节点存在，那么尝试进行合并兄弟 vma 相连的虚拟地址</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!file &amp;&amp; !(vm_flags &amp; VM_SHARED) &amp;&amp; rb_parent)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma_merge(mm, prev, rb_parent, addr, addr + len,
+ </div>
+ <div class="ql-code-block">
+  vm_flags, <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-number">0</span>))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> out;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 若混合失败，那么需要新创建一个新的 vma 结构来表示这段新映射的 虚拟地址空间</span>
+ </div>
+ <div class="ql-code-block">
+  vma = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
+ </div>
+ <div class="ql-code-block">
+  error = -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!vma)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> unacct_error;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 设置 vma 属性</span>
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_mm = mm;
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_start = addr;
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_end = addr + len;
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_flags = vm_flags;
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_page_prot = protection_map[vm_flags &amp; <span class="ql-token hljs-number">0x0f</span>];
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_ops = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_pgoff = pgoff;
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_file = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_private_data = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_next = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  INIT_LIST_HEAD(&amp;vma-&gt;shared);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (file) { <span class="ql-token hljs-comment">// 调用 file 文件的 mmap 回调函数处理 文件映射</span>
+ </div>
+ <div class="ql-code-block">
+  error = -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vm_flags &amp; (VM_GROWSDOWN|VM_GROWSUP)) <span class="ql-token hljs-comment">// 文件映射不支持 这两个参数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> free_vma;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vm_flags &amp; VM_DENYWRITE) { <span class="ql-token hljs-comment">// VM_DENYWRITE 标志位 表示尝试对文件进行写访问，若失败，则退出</span>
+ </div>
+ <div class="ql-code-block">
+  error = deny_write_access(file);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (error)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> free_vma;
+ </div>
+ <div class="ql-code-block">
+  correct_wcount = <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_file = file;
+ </div>
+ <div class="ql-code-block">
+  get_file(file); <span class="ql-token hljs-comment">// 增加当前 file 结构的引用计数</span>
+ </div>
+ <div class="ql-code-block">
+  error = file-&gt;f_op-&gt;mmap(file, vma); <span class="ql-token hljs-comment">// 完成映射</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (error)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> unmap_and_free_vma;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (vm_flags &amp; VM_SHARED) { <span class="ql-token hljs-comment">// 共享页映射，那么调用 shmem_file_setup 函数完成映射，这里了解即可</span>
+ </div>
+ <div class="ql-code-block">
+  error = shmem_zero_setup(vma);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (error)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> free_vma;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 在共享映射的 vm_flags 中设置VM_ACCOUNT，以通知 shmem_zero_setup (可能通过 /dev/zero-&gt;mmap 调用)必须检查内存预留空间，但是该预留属于共享内存对象，而不是vma，所以现在将其清除</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((vm_flags &amp; (VM_SHARED|VM_ACCOUNT)) == (VM_SHARED|VM_ACCOUNT))
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_flags &amp;= ~VM_ACCOUNT;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 现在获取当前 vma 映射的起始地址</span>
+ </div>
+ <div class="ql-code-block">
+  addr = vma-&gt;vm_start;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!file || !rb_parent || !vma_merge(mm, prev, rb_parent, addr,
+ </div>
+ <div class="ql-code-block">
+  addr + len, vma-&gt;vm_flags, file, pgoff)) { &nbsp;<span class="ql-token hljs-comment">// 非文件映射 或者 父节点不存在 或者 尝试对兄弟节点进行混合，减少地址空间碎片失败，那么将其链入 vma 链表 同时插入 红黑树</span>
+ </div>
+ <div class="ql-code-block">
+  vma_link(mm, vma, prev, rb_link, rb_parent);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (correct_wcount)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">atomic_inc</span>(&amp;inode-&gt;i_writecount);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (file) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (correct_wcount)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">atomic_inc</span>(&amp;inode-&gt;i_writecount);
+ </div>
+ <div class="ql-code-block">
+  fput(file);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  kmem_cache_free(vm_area_cachep, vma);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  out: <span class="ql-token hljs-comment">// 分配成功退出</span>
+ </div>
+ <div class="ql-code-block">
+  mm-&gt;total_vm += len &gt;&gt; PAGE_SHIFT;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vm_flags &amp; VM_LOCKED) { <span class="ql-token hljs-comment">// 指定锁定页面，那么 调用 make_pages_present 函数 将物理页映射到虚拟地址空间中的页表中</span>
+ </div>
+ <div class="ql-code-block">
+  mm-&gt;locked_vm += len &gt;&gt; PAGE_SHIFT;
+ </div>
+ <div class="ql-code-block">
+  make_pages_present(addr, addr + len);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (flags &amp; MAP_POPULATE) { <span class="ql-token hljs-comment">// 对文件映射页进行预读，之后再次访问时，将不会导致 page fault</span>
+ </div>
+ <div class="ql-code-block">
+  up_write(&amp;mm-&gt;mmap_sem);
+ </div>
+ <div class="ql-code-block">
+  sys_remap_file_pages(addr, len, prot,
+ </div>
+ <div class="ql-code-block">
+  pgoff, flags &amp; MAP_NONBLOCK);
+ </div>
+ <div class="ql-code-block">
+  down_write(&amp;mm-&gt;mmap_sem);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> addr;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  unmap_and_free_vma: <span class="ql-token hljs-comment">// 发生错误解除映射并且释放 vma 结构</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> error;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">get_unmapped_area 函数</strong></h2>
+<p><br></p>
+<p>该函数用于根据传入参数找到一个可以映射的 addr 地址。可以看到如果我们指定了 addr 同时指定 MAP_FIXED，那么检查没问题后直接返回，否则我们将尝试从所有 vma 结构中找到一片 空闲的 没有 vma 映射的虚拟内存域进行映射。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> <span class="ql-token hljs-title">get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> unsigned long pgoff, unsigned long flags)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (flags &amp; MAP_FIXED) { <span class="ql-token hljs-comment">// 指定固定映射（也即必须从 addr 参数处映射）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> ret;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (addr &gt; TASK_SIZE - len)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (addr &amp; ~PAGE_MASK)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (file &amp;&amp; is_file_hugepages(file)) { <span class="ql-token hljs-comment">// 文件映射或者大页文件映射，确保边界对齐</span>
+ </div>
+ <div class="ql-code-block">
+  ret = is_aligned_hugepage_range(addr, len);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 确保正常的请求没有落在保留的大页范围内。对于 IA-64 平台来说，有一个单独保留的大页面区</span>
+ </div>
+ <div class="ql-code-block">
+  ret = is_hugepage_only_range(addr, len);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">// 若检测没什么问题，那么将用户指定的 addr 地址返回即可 </span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (ret)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> addr;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 文件对象本身设置了自己的 get_unmapped_area 函数，那么直接调用</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (file &amp;&amp; file-&gt;f_op &amp;&amp; file-&gt;f_op-&gt;get_unmapped_area)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> file-&gt;f_op-&gt;get_unmapped_area(file, addr, len,
+ </div>
+ <div class="ql-code-block">
+  pgoff, flags);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 否则执行公用分配 addr 函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> arch_get_unmapped_area(file, addr, len, pgoff, flags);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> <span class="ql-token hljs-title">arch_get_unmapped_area(struct file *filp, unsigned long addr,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> unsigned long len, unsigned long pgoff, unsigned long flags)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct mm_struct *mm =</span> current-&gt;mm;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct *vma;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> start_addr;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (len &gt; TASK_SIZE) <span class="ql-token hljs-comment">// 映射长度只能在 用户态 虚拟地址中</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (addr) { <span class="ql-token hljs-comment">// 若已经指定了 addr ，那么将其对齐 到 页面边界处，然后 调用 find_vma 查找红黑树，找到该地址落到的 vma 结构</span>
+ </div>
+ <div class="ql-code-block">
+  addr = PAGE_ALIGN(addr);
+ </div>
+ <div class="ql-code-block">
+  vma = find_vma(mm, addr);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (TASK_SIZE - len &gt;= addr &amp;&amp; <span class="ql-token hljs-comment">// 没有超过用户态虚拟地址空间</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; (!vma || addr + len &lt;= vma-&gt;vm_start)) <span class="ql-token hljs-comment">// vma 不存在 或者 该地址并没有vma 占用（addr + len &lt;= vma-&gt;vm_start vm_start 表示 该 vma 的起始地址，说明需要的地址映射在 该 vma 下面还没有 vma 持有）那么返回该地址</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> addr;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  start_addr = addr = mm-&gt;free_area_cache;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  full_search: <span class="ql-token hljs-comment">// 否则从 当前 addr 地址 附近的 vma 结构 开始 遍历 vma 链表（通过 vma-&gt;vm_next 遍历）找到 一个 vma 不存在 或者 该地址并没有 vma 占用的地址返回</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">for</span> (vma = find_vma(mm, addr); ; vma = vma-&gt;vm_next) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (TASK_SIZE - len &lt; addr) { <span class="ql-token hljs-comment">// 超出用户态虚拟地址</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (start_addr != TASK_UNMAPPED_BASE) { <span class="ql-token hljs-comment">// 起始地址不为 未映射的基地址，那么从 TASK_UNMAPPED_BASE 地址处重新查找（ 在 i386 中 #define TASK_UNMAPPED_BASE (PAGE_ALIGN(TASK_SIZE / 3)) 这决定了内核在mmap的过程中在哪里搜索空闲的vm空间块，其中 #define TASK_SIZE (PAGE_OFFSET) 3GB）</span>
+ </div>
+ <div class="ql-code-block">
+  start_addr = addr = TASK_UNMAPPED_BASE;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> full_search;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-comment">// 从未映射区中还是没有找到，那么返回缺少虚拟内存</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!vma || addr + len &lt;= vma-&gt;vm_start) { <span class="ql-token hljs-comment">// vma 不存在 或者 该地址并没有 vma 占用的地址返回</span>
+ </div>
+ <div class="ql-code-block">
+  mm-&gt;free_area_cache = addr + len;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> addr;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  addr = vma-&gt;vm_end; <span class="ql-token hljs-comment">// 每次循环没有找到时，将地址更新为 当前 vma 映射的末尾虚拟地址，然后重新查找</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">find_vma_prepare 函数</strong></h2>
+<p><br></p>
+<p>该函数用从指定 addr 处 找到一个 vma 或者 红黑树的 父节点（在 Linux 内核中，vma 用于管理虚拟内存空间段，为了方便遍历 将其按照地址高低形成一个链表，为了方便查找将其也组织成了一棵红黑树）。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">struct</span> vm_area_struct * <span class="ql-token hljs-title">find_vma_prepare(struct mm_struct *mm, unsigned long addr,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> struct vm_area_struct **pprev, struct rb_node ***rb_link,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> struct rb_node ** rb_parent)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct * vma;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rb_node ** __rb_link, * __rb_parent, * rb_prev;</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  __rb_link = &amp;mm-&gt;mm_rb.rb_node; <span class="ql-token hljs-comment">// 获取当前进程的根节点</span>
+ </div>
+ <div class="ql-code-block">
+  rb_prev = __rb_parent = <span class="ql-token hljs-literal">NULL</span>; &nbsp;<span class="ql-token hljs-comment">// 初始化链表与红黑树父节点</span>
+ </div>
+ <div class="ql-code-block">
+  vma = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">while</span> (*__rb_link) { <span class="ql-token hljs-comment">// 遍历直到找到一个合适的节点：*__rb_link 为 0，也即红黑树叶子节点 （标准的红黑树查找流程）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct *vma_tmp;</span>
+ </div>
+ <div class="ql-code-block">
+  __rb_parent = *__rb_link; <span class="ql-token hljs-comment">// 当前查找节点为 父节点</span>
+ </div>
+ <div class="ql-code-block">
+  vma_tmp = rb_entry(__rb_parent, <span class="ql-token hljs-keyword">struct</span> vm_area_struct, vm_rb); <span class="ql-token hljs-comment">// 获取其中的 vm_area_struct 结构（该结构保存了完整的虚拟内存域信息：起始地址，结束地址等等）</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma_tmp-&gt;vm_end &gt; addr) { &nbsp;<span class="ql-token hljs-comment">// 当前 vma 的虚拟地址的 结束地址 大于 addr</span>
+ </div>
+ <div class="ql-code-block">
+  vma = vma_tmp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma_tmp-&gt;vm_start &lt;= addr) <span class="ql-token hljs-comment">// 若需要的虚拟地址 包含在 当前 vma 管理的地址中，那么返回该 vma</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> vma;
+ </div>
+ <div class="ql-code-block">
+  __rb_link = &amp;__rb_parent-&gt;rb_left; <span class="ql-token hljs-comment">// 否则查找左子树</span>
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 否则查找右子树</span>
+ </div>
+ <div class="ql-code-block">
+  rb_prev = __rb_parent;
+ </div>
+ <div class="ql-code-block">
+  __rb_link = &amp;__rb_parent-&gt;rb_right;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  *pprev = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-comment">// 最终通过右子树还是没有找到包含需要地址的 vma，那么设置该 vma 为 父节点然后返回 NULL</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (rb_prev)
+ </div>
+ <div class="ql-code-block">
+  *pprev = rb_entry(rb_prev, <span class="ql-token hljs-keyword">struct</span> vm_area_struct, vm_rb);
+ </div>
+ <div class="ql-code-block">
+  *rb_link = __rb_link;
+ </div>
+ <div class="ql-code-block">
+  *rb_parent = __rb_parent;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> vma;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 标准红黑树定义，将内嵌于 vm_area_struct 结构中</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rb_node</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">{</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rb_node *rb_parent;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> rb_color;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define RB_RED 0</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define RB_BLACK 1</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rb_node *rb_right;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rb_node *rb_left;</span>
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct {</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct mm_struct * vm_mm;</span> <span class="ql-token hljs-comment">// 所属进程的内存结构</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> vm_start; <span class="ql-token hljs-comment">// 起始虚拟地址</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> vm_end; <span class="ql-token hljs-comment">// 结束虚拟地址</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct *vm_next;</span> <span class="ql-token hljs-comment">// vma 链表</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct rb_node vm_rb;</span> <span class="ql-token hljs-comment">// 内嵌红黑树属性</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ... <span class="ql-token hljs-comment">// 省略其他属性</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p></p>
+</body>
+</html>

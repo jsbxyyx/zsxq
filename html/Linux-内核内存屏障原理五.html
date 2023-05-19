@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux 内核内存屏障原理五</h1>
+<p>2022-10-14T23:05:23.335+0800</p>
+<p><p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">CPU 间锁屏障影响</strong></h2>
+<p><br></p>
+<p>在 SMP 对称多处理器系统上，所操作提供了一种实质性的屏障：在任何使用锁的冲突上下文中，锁操作确实会影响其他 CPU 上的内存访问顺序。</p>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">锁与内存访问</strong></h3>
+<p><br></p>
+<p>考虑这种情况：系统中存在一对自旋锁（M）和（Q）和 三个 CPU，然后执行以下操作：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; CPU 2 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; CPU 3
+ </div>
+ <div class="ql-code-block">
+  =============================== ================================== &nbsp; ==============
+ </div>
+ <div class="ql-code-block">
+  *A = a; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; *E = e;
+ </div>
+ <div class="ql-code-block">
+  LOCK M &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; LOCK Q
+ </div>
+ <div class="ql-code-block">
+  *B = b; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; *F = f;
+ </div>
+ <div class="ql-code-block">
+  *C = c; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; *G = g;
+ </div>
+ <div class="ql-code-block">
+  UNLOCK M &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; UNLOCK Q
+ </div>
+ <div class="ql-code-block">
+  *D = d; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; *H = h;
+ </div>
+</div>
+<p>这时，虽然存在不同 CPU 间存在不同锁隐含屏障的约束，但无法保证 CPU 3 访问 *A 到 *H 之间的指令顺序。例如，它可以看到如下全局指令顺序：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  *E, LOCK M, LOCK Q, *G, *C, *F, *A, *B, UNLOCK Q, *D, *H, UNLOCK M
+ </div>
+</div>
+<p>我们很容易看到，上述描述的执行为 CPU 并发执行，但 获取锁操作 和 释放锁操作 的屏障语义得到保证：</p>
+<p>1、获取锁操作前的 内存访问指令 可以 重排序到 获取锁操作之后</p>
+<p>2、释放锁操作后的 内存访问指令 可以 重排序到 释放锁操作之前</p>
+<p>此时再次强调一遍：获取锁操作 确定了上限（获取锁操作 后面的指令不能越过 获取锁操作 之前），释放锁操作 确定了下限（ 释放锁操作 前面的指令不能越过 释放锁操作 之后）</p>
+<p>于是，我们不可能看到下面的指令顺序：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  *B, *C 或者 *D 指令 发生在 LOCK M 之前
+ </div>
+ <div class="ql-code-block">
+  *A, *B 或者 *C 指令 发生在 UNLOCK M 之后
+ </div>
+ <div class="ql-code-block">
+  *F, *G 或者 *H 指令 发生在 LOCK Q 之前
+ </div>
+ <div class="ql-code-block">
+  *E, *F 或者 *G 指令 发生在 UNLOCK Q 之后
+ </div>
+</div>
+<p>但是，当我们执行如下操作：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; CPU 2 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; CPU 3
+ </div>
+ <div class="ql-code-block">
+  =============================== =============================== &nbsp; &nbsp; &nbsp; &nbsp; ==================
+ </div>
+ <div class="ql-code-block">
+  *A = a;
+ </div>
+ <div class="ql-code-block">
+  LOCK M[1]
+ </div>
+ <div class="ql-code-block">
+  *B = b;
+ </div>
+ <div class="ql-code-block">
+  *C = c;
+ </div>
+ <div class="ql-code-block">
+  UNLOCK M[1]
+ </div>
+ <div class="ql-code-block">
+  *D = d; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; *E = e;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; LOCK M[2]
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; *F = f;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; *G = g;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; UNLOCK M[2]
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; *H = h;
+ </div>
+</div>
+<p>CPU 3 可能看到如下顺序：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  *E, LOCK M[1], *C, *B, *A, UNLOCK M[1],
+ </div>
+ <div class="ql-code-block">
+  LOCK M[2], *H, *F, *G, UNLOCK M[2], *D
+ </div>
+</div>
+<p>但假设 CPU 1 先得到锁，CPU 3 将看不到如下顺序：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  *B, *C, *D, *F, *G 或 *H 指令 发生在 LOCK M [1] 之前
+ </div>
+ <div class="ql-code-block">
+  *A, *B 或 *C 指令 发生在 UNLOCK M [1] 之后
+ </div>
+ <div class="ql-code-block">
+  *F, *G 或 *H 指令 发生在 LOCK M [2] 之前
+ </div>
+ <div class="ql-code-block">
+  *A, *B, *C, *E, *F 或 *G 指令 发生在 UNLOCK M [2] 之后
+ </div>
+</div>
+<p>读者在研究为啥不可能出现上述顺序时，一定要带入 lock 和 unlock 的屏障语义，这里我给大家通过分析 第一种 不可能的顺序来帮助大家理解：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  *B, *C, *D, *F, *G 或 *H 指令 发生在 LOCK M [1] 之前
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  解析：
+ </div>
+ <div class="ql-code-block">
+  1、由于 CPU 1 先获取到 M[1] 锁，所有 *B, *C, *D 不能越过 LOCK M[1]
+ </div>
+ <div class="ql-code-block">
+  2、CPU 2 随后 获取到 M[2] 锁，所有 *F, *G ，*H 不能越过 LOCK M[2]
+ </div>
+ <div class="ql-code-block">
+  3、于是推理得出：全局顺序不可能发生上述的情况
+ </div>
+</div>
+<p><br></p>
+<h3><span style="color: rgb(38, 38, 38);">锁操作 与 IO 操作</span></h3>
+<p><br></p>
+<p>在某些情况下（ 特别是涉及到 NUMA 非一致性内存访问 架构，也即每个CPU NODE 拥有自己的访问总线与物理内存 )，这时，在两个不同 CPU 上 执行的 自旋锁 内的 I/O访问 操作可能被 PCI桥 乱序执行，因为 PCI桥 不一定参与缓存一致性协议，因此无法执行在解决 缓存一致性协议 的 读屏障。来看一个例子：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============================== ===============================
+ </div>
+ <div class="ql-code-block">
+  spin_lock(Q)
+ </div>
+ <div class="ql-code-block">
+  writel(0, ADDR) // 写地址
+ </div>
+ <div class="ql-code-block">
+  writel(1, DATA); // 写数据
+ </div>
+ <div class="ql-code-block">
+  spin_unlock(Q);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; spin_lock(Q);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; writel(4, ADDR);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; writel(5, DATA);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; spin_unlock(Q);
+ </div>
+</div>
+<p>此时 PCI 桥可能看到如下顺序，很明显，此时由于地址和数据不对应，这可能会导致硬件故障。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  STORE *ADDR = 0, STORE *ADDR = 4, STORE *DATA = 1, STORE *DATA = 5
+ </div>
+</div>
+<p>所以，这里需要释放自旋锁时，需要执行 mmiowb() 屏障即可，此时保证 在执行释放锁之前，让 PCI 桥看到 上述顺序：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============================== ===============================
+ </div>
+ <div class="ql-code-block">
+  spin_lock(Q)
+ </div>
+ <div class="ql-code-block">
+  writel(0, ADDR)
+ </div>
+ <div class="ql-code-block">
+  writel(1, DATA);
+ </div>
+ <div class="ql-code-block">
+  mmiowb();
+ </div>
+ <div class="ql-code-block">
+  spin_unlock(Q);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; spin_lock(Q);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; writel(4, ADDR);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; writel(5, DATA);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; mmiowb();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; spin_unlock(Q);
+ </div>
+</div>
+<p>这将确保在 CPU 1 上发出的 两个存储操作 在CPU 2 获取到自旋锁前 出现在 PCI桥 上。</p>
+<p>此外，同一个设备的 store 存储操作 后面紧跟着 一个 load 加载操作 就不需要 mmiowb()了，因为 load 操作 会强制 store 操作在执行加载之前完成：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============================== ===============================
+ </div>
+ <div class="ql-code-block">
+  spin_lock(Q)
+ </div>
+ <div class="ql-code-block">
+  writel(0, ADDR);
+ </div>
+ <div class="ql-code-block">
+  a = readl(DATA); // 强制写操作完成
+ </div>
+ <div class="ql-code-block">
+  spin_unlock(Q);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; spin_lock(Q);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; writel(4, ADDR);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; b = readl(DATA); // 强制写操作完成
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; spin_unlock(Q);
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">哪些地方需要屏障</strong></h2>
+<p><br></p>
+<p>在正常情况下，访问内存操作的重排序现象通常不会成为问题，因为 单线程的操作代码 仍然会正常工作，即使它是运行在SMP 内核中（为何？代码只有一个线程执行，没有任何交互，CPU 自身会维护程序最终顺序性）。然而，在以下描述的四种情况下，重排序可能会出现问题：</p>
+<p>1、处理器之间的交互</p>
+<p>2、原子性操作</p>
+<p>3、设备访问操作</p>
+<p>4、中断</p>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">处理器之间的交互</strong></h3>
+<p><br></p>
+<p>当一个系统有多个处理器时，系统中的多个CPU可能同时处理同一个数据。这可能会导致同步问题，通常的处理方法是使用锁。然而，锁是相当昂贵的，因此，如果可能的话，最好不使用锁。在这种情况下，必须小心地对影响两个 CPU 的操作进行排序，以防止发生故障。</p>
+<p>例如，考虑 R/W 读写信号量执行。这里，一个等待进程在信号量上排队，此时它被连接到信号量的等待进程队列（通过struct rwsem_waiter 结构）：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  struct rw_semaphore {
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  spinlock_t lock;
+ </div>
+ <div class="ql-code-block">
+  struct list_head waiters; // 等待进程头结点
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  struct rwsem_waiter {
+ </div>
+ <div class="ql-code-block">
+  struct list_head list;
+ </div>
+ <div class="ql-code-block">
+  struct task_struct *task; // 等待的进程 PCB
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+</div>
+<p>此时，我们可以通过 up_read() 或者 up_write() 来唤醒等待进程：</p>
+<p>1、从当前 struct list_head waiters 中读取 next 指针，获取到下一个等待进程的结构 struct rwsem_waiter</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  struct rwsem_waiter *waiter = list_entry(sem-&gt;wait_list.next, struct rwsem_waiter, list);
+ </div>
+</div>
+<p>2、从struct rwsem_waiter 结构中读取到 进程 PCB struct task_struct 指针</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  tsk = waiter-&gt;task;
+ </div>
+</div>
+<p>3、清除 PCB 指针，以通知 等待进程 获取了信号量</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  waiter-&gt;task = NULL;
+ </div>
+ <div class="ql-code-block">
+  // 上述为唤醒进程设置步骤，我们来看看等待进程，等待锁的代码：
+ </div>
+ <div class="ql-code-block">
+  while (true) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; set_task_state(tsk, TASK_UNINTERRUPTIBLE);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; if (!waiter.task) // 等待进程根据 等待节点 上的 task 指针来检测是否被正常唤醒
+ </div>
+ <div class="ql-code-block">
+  &nbsp; break;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; schedule();
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p>4、通过调用 wake_up_process() 函数 唤醒等待进程</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  wake_up_process(tsk);
+ </div>
+</div>
+<p>5、 释放对 等待的进程 PCB 的 struct task_struct *task 的引用</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  static inline void put_task_struct(struct task_struct *t)
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  if (atomic_dec_and_test(&amp;t-&gt;usage)) // 原子性减少 task 的引用，若为0，那么清理该 task_struct
+ </div>
+ <div class="ql-code-block">
+  __put_task_struct(t);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p>换句话说，上述的流程等价于如下操作：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  LOAD waiter-&gt;list.next;
+ </div>
+ <div class="ql-code-block">
+  LOAD waiter-&gt;task;
+ </div>
+ <div class="ql-code-block">
+  STORE waiter-&gt;task;
+ </div>
+ <div class="ql-code-block">
+  CALL wakeup
+ </div>
+ <div class="ql-code-block">
+  RELEASE task
+ </div>
+</div>
+<p>如果上述步骤发生了任何乱序现象，那么将导致严重的错误。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  &nbsp; &nbsp; CPU 1 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============================== ===============================
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; down_xxx() // 获取信号量函数
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; Queue waiter &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; Sleep &nbsp; // 进程进入队列后阻塞
+ </div>
+ <div class="ql-code-block">
+  up_yyy() // 释放信号量函数
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; LOAD waiter-&gt;task;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; STORE waiter-&gt;task;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; 此时，进程被其他事件唤醒
+ </div>
+ <div class="ql-code-block">
+  &lt;preempt&gt; // 进程被抢占
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; 恢复执行
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; down_xxx() // 由于进程通过判断 waiter-&gt;task是否为null来检测是否获得 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; 锁，此时，由于CPU 1 已经将值设置为null，所以方法返回
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; call foo() // 此时调用该方法，此时释放了 waiter 结构
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &lt;/preempt&gt;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; LOAD waiter-&gt;list.next; // 此时 进程重新进入调度，由于 waiter 指针已经被修改，此时将导致严重错误
+ </div>
+ <div class="ql-code-block">
+  --- OOPS ---
+ </div>
+</div>
+<p>这可以使用信号量锁来处理（在down_xxx()函数中，进程被唤醒后获取信号量的自旋锁，此时由于 CPU 1 还未执行完毕，所以不能获取自旋锁，需要等待），但是 down_xxx() 函数在被唤醒后必须再次获得不必要的自旋锁。解决这个问题的方法是插入一个 SMP 全屏障：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  LOAD waiter-&gt;list.next;
+ </div>
+ <div class="ql-code-block">
+  LOAD waiter-&gt;task;
+ </div>
+ <div class="ql-code-block">
+  smp_mb();
+ </div>
+ <div class="ql-code-block">
+  STORE waiter-&gt;task;
+ </div>
+ <div class="ql-code-block">
+  CALL wakeup
+ </div>
+ <div class="ql-code-block">
+  RELEASE task
+ </div>
+</div>
+<p>在这种情况下，相对于系统上的其他 CPU, 全屏障 保证了 屏障前的 所有内存访问 都发生在 屏障后的 所有内存访问之前【屏障语义是为了防止 CPU 指令执行乱序 和 MOB 乱序】。当然，在单处理器系统上这样执行也不会存在任何问题，因为 smp_mb() 会退化为一个编译器屏障，从而确保编译器以正确的顺序发出指令，而不实际干预 CPU的指令执行行为，由于只有一个CPU，CPU 依赖顺序逻辑规则将处理所有其他事情。</p>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">原子性操作</strong></h3>
+<p><br></p>
+<p>原子性操作在内核中被视为CPU之间的交互行为，通常我们会在单原子性指令中使用他们，他们其中有一些具有全屏障语义，而另外一些则不具备这样的功能，但它们在内核中大量使用，所以我们需要了解下这些原子性操作函数。</p>
+<p>一下函数包含 smp_mb() 屏障语义的操作，这些函数通常用于实现 lock 机制 和 unlock 机制，而这些机制中的语义 我们在上面提及过，所以这些函数自带的屏障语义特别有用，这就意味着，我们不需要在使用这些函数前后使用任何读写屏障或全屏障。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  xchg();
+ </div>
+ <div class="ql-code-block">
+  cmpxchg();
+ </div>
+ <div class="ql-code-block">
+  atomic_cmpxchg();
+ </div>
+ <div class="ql-code-block">
+  atomic_inc_return();
+ </div>
+ <div class="ql-code-block">
+  atomic_dec_return();
+ </div>
+ <div class="ql-code-block">
+  atomic_add_return();
+ </div>
+ <div class="ql-code-block">
+  atomic_sub_return();
+ </div>
+ <div class="ql-code-block">
+  atomic_inc_and_test();
+ </div>
+ <div class="ql-code-block">
+  atomic_dec_and_test();
+ </div>
+ <div class="ql-code-block">
+  atomic_sub_and_test();
+ </div>
+ <div class="ql-code-block">
+  atomic_add_negative();
+ </div>
+ <div class="ql-code-block">
+  atomic_add_unless();
+ </div>
+ <div class="ql-code-block">
+  test_and_set_bit();
+ </div>
+ <div class="ql-code-block">
+  test_and_clear_bit();
+ </div>
+ <div class="ql-code-block">
+  test_and_change_bit();
+ </div>
+</div>
+<p>以下的函数则不具备屏障语义，而有时我们可能依赖它们来实现诸如 unlock 的功能，这时，当我们使用这些操作时，需要使用 类似 smp_mb__before_clear_bit() 的函数来代替它们。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  atomic_set();
+ </div>
+ <div class="ql-code-block">
+  set_bit();
+ </div>
+ <div class="ql-code-block">
+  clear_bit();
+ </div>
+ <div class="ql-code-block">
+  change_bit();
+ </div>
+</div>
+<p>以下函数也不存在屏障语义，当我们需要保证多CPU交互时（什么时候不需要?当我们只需要做 数据统计分析时，这时没有 CPU 间交互，那么不需要使用屏障。比如：用于对象引用统计时，而对于对象引用的操作，通常已经包含在 lock 和 unlock 的区域，它们本身保证了屏障语义，所以也不需要使用屏障），就需要使用类似 smp_mb__before_atomic_dec() 的函数。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  atomic_add();
+ </div>
+ <div class="ql-code-block">
+  atomic_sub();
+ </div>
+ <div class="ql-code-block">
+  atomic_inc();
+ </div>
+ <div class="ql-code-block">
+  atomic_dec();
+ </div>
+</div>
+<p>当然，如果上述不具备屏障语义的函数，需要使用在需要内存屏障的场景中，比如实现 锁机制，那么就需要加上特定的屏障来保证执行顺序。</p>
+<p>基本上在内核中的每个地方，对这些函数的使用情况都必须仔细考虑是否需要屏障。</p>
+<p>以下操作一些特殊锁操作原语，它们实现了 LOCK 和 UNLOCK 操作。在使用位操作实现锁定原语时，应该优先使用这些操作，因为它们的实现可以在许多体系结构上进行优化。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  test_and_set_bit_lock();
+ </div>
+ <div class="ql-code-block">
+  clear_bit_unlock();
+ </div>
+ <div class="ql-code-block">
+  __clear_bit_unlock();
+ </div>
+</div>
+<p>注意：因为在某些 CPU 上使用的原子指令意味着 全屏障 语义，因此屏障指令与它们一起使用是多余的，在这种情况下，特殊的屏障原语的实现将是空操作。</p>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">访问设备</strong></h3>
+<p><br></p>
+<p>一些设备我们可以通过 MMIO 的方式对它们的访问进行映射到 物理地址中，此时 CPU 访问他们就如同访问一片内存地址。为了正确控制这中设备，驱动开发者需要保证内存访问的正确顺序。</p>
+<p>然而，当你的代码被 一个聪明的编译器 编译，或者运行在一个聪明的 CPU上，那么可能会产生一些潜在的问题，因为如果 CPU 或 编译器 认为 内存访问重排序 或 合并访问 更有效，那么驱动开发者在驱动代码中精心编写的内存访问顺序就不按照实际所想的运行——这将导致设备故障（在驱动开发中对外设的访问顺序非常重要，前面已经给过例子，一旦顺序重排，那么将会是噩梦）。</p>
+<p>在Linux内核驱动开发中，I/O 操作应该使用专用函数 —— 例如 inb() 函数 或 writel() 函数， 因为这些函数知道如何使IO访问具有正确的顺序。虽然这在很大程度上使得显式使用 内存屏障 变得不必要，但在一些情况下可能需要它们：</p>
+<p>1、在某些系统上，I/O 写操作 在所有 CPU 上不是强排序的，因此对于运行在这些 CPU 上的 驱动程序，应该使用锁机制，并且必须在解锁临界区之前发出 mmiowb() （前面已经介绍过）</p>
+<p>2、如果读取函数引用了具有 宽松内存访问（ RMO模型 ） 属性的 I/O 内存，则需要使用 强制内存屏障 来 限制 内存访问顺序（强制内存屏障前面也描述了，也即不在 SMP 上执行也需要这些强制函数）</p>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">中断处理</strong></h3>
+<p><br></p>
+<p>驱动程序可能被它自己的中断服务程序中断，因此驱动程序的两个部分操作程序可能会相互干扰对方：试图控制或访问设备。通过禁用本地中断（锁的一种表现形式），可以部分地缓解这种情况（关闭了中断等同于代码在单核CPU 中 原子性执行，将不会响应任何中断），这样，关键 IO 操作都包含在驱动程序中禁用中断的代码块中。注意：当驱动程序的中断程序正在执行时，驱动程序的核心函数可能不在同一个CPU上运行（也即 CPU 1 执行中断处理函数并关闭了中断相应， CPU 2 执行驱动核心代码），并且它的中断处理函数在当前 中断 被处理之前是不允许再次发生的，因此中断处理程序不需要上锁。</p>
+<p>但是，考虑一个与 以太网 网卡通信的驱动程序，它具有地址寄存器和数据寄存器。如果驱动核心函数在中断禁用状态下与网卡进行通讯，此时驱动的中断处理程序被 其他 CPU 调用：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 本地中断禁用，也即不响应任何中断
+ </div>
+ <div class="ql-code-block">
+  writew(ADDR, 3); // 写地址
+ </div>
+ <div class="ql-code-block">
+  writew(DATA, y); // 写数据
+ </div>
+ <div class="ql-code-block">
+  CPU 1 本地中断开启，开始响应中断
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  CPU 2 并此时被中断，处理中断代码
+ </div>
+ <div class="ql-code-block">
+  writew(ADDR, 4); // 写地址
+ </div>
+ <div class="ql-code-block">
+  q = readw(DATA); // 读数据
+ </div>
+</div>
+<p>此时，如果 CPU 运行在 RMO 模型中，对 网卡数据寄存器的写操作 可能发生在对 网卡地址寄存器的第二个写操作 之后：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  STORE *ADDR = 3, STORE *ADDR = 4, STORE *DATA = y, q = LOAD *DATA
+ </div>
+</div>
+<p>此时，则必须假定在中断禁用区间内执行的访问可能会泄漏到中断禁用区间外，并可能与在中断中执行的访问交织在一起——反之亦然——除非使用 隐式 或显式 屏障操作。通常这不会是一个问题，因为在大部分 CPU 中执行的 I/O访问操作 都将包括形隐式 I/O 屏障，此时将保证严格的访问顺序。如果这还不够，那么可能需要显式地使用mmiowb()。</p>
+<p>类似的情况还可能发生在 中断处理代码 和 运行在存在数据交互的不同 CPU 上的两段代码 之间。如果可能出现这种情况，那么应该使用中断禁用锁来保证顺序。</p>
+<p><br></p></p>
+</body>
+</html>

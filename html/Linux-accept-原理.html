@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux accept 原理</h1>
+<p>2022-08-02T08:26:16.364+0800</p>
+<p><p>当我们对Server FD 初始化 、绑定端口、开启监听后，客户端便可以通过 connect 函数连接到服务端，经历过TCP 三次握手后，将会把客户端 socket 放入 accept 接收队列，本节将详细介绍 accept 接收客户端连接的整个过程。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">serverFD</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">socket</span>(<span style="color: rgb(184, 191, 198);">AF_INET</span>, <span style="color: rgb(184, 191, 198);">SOCK_STREAM</span>, <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">sockaddr_in</span> <span style="color: rgb(184, 191, 198);">addr</span>; <span style="color: rgb(218, 146, 74);">// 端口绑定信息</span></p>
+<p><span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_family</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">AF_INET</span>; <span style="color: rgb(218, 146, 74);">// 指定协议簇</span></p>
+<p><span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_addr</span>.<span style="color: rgb(184, 191, 198);">s_addr</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_addr</span>(<span style="color: rgb(210, 107, 107);">"127.0.0.1"</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_port</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">htons</span>(<span style="color: rgb(100, 171, 143);">8080</span>); <span style="color: rgb(218, 146, 74);">// 将端口信息转为网络字节序（大端序）</span></p>
+<p><span style="color: rgb(184, 191, 198);">bind</span>(<span style="color: rgb(184, 191, 198);">serverFD</span>, (<span style="color: rgb(184, 191, 198);">sockaddr*</span>)<span style="color: rgb(184, 191, 198);">&amp;addr</span>, <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">addr</span>)); <span style="color: rgb(218, 146, 74);">// 开始绑定</span></p>
+<p><span style="color: rgb(184, 191, 198);">listen</span>(<span style="color: rgb(184, 191, 198);">serverFD</span>,<span style="color: rgb(100, 171, 143);">100</span>); <span style="color: rgb(218, 146, 74);">// 绑定后开启监听，同时指定接收队列长度为 100</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_in</span> <span style="color: rgb(141, 141, 240);">clientSocket</span>; <span style="color: rgb(218, 146, 74);">// 客户端信息结构</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">sin_size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_in</span>); <span style="color: rgb(218, 146, 74);">// 指定 客户端信息结构大小</span></p>
+<p><span style="color: rgb(184, 191, 198);">accept</span>(<span style="color: rgb(184, 191, 198);">serverFD</span>, (<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span><span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">&amp;clientSocket</span>,(<span style="color: rgb(184, 191, 198);">socklen_t*</span>)<span style="color: rgb(184, 191, 198);">&amp;sin_size</span>)) <span style="color: rgb(218, 146, 74);">// 从 backlog 队列（accept队列）中获取客户端连接</span></p>
+<p><strong>sys_accept 函数</strong></p>
+<p>当我们使用server socket fd时，我们很容易看到：server fd 将会把存在于 backlog 队列中的客户端信息取出，生成一个新的 socket 结构 用于表示该连接信息，这就表示 server fd 本身就是一个生成者，每调用一次 accept 函数，便生成一个 客户端 socket fd。</p>
+<p><span style="color: rgb(184, 191, 198);">asmlinkage</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">sys_accept</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> <span style="color: rgb(141, 141, 240);">__user</span> <span style="color: rgb(184, 191, 198);">*upeer_sockaddr</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*upeer_addrlen</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(184, 191, 198);">*newsock</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(184, 191, 198);">len</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">address</span>[<span style="color: rgb(184, 191, 198);">MAX_SOCK_ADDR</span>];</p>
+<p><span style="color: rgb(184, 191, 198);">sock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sockfd_lookup</span>(<span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(184, 191, 198);">&amp;err</span>); <span style="color: rgb(218, 146, 74);">// 通过 fd 获取到 socket 结构</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!sock</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EMFILE</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">newsock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_alloc</span>()))&nbsp;<span style="color: rgb(218, 146, 74);">// 分配一个新的socket 结构，用于表示客户端信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_put</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 客户端 socket 的类型和操作与服务端 socket 保持一致</span></p>
+<p><span style="color: rgb(184, 191, 198);">newsock-&gt;type</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock-&gt;type</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">newsock-&gt;ops</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock-&gt;ops</span>;</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock-&gt;ops-&gt;accept</span>(<span style="color: rgb(184, 191, 198);">sock</span>, <span style="color: rgb(184, 191, 198);">newsock</span>, <span style="color: rgb(184, 191, 198);">sock-&gt;file-&gt;f_flags</span>); <span style="color: rgb(218, 146, 74);">// 从 accept 队列中获取客户端连接，信息保存在 newsock 中</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_release</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">upeer_sockaddr</span>) { <span style="color: rgb(218, 146, 74);">// 将客户端信息复制到用户空间的 upeer_sockaddr 结构中（看这里的复制操作，应该明白为什么需要传递结构的大小）</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span>(<span style="color: rgb(184, 191, 198);">newsock-&gt;ops-&gt;getname</span>(<span style="color: rgb(184, 191, 198);">newsock</span>, (<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> <span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">address</span>, <span style="color: rgb(184, 191, 198);">&amp;len</span>, <span style="color: rgb(100, 171, 143);">2</span>)<span style="color: rgb(184, 191, 198);">&lt;</span><span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-ECONNABORTED</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_release</span>;</p>
+<p>}</p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">move_addr_to_user</span>(<span style="color: rgb(184, 191, 198);">address</span>, <span style="color: rgb(184, 191, 198);">len</span>, <span style="color: rgb(184, 191, 198);">upeer_sockaddr</span>, <span style="color: rgb(184, 191, 198);">upeer_addrlen</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_release</span>;</p>
+<p>}</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_map_fd</span>(<span style="color: rgb(184, 191, 198);">newsock</span>)) <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(218, 146, 74);">// 同样，将客户端连接接入VFS，此时需要将其映射为 file 和 下标 fd</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_release</span>;</p>
+<p>...</p>
+<p>}</p>
+<p><strong>inet_accept 函数</strong></p>
+<p>该函数用于接收客户端连接，在创建socket时指定。可以看到这里实际操作的对象为Linux 底层 sock 结构，直接调用 sock 的 accept 函数接收连接 sk2，然后在 sock_graft 函数中，将 struct socket *newsock 与 struct sock *sk2 结构互相关联（再次强调一便：socket 为 BSD socket，sock 为Linux底层网络socket）。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">inet_accept</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*newsock</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk1</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock-&gt;sk</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EINVAL</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk2</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sk1-&gt;sk_prot-&gt;accept</span>(<span style="color: rgb(184, 191, 198);">sk1</span>, <span style="color: rgb(184, 191, 198);">flags</span>, <span style="color: rgb(184, 191, 198);">&amp;err</span>); <span style="color: rgb(218, 146, 74);">// 接收连接生成客户端 sock</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!sk2</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">do_err</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">lock_sock</span>(<span style="color: rgb(184, 191, 198);">sk2</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">BUG_TRAP</span>((<span style="color: rgb(100, 171, 143);">1</span> <span style="color: rgb(184, 191, 198);">&lt;&lt;</span> <span style="color: rgb(184, 191, 198);">sk2-&gt;sk_state</span>) <span style="color: rgb(184, 191, 198);">&amp;</span></p>
+<p>(<span style="color: rgb(184, 191, 198);">TCPF_ESTABLISHED</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">TCPF_CLOSE_WAIT</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">TCPF_CLOSE</span>)); <span style="color: rgb(218, 146, 74);">// TCP 状态必须为者三种状态之一（表示曾经建立过连接）</span></p>
+<p><span style="color: rgb(184, 191, 198);">sock_graft</span>(<span style="color: rgb(184, 191, 198);">sk2</span>, <span style="color: rgb(184, 191, 198);">newsock</span>); <span style="color: rgb(218, 146, 74);">// socket 与 sock 互相关联 </span></p>
+<p><span style="color: rgb(184, 191, 198);">newsock-&gt;state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SS_CONNECTED</span>; <span style="color: rgb(218, 146, 74);">// socket 状态修改为建立连接状态</span></p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">release_sock</span>(<span style="color: rgb(184, 191, 198);">sk2</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">do_err</span>:</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">inline</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">sock_graft</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*parent</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(184, 191, 198);">write_lock_bh</span>(<span style="color: rgb(184, 191, 198);">&amp;sk-&gt;sk_callback_lock</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_sleep</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;parent-&gt;wait</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">parent-&gt;sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sk</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_socket</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">parent</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">write_unlock_bh</span>(<span style="color: rgb(184, 191, 198);">&amp;sk-&gt;sk_callback_lock</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><strong>tcp_accept 函数</strong></p>
+<p>该函数用于从 accept_queue 中获取open_request结构，该结构保存了 sk 信息，若该队列为空，那么根据server fd是否处于非阻塞模式，来选择是否等待，然后从 open_request 中取出 sk 返回。</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">tcp_accept</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">err</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">tcp_opt</span> <span style="color: rgb(184, 191, 198);">*tp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tcp_sk</span>(<span style="color: rgb(184, 191, 198);">sk</span>); <span style="color: rgb(218, 146, 74);">// 获取 tcp 信息结构</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">open_request</span> <span style="color: rgb(184, 191, 198);">*req</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*newsk</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">error</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">lock_sock</span>(<span style="color: rgb(184, 191, 198);">sk</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EINVAL</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">sk-&gt;sk_state</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">TCP_LISTEN</span>) <span style="color: rgb(218, 146, 74);">// server socket 状态 必须为 监听 状态</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!tp-&gt;accept_queue</span>) { <span style="color: rgb(218, 146, 74);">// accept 队列为空，表示没有客户端连接</span></p>
+<p><span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeo</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_rcvtimeo</span>(<span style="color: rgb(184, 191, 198);">sk</span>, <span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">O_NONBLOCK</span>); <span style="color: rgb(218, 146, 74);">// 根据 O_NONBLOCK 标志位获取等待时间（noblock ? 0 : sk-&gt;sk_rcvtimeo）</span></p>
+<p><span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EAGAIN</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!timeo</span>) <span style="color: rgb(218, 146, 74);">// 若指定非阻塞，那么直接返回</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">wait_for_connect</span>(<span style="color: rgb(184, 191, 198);">sk</span>, <span style="color: rgb(184, 191, 198);">timeo</span>); <span style="color: rgb(218, 146, 74);">// 否则等待客户端连接，时间将由 timeo 指定（sk-&gt;sk_rcvtimeo = MAX_SCHEDULE_TIMEOUT ; #define MAX_SCHEDULE_TIMEOUT LONG_MAX 表示无限期等待）</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">error</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 存在客户端连接</span></p>
+<p><span style="color: rgb(184, 191, 198);">req</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tp-&gt;accept_queue</span>; <span style="color: rgb(218, 146, 74);">// 获取第一个请求</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">tp-&gt;accept_queue</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">req-&gt;dl_next</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>) <span style="color: rgb(218, 146, 74);">// 队列中只有一个请求，那么将尾指针置空</span></p>
+<p><span style="color: rgb(184, 191, 198);">tp-&gt;accept_queue_tail</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">newsk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">req-&gt;sk</span>; <span style="color: rgb(218, 146, 74);">// 取出客户端sk</span></p>
+<p><span style="color: rgb(184, 191, 198);">tcp_acceptq_removed</span>(<span style="color: rgb(184, 191, 198);">sk</span>); <span style="color: rgb(218, 146, 74);">// sk-&gt;sk_ack_backlog-- 减少队列大小</span></p>
+<p><span style="color: rgb(184, 191, 198);">tcp_openreq_fastfree</span>(<span style="color: rgb(184, 191, 198);">req</span>); <span style="color: rgb(218, 146, 74);">// 释放struct open_request *req 内存，因为其中的sk已经取出</span></p>
+<p><span style="color: rgb(184, 191, 198);">BUG_TRAP</span>(<span style="color: rgb(184, 191, 198);">newsk-&gt;sk_state</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">TCP_SYN_RECV</span>); <span style="color: rgb(218, 146, 74);">// sock 的状态不能为 SYN 状态，此状态表示：接收到了客户端的连接请求，并且服务端发送了 ack ，等待 客户端 确认后，完成 三次握手，也即：此时处于两次握手截断</span></p>
+<p>...</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

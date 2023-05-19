@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>并发编程前序四</h1>
+<p>2022-01-23T10:09:34.704+0800</p>
+<p><p>在《并发编程前序三》中我们知道，寄存器的出现就是为了在CPU进行数据运算，运行指令时，临时存储内存中的数据，加快速度，同时在寄存器中维护了指向内存不同类型的段地址（段寄存器），还有在操作指令时，进行逻辑判断跳转的标志位寄存器。何为寄存？寄存数据、指令、状态。那么本文将在之前的基础上，来研究下C语言和Java语言的方法调用原理。我们通过C来反推Java。</p>
+<p><strong>C语言方法调用猜想</strong></p>
+<p>还是先看一个C语言的代码，我们定义了两个函数func1和func2。在func1中，我们将传入的a变量和局部变量b相加后返回a的值。在func2中我们传入a的值，然后将func1中生成的新的a的值放入变量b中。从代码中我们可以得到如下问题：</p>
+<ol>
+ <li>在func2中调用func1函数时，参数a放置在哪里？</li>
+ <li>在func2和func1中我们声明了局部变量，如何让这些局部变量不互相影响？</li>
+ <li>func1中的返回值保存在哪里？func2中又如何取得这个返回值？</li>
+ <li>CPU如何从func2中调用func1函数的？又如何从func1中返回？</li>
+</ol>
+<p>我们带着以上问题来研究C的调用过程，我们知道C语言最终编译为汇编，所以理论上来说我们应该立即查看汇编代码，但是，这样真的好吗？不妨我们先根据我们在《并发编程前序三》中了解到的知识来收集下目前我们可以知道的信息：</p>
+<ol>
+ <li>对于func2函数：</li>
+ <li class="ql-indent-1">我们声明了两个变量：a和b，对a进行了赋值为1。那么我们有rsp和rbp寄存器，来定义了一个栈：rsp指向栈顶、rbp指向栈底。由于我们前面说到，栈内存是由高到低扩展，所以我们应该开辟了8byte（a+b=4+4=8）的空间，这时：rsp - 8</li>
+ <li class="ql-indent-1">对于函数func1的调用，我们可以用call指令调用，但是入参a不知道如何传递给func1</li>
+ <li>对于func1函数：</li>
+ <li class="ql-indent-1">同样有a、b两个局部变量，所以我们也会进行空间开辟rsp - 8</li>
+ <li class="ql-indent-1">对于入参a，我们暂时不知道它应该在保存在哪</li>
+ <li class="ql-indent-1">对于返回值a，我们暂时不知道它应该放在哪里返回</li>
+</ol>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">func1</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a</span>){</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">b=</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">a=a+b</span>;</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">b++</span>;</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">a</span>;</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">func2</span>(){</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a=</span><span style="color: rgb(100, 171, 143);">1</span>,<span style="color: rgb(184, 191, 198);">b</span>;</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">b</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">func1</span>(<span style="color: rgb(184, 191, 198);">a</span>);</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">b++</span>;</p>
+<p>};</p>
+<p>那么我们现在就需要汇编代码的介入了，不然，盲猜似乎没有一点用。我们先来看观察func1和func2的汇编代码，同样请看分隔符以内的代码：</p>
+<ol>
+ <li>首先我们看到在func1中，将edi寄存器中的内容放入了rbp - 20byte 的位置处。那么这个edi寄存器中保存的内容是什么呢？我们来观察func2，可以看到在使用call指令调用func1的时候，我们将参数a的值放入了edi寄存器中。那么这时可以得出结论：参数a通过edi寄存器传递，同时被调用方将会从这里面获取传递的参数。</li>
+ <li>在func1中我们看到最终，我们将参数a的值放入了eax寄存器。那么很明显，该值就是返回值，同理，我们来看func2，在call指令的后面指令中，我们看到将eax的值保存在了栈中，这时得出结论：返回值由eax寄存器来保存。</li>
+</ol>
+<p><span style="color: rgb(125, 244, 106);">func1:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(218, 146, 74);">#-----分隔符-----&nbsp;这里留个小提示：注意~这里没有使用rsp，因为你看上面的指令，rsp此时等于rbp，所以用哪个都无所谓了，但是特别留意这里没有使用rsp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> %<span style="color: rgb(159, 186, 213);">edi</span>, -20(%<span style="color: rgb(28, 198, 133);">rbp</span>)&nbsp;</p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $1, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> -4(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(159, 186, 213);">eax</span></p>
+<p><span style="color: rgb(200, 143, 208);">addl</span> %<span style="color: rgb(159, 186, 213);">eax</span>, -20(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">addl</span> $1, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> -20(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(159, 186, 213);">eax</span></p>
+<p><span style="color: rgb(218, 146, 74);">#-----分隔符-----</span></p>
+<p><span style="color: rgb(200, 143, 208);">popq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p>​</p>
+<p><span style="color: rgb(125, 244, 106);">func2:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(218, 146, 74);">#-----分隔符-----&nbsp;提示：这里使用了rsp</span></p>
+<p><span style="color: rgb(200, 143, 208);">subq</span> $16, %<span style="color: rgb(28, 198, 133);">rsp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $1, -8(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> -8(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(159, 186, 213);">eax</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> %<span style="color: rgb(159, 186, 213);">eax</span>, %<span style="color: rgb(159, 186, 213);">edi</span></p>
+<p><span style="color: rgb(200, 143, 208);">call</span> <span style="color: rgb(200, 143, 208);">func1</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> %<span style="color: rgb(159, 186, 213);">eax</span>, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">addl</span> $1, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(218, 146, 74);">#-----分隔符-----</span></p>
+<p><span style="color: rgb(200, 143, 208);">leave</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p>​</p>
+<p><strong>C语言方法调用原理</strong></p>
+<p>那么在理解上述内容后，我们就可以看看哪些分隔符外面的世界了。同样，我把分隔符中的代码去掉，只保留分隔符以内的代码，方便读者理解。我们先来推理一下：</p>
+<ol>
+ <li>每个函数内部都有着自己的变量，那么这些变量我们通过汇编代码可以很明显的看到，他们保存在栈中（通过rsp寄存器来开辟空间存放），那么每个函数就理应拥有自己的保存变量的空间，那么该空间我们称之为栈帧</li>
+ <li>那么为何需要用栈的实现呢？我们考虑下以下方法调用链：A-&gt;B-&gt;C，那么返回时是不是这样：C-&gt;B-&gt;A，这时什么？先进后出。对的，那么直接用栈来存储</li>
+ <li>那么使用栈，那么必须要有栈顶和栈底，那么这时我们使用rbp寄存器（base pointer）来保存栈底（也叫栈基址），rsp来保存栈顶（stack pointer）</li>
+ <li>继续推理，这里我们主要看func1的汇编。既然每个函数都需要有自己的栈帧，那么就需要在调用函数时，开辟新的空间，那么有开辟，必然得有销毁。如何开辟呢？看着两个指令：pushq %rbp 、movq %rsp, %rbp，这就是开辟栈空间，如何理解？我们现将func2的栈底保存在栈中（pushq %rbp 压入栈中），然后将当前栈顶设置为栈底（movq %rsp, %rbp 将rsp的内容放入rbp），这不就是个新的栈么？同时旧的栈底保存在了当前新的栈底的后面（rbp - 8byte（rbp为64位））。那么如何销毁？看这个指令：popq %rbp。很简单对吧？将保存的旧的栈底恢复到rbp寄存器中（注意：此时当我们执行了该函数，那么rsp也会相应的 - 8byte，毕竟你弹出栈中的内容，栈顶指针必须变化对吧？），可能读者会问：你咋直接就pop了，rsp指向另外的地方呢？注意：我们一直在说func1并没有使用rsp，所以，你懂的？栈顶指针后面就是旧的栈底：rbp</li>
+ <li>那么现在又出现一个问题：func2调用func1函数，我们知道需要开辟和销毁栈帧，but，我们似乎忘了一件事，CPU执行指令时，需要知道指令在哪？这就以为着：如何跳转到func1执行指令的？如何从func2中返回到func1中呢？返回到哪里？这就先得引入一个寄存器：RIP（64位，32位为eip，16位 ip），CPU将会通过该寄存器读取下一条指令执行。嗯，那么这时可以来介绍下call指令和ret指令了。call指令执行后，等于执行了这样两条汇编代码：pushq %rip ，jmp func1。ret指令执行完毕后等于：popq %rip。这样明了了，调用时保存rip，返回时将保存的rip值还原。是不是很理所应当。这就是计算机的魅力，一环扣一环，使用混沌学习法在适合不过（联想下字节码的执行，也是如此）。那么现在还有个被忽略的问题：保存的rip中的值是什么？很明显，func2中的call指令的下一条指令的地址~（不然，保存call指令的地址？返回后重复调用func1？）</li>
+ <li>那么我们在func1中是看到没有使用rsp寄存器，那么就可以直接通过pop指令，将rsp后面保存的旧的栈基址rbp还原。但是如同func2一样，我们使用了rsp寄存器。那么该怎么做才能将rbp和rip还原呢？我们知道pop操作肯定是需要栈顶指针寄存器rsp的位置来弹出的。那么第一步，我们肯定是先将rsp还原到rbp的位置，因为rbp指向栈底嘛。然后再执行popq %rbp和ret，那么很简单，我们只需要：movl %ebp %esp （将rsp的值回退到栈底） popl %ebp（还原旧的栈底）ret还原rip。嗯，很简单，but，能不能缩减一下指令呢？恭喜喜欢偷懒的你，这样才会变得聪明（开发人员越懒就越会创作出很多节约时间的东西：代码生成器？SDK？Utils?）。intel也提供了这样一个指令：leave，就像func2一样，它等于执行：movl %ebp %esp、popl %ebp。</li>
+</ol>
+<p><span style="color: rgb(125, 244, 106);">func1:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(218, 146, 74);">#-----分隔符-----</span></p>
+<p><span style="color: rgb(218, 146, 74);"># 还记得这里么？没有使用rsp寄存器</span></p>
+<p><span style="color: rgb(218, 146, 74);">#-----分隔符-----</span></p>
+<p><span style="color: rgb(200, 143, 208);">popq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p></p>
+<p><span style="color: rgb(125, 244, 106);">func2:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(218, 146, 74);">#-----分隔符-----</span></p>
+<p><span style="color: rgb(218, 146, 74);">#-----分隔符-----</span></p>
+<p><span style="color: rgb(200, 143, 208);">leave</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p></p>
+<p>前面我们看到的是对于调用和返回的事，最后我们只需要研究下传参的流程就好了。前面我们也知道：eax寄存器用于保存返回值，嗯就是这样的。edi用于保存传参，but，返回值我们知道只有一个，那么eax没问题，约定好就行了。参数可不一样，它可能有很多个，这咋整？还记得我们有通用寄存器么？我们可以用它们来保存，但是寄存器个数总是有限的吧？超过寄存器个数呢？我们当然可以利用栈来保存这些参数了。但是，这将会很慢，因为涉及到了push和pop的操作。</p>
+<p>这里我就直接给出参数个数的不同，传参时使用的寄存器，读者可以自己做实验来验证：</p>
+<ol>
+ <li>一个参数：rdi（32位时edi，16位di）</li>
+ <li>两个参数：rdi、rsi</li>
+ <li>三个参数：rdi、rsi、edx</li>
+ <li>四个参数：rdi、rsi、edx、ecx</li>
+ <li>五个参数：rdi、rsi、edx、ecx、r8（64位机中，32位没有，没有咋整？那就开始使用栈）</li>
+ <li>六个参数：rdi、rsi、edx、ecx、r8（64位机中，32位没有）、r9（64位机中，32位没有）</li>
+ <li>七个以上：无能为力了，rdi、rsi、edx、ecx、r8（64位机中，32位没有）、r9（64位机中，32位没有）、其余的用栈来保存：在新的栈帧中直接压入栈中即可（也即：A调用B，那么参数将会在B的栈帧中RBP的后面，自己做做实验就知道了）</li>
+</ol>
+<p>这里给出使用栈传递参数的源代码和汇编，enjoy it。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">func1</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a</span>,<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">b</span>,<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">c</span>,<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">d</span>,<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">e</span>,<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">f</span>,<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">g</span>,<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">h</span>,<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span>){</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">i++</span>;</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">a</span>;</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">func2</span>(){</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a=</span><span style="color: rgb(100, 171, 143);">1</span>,<span style="color: rgb(184, 191, 198);">b</span>;</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">b</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">func1</span>(<span style="color: rgb(100, 171, 143);">1</span>,<span style="color: rgb(100, 171, 143);">2</span>,<span style="color: rgb(100, 171, 143);">3</span>,<span style="color: rgb(100, 171, 143);">4</span>,<span style="color: rgb(100, 171, 143);">5</span>,<span style="color: rgb(100, 171, 143);">6</span>,<span style="color: rgb(100, 171, 143);">7</span>,<span style="color: rgb(100, 171, 143);">8</span>,<span style="color: rgb(100, 171, 143);">9</span>);</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">b++</span>;</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">func1</span>:</p>
+<p><span style="color: rgb(184, 191, 198);">pushq</span> <span style="color: rgb(184, 191, 198);">%rbp</span></p>
+<p><span style="color: rgb(184, 191, 198);">movq</span> <span style="color: rgb(184, 191, 198);">%rsp</span>, <span style="color: rgb(184, 191, 198);">%rbp</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);"># 参数入栈 ，读者注意下：这里的参数位置</span></p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">%edi</span>, <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">4</span>(<span style="color: rgb(184, 191, 198);">%rbp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">%esi</span>, <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">8</span>(<span style="color: rgb(184, 191, 198);">%rbp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">%edx</span>, <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">12</span>(<span style="color: rgb(184, 191, 198);">%rbp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">%ecx</span>, <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">16</span>(<span style="color: rgb(184, 191, 198);">%rbp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">%r8d</span>, <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">20</span>(<span style="color: rgb(184, 191, 198);">%rbp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">%r9d</span>, <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">24</span>(<span style="color: rgb(184, 191, 198);">%rbp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">addl</span> <span style="color: rgb(184, 191, 198);">$1</span>, <span style="color: rgb(100, 171, 143);">32</span>(<span style="color: rgb(184, 191, 198);">%rbp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">4</span>(<span style="color: rgb(184, 191, 198);">%rbp</span>), <span style="color: rgb(184, 191, 198);">%eax</span></p>
+<p><span style="color: rgb(184, 191, 198);">popq</span> <span style="color: rgb(184, 191, 198);">%rbp</span></p>
+<p><span style="color: rgb(184, 191, 198);">ret</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p><span style="color: rgb(184, 191, 198);">func2</span>:</p>
+<p><span style="color: rgb(184, 191, 198);">pushq</span> <span style="color: rgb(184, 191, 198);">%rbp</span></p>
+<p><span style="color: rgb(184, 191, 198);">movq</span> <span style="color: rgb(184, 191, 198);">%rsp</span>, <span style="color: rgb(184, 191, 198);">%rbp</span></p>
+<p><span style="color: rgb(184, 191, 198);">subq</span> <span style="color: rgb(184, 191, 198);">$40</span>, <span style="color: rgb(184, 191, 198);">%rsp</span></p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">$1</span>, <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">8</span>(<span style="color: rgb(184, 191, 198);">%rbp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">$9</span>, <span style="color: rgb(100, 171, 143);">16</span>(<span style="color: rgb(184, 191, 198);">%rsp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">$8</span>, <span style="color: rgb(100, 171, 143);">8</span>(<span style="color: rgb(184, 191, 198);">%rsp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">$7</span>, (<span style="color: rgb(184, 191, 198);">%rsp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">$6</span>, <span style="color: rgb(184, 191, 198);">%r9d</span></p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">$5</span>, <span style="color: rgb(184, 191, 198);">%r8d</span></p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">$4</span>, <span style="color: rgb(184, 191, 198);">%ecx</span></p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">$3</span>, <span style="color: rgb(184, 191, 198);">%edx</span></p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">$2</span>, <span style="color: rgb(184, 191, 198);">%esi</span></p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">$1</span>, <span style="color: rgb(184, 191, 198);">%edi</span></p>
+<p><span style="color: rgb(184, 191, 198);">call</span> <span style="color: rgb(184, 191, 198);">func1</span></p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(184, 191, 198);">%eax</span>, <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">4</span>(<span style="color: rgb(184, 191, 198);">%rbp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">addl</span> <span style="color: rgb(184, 191, 198);">$1</span>, <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">4</span>(<span style="color: rgb(184, 191, 198);">%rbp</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">leave</span></p>
+<p><span style="color: rgb(184, 191, 198);">ret</span></p>
+<p>​</p>
+<p><br></p></p>
+</body>
+</html>

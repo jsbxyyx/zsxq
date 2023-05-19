@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux 内核内存屏障原理一</h1>
+<p>2022-09-16T06:28:08.908+0800</p>
+<p><p><br></p>
+<p><strong style="font-size: 1.5em;font-style;font-variant-ligatures;font-variant-caps; color: rgb(38, 38, 38);">抽象内存访问模型</strong></p>
+<p><br></p>
+<p>看如下内存模型，图中包含两个CPU ，一个内存，一个外设，每个CPU 执行自己访问内存的指令集，在这个抽象CPU模型中，每个CPU 访问内存的指令执行顺序是松散模型，每个CPU可以在保证 正确的 数据依赖 情况下 随意执行 指令集中访问内存的指令（如：int a = 1; b = a+1; 此时 b依赖 a 所以这两个操作不会发生重排序，而对于 int a = 1; b=1; 那么这两个赋值操作可以随意顺序执行，由 CPU 自己决定），且每个CPU执行的内存操作一定会被其他CPU或者设备感知，也即忽略 CPU 缓存行。同样，我们知道 指令集由 编译器生成，我们写的 C 的源程序，编译成汇编语言后，编译器可以根据目标CPU平台的流水线设计与ISA的特性，来决定生成的指令集的顺序，这些顺序不会影响到实际C程序想表达的操作，比如上述 a 和 b 变量的写入操作 若不发生数据依赖，那么可以重排序。</p>
+<p>由于忽略缓存，因此在下图的描述中，每个 CPU 执行的操作内存的指令结果，都会被外设和其他CPU所看到（看下图 Device 跟 CPU 和 内存的 访问接口 均可看到）。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; :
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; :
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; :
+ </div>
+ <div class="ql-code-block">
+  +-------+ &nbsp; : &nbsp; +--------+ &nbsp; : &nbsp; +-------+
+ </div>
+ <div class="ql-code-block">
+  | &nbsp; &nbsp; &nbsp; | &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; | &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; |
+ </div>
+ <div class="ql-code-block">
+  | &nbsp; &nbsp; &nbsp; | &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; | &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; |
+ </div>
+ <div class="ql-code-block">
+  | CPU 1 |&lt;-----&gt;| Memory |&lt;-----&gt;| CPU 2 |
+ </div>
+ <div class="ql-code-block">
+  | &nbsp; &nbsp; &nbsp; | &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; | &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; |
+ </div>
+ <div class="ql-code-block">
+  | &nbsp; &nbsp; &nbsp; | &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; | &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; |
+ </div>
+ <div class="ql-code-block">
+  +-------+ &nbsp; : &nbsp; +--------+ &nbsp; : &nbsp; +-------+
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ^ &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; ^ &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; ^
+ </div>
+ <div class="ql-code-block">
+  &nbsp; | &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; | &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; |
+ </div>
+ <div class="ql-code-block">
+  &nbsp; | &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; | &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; |
+ </div>
+ <div class="ql-code-block">
+  &nbsp; | &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; v &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; |
+ </div>
+ <div class="ql-code-block">
+  &nbsp; | &nbsp; &nbsp; &nbsp; : &nbsp; +--------+ &nbsp; : &nbsp; &nbsp; &nbsp; |
+ </div>
+ <div class="ql-code-block">
+  &nbsp; | &nbsp; &nbsp; &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; | &nbsp; : &nbsp; &nbsp; &nbsp; |
+ </div>
+ <div class="ql-code-block">
+  &nbsp; | &nbsp; &nbsp; &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; | &nbsp; : &nbsp; &nbsp; &nbsp; |
+ </div>
+ <div class="ql-code-block">
+  &nbsp; +----------&gt;| Device |&lt;----------+
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; | &nbsp; :
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; : &nbsp; | &nbsp; &nbsp; &nbsp; | &nbsp; :
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; : &nbsp; +--------+ &nbsp; :
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; : &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; :
+ </div>
+</div>
+<p>我们来看以下两个 CPU 的执行指令。初始时：A = 1 ，B = 2 。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============== ===============
+ </div>
+ <div class="ql-code-block">
+  { A == 1; B == 2 } // 变量初始值
+ </div>
+ <div class="ql-code-block">
+  A = 3; x = A;
+ </div>
+ <div class="ql-code-block">
+  B = 4; y = B;
+ </div>
+</div>
+<p>此时，由于 CPU 可以决定非数据依赖的操作顺序，比如 CPU 1 可以随意先给 B 赋值，再给 A 赋值， 同理 CPU 2 也是，因为这些指令毫无依赖性可言。所以将会产生如下 24 种组合（其中，STORE 表示赋值操作， LOAD 表示加载操作）。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  STORE A=3, STORE B=4, x=LOAD A-&gt;3, y=LOAD B-&gt;4
+ </div>
+ <div class="ql-code-block">
+  STORE A=3, STORE B=4, y=LOAD B-&gt;4, x=LOAD A-&gt;3
+ </div>
+ <div class="ql-code-block">
+  STORE A=3, x=LOAD A-&gt;3, STORE B=4, y=LOAD B-&gt;4
+ </div>
+ <div class="ql-code-block">
+  STORE A=3, x=LOAD A-&gt;3, y=LOAD B-&gt;2, STORE B=4
+ </div>
+ <div class="ql-code-block">
+  STORE A=3, y=LOAD B-&gt;2, STORE B=4, x=LOAD A-&gt;3
+ </div>
+ <div class="ql-code-block">
+  STORE A=3, y=LOAD B-&gt;2, x=LOAD A-&gt;3, STORE B=4
+ </div>
+ <div class="ql-code-block">
+  STORE B=4, STORE A=3, x=LOAD A-&gt;3, y=LOAD B-&gt;4
+ </div>
+ <div class="ql-code-block">
+  STORE B=4, ...
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+</div>
+<p>此时，对于 x 和 y 变量而言，将会导致如下四种组合值。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  x == 1, y == 2
+ </div>
+ <div class="ql-code-block">
+  x == 1, y == 4
+ </div>
+ <div class="ql-code-block">
+  x == 3, y == 2
+ </div>
+ <div class="ql-code-block">
+  x == 3, y == 4
+ </div>
+</div>
+<p>除了上述顺序之外，我们还需要注意：在松散CPU模型中，CPU 向内存写入变量的顺序可能不会被其他 CPU 以该写入顺序所看到，来看如下例子。初始时： A = 1，B = 2，C = 3，P = A的地址 ，Q = C的地址。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============== ===============
+ </div>
+ <div class="ql-code-block">
+  { A == 1, B == 2, C = 3, P == &amp;A, Q == &amp;C }
+ </div>
+ <div class="ql-code-block">
+  B = 4; Q = P;
+ </div>
+ <div class="ql-code-block">
+  P = &amp;B D = *Q;
+ </div>
+</div>
+<p>此时，我们看到明显的数据依赖： D 依赖于 Q。于是对于 Q 和 D 的最终值可能如下：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  (Q == &amp;A) and (D == 1) // CPU 2 先执行完毕 CPU 1 未执行
+ </div>
+ <div class="ql-code-block">
+  (Q == &amp;B) and (D == 2) // CPU 1 首先执行 P = &amp;B 但未执行 B = 4，此时 CPU 2 执行完毕
+ </div>
+ <div class="ql-code-block">
+  (Q == &amp;B) and (D == 4) // CPU 1 首先执行 P = &amp;B 也执行 B = 4，此时 CPU 2 执行完毕
+ </div>
+</div>
+<p>得到上述顺序的原因为：CPU 2 将不会重排序 Q 的赋值 和 D 的赋值操作，因为 CPU 总是先加载 P 放入 Q种，然后 再使用它 why？因为 数据依赖性必须保证，否则完全违背了 编程的语义。</p>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">抽象CPU模型对设备访问操作的影响</strong></h2>
+<p><br></p>
+<p>外设通常使用 MMIO 模型来操作，也即将一组虚拟内存映射为IO的操作 PORT 端口，这时我们读写设备，就如同操作普通变量一样，此时这些访问 IO 的虚拟内存和寄存器的指令执行顺序就相当重要。例如，考虑现在有一个 以太网的网卡，它包含一组控制寄存器，这些寄存器通过映射技映射到 地址端口寄存器 A（指明要访问网卡中的哪个寄存器） 和 数据端口寄存器 B（于 网卡对应寄存器 传输数据），此时 需要读取网卡内部 5 号寄存器，那么需要执行以下代码：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  *A = 5; // 设置需要访问 5 所映射的网卡内部寄存器
+ </div>
+ <div class="ql-code-block">
+  x = *D; // 读取数据放入 x 变量
+ </div>
+</div>
+<p>我们根据上面介绍的抽象 CPU 模型来看，由于 A 和 D、x 都没有数据依赖性，那么此时将会发生如下两种顺序：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  1：STORE *A = 5, x = LOAD *D
+ </div>
+ <div class="ql-code-block">
+  2：x = LOAD *D, STORE *A = 5
+ </div>
+</div>
+<p>对于第一种 情况 我们可以正确读取到数据，但，第二种情况是啥？由于寄存器号还没有指定，可能还是一个脏值，此时将发生非常严重的错误。</p>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">抽象CPU模型的保证</strong></h2>
+<p><br></p>
+<p>抽象CPU模型有如下最低限度的操作顺序保证：</p>
+<p>1、当 CPU 在执行指令流时，当发现数据依赖，那么将按照依赖顺序来操作内存。如：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  Q = P; D = *Q;
+ </div>
+</div>
+<p>CPU 将总是按照如下指令顺序执行：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  Q = LOAD P, D = LOAD *Q // 先加载 p 的值赋值到 Q 中，随后加载 Q 地址的值放入 D中
+ </div>
+</div>
+<p>2、重叠的加载和存储操作将按照顺序执行，也即在 同一个 CPU 执行过程中，可以先加载一个地址的值，计算后写入同一个地址的值，如：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  a = *X; *X = b; // 先获取 X 地址的值，然后再将 b 的值 写入 X 地址
+ </div>
+</div>
+<p>那么CPU总是按照如下顺序来执行指令来执行：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  a = LOAD *X, STORE *X = b
+ </div>
+</div>
+<p>再入：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  *X = c; d = *X; // 先将c变量的值放入 x 地址处，随后将 x地址的值读入 变量 d中
+ </div>
+</div>
+<p>CPU 将按照如下指令顺序来执行：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  STORE *X = c, d = LOAD *X
+ </div>
+</div>
+<p>3、对相互独立的写指令和读指令（也即没有数据依赖的指令）不规定执行顺序，如：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  X = *A; Y = *B; *D = Z; // 此时 X,Y,D 相互独立
+ </div>
+</div>
+<p>此时将可能发生如下执行顺序：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  X = LOAD *A, Y = LOAD *B, STORE *D = Z // 顺序执行
+ </div>
+ <div class="ql-code-block">
+  X = LOAD *A, STORE *D = Z, Y = LOAD *B // 先执行 X = *A ，后执行 *D = Z ，最后执行 Y = *B
+ </div>
+ <div class="ql-code-block">
+  Y = LOAD *B, X = LOAD *A, STORE *D = Z
+ </div>
+ <div class="ql-code-block">
+  Y = LOAD *B, STORE *D = Z, X = LOAD *A
+ </div>
+ <div class="ql-code-block">
+  STORE *D = Z, X = LOAD *A, Y = LOAD *B
+ </div>
+ <div class="ql-code-block">
+  STORE *D = Z, Y = LOAD *B, X = LOAD *A
+ </div>
+</div>
+<p>4、对于连续的内存访问操作可以进行合并。如：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  X = *A; Y = *(A + 4); // 分别读取 地址 A 和 地址 A + 4 的值 放入 X 和 Y 中
+ </div>
+</div>
+<p>此时可能产生如下顺序：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  X = LOAD *A; Y = LOAD *(A + 4); // 先加载 A 再加载 A + 4
+ </div>
+ <div class="ql-code-block">
+  Y = LOAD *(A + 4); X = LOAD *A; // 先加载 A + 4 再加载 A
+ </div>
+ <div class="ql-code-block">
+  {X, Y} = LOAD {*A, *(A + 4) }; // 合并加载 A 和 A + 4 的值
+ </div>
+</div>
+<p>并且对于：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  *A = X; Y = *A; // 先加载 X 放入 地址 A，再读入 地址 A 的值放入 Y
+ </div>
+</div>
+<p>可能产生如下顺序：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  STORE *A = X; Y = LOAD *A; // 先将 X 的值写入 A 地址的内存，然后再次加载 内存地址为 A 的值
+ </div>
+ <div class="ql-code-block">
+  STORE *A = Y = X; // 同时进行赋值并存储到 A 内存【 读者可以考虑下编译器优化行为或者 CPU 的优化行为，因为此时更优】
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">什么是内存屏障</strong></h2>
+<p><br></p>
+<p>正如上面所描述的那样，没有数据依赖，独立的内存操作将拥有随意的执行顺序，CPU 和 编译器 可以根据自身的优化特性，在保证正确语序（满足依赖性）的情况下随意重排序指令来加速执行，得到最好性能。但这可能会对于 CPU 和 CPU 、CPU 和 IO 之间带来问题，因为此时在多 CPU 中看到的顺序将会不一样，正如上面我们看到的那样，虽然 在 单个 CPU中乱序了不会造成任何问题，但，在 多CPU 中由于 多个指令并行执行，一旦一个 CPU乱序，那么将会得到不同的执行结果。于是，我们需要一种机制，来干预 编译器 和 CPU 这种因为优化性能 导致指令乱序执行的行为。而内存屏障便是这种机制，我们可以使用屏障 来约束屏障两边的的内存访问顺序。</p>
+<p>这种屏障机制对于 内核尤为重要，因为 CPU 和 其他外设 可以使用：重排序手段、延迟组合内存访问、数据预读、分支预测、CPU 缓存技术 等机制来提升自身性能，这种提升往往对于自身而言没有什么额外的影响，但他们一起配合，这种"自私"的行为，将会导致彼此配合出现问题。而内存屏障的出现，使得我们可以干预并控制这些行为来保证 它们 按照我们预先的顺序来执行。</p>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">内存屏障种类</strong></h2>
+<p><br></p>
+<p>内存屏障有四种基本类型：</p>
+<p>1、写屏障（store barriers）</p>
+<p>写内存屏障保证了在屏障之前的所有的 STORE 操作，将出现在屏障之后所有STORE操作之前（相对于系统的其他组件而言），也即 写屏障后的写指令不会重排序到屏障之前的写指令之前。【对于 相对系统的其他组件而言，怎么理解？来看 CPU 1 执行 STORE A STORE B STORE BARRIER STORE C，那么 CPU 2 在看到 C 值时 ， A 和 B 一定被存储了，至于 CPU 1 先 STORE A 还是 STORE B，无所谓】</p>
+<p>注意：写屏障 只会约束 写操作与写操作 之间的顺序，对于 读操作 毫不影响。</p>
+<p>一个CPU 的写操作指令行为，可以被看作是不断向内存系统提交一系列的 存储操作，这时我们也可以这么定义写屏障：在写屏障之前的所有 写操作 都将与 写屏障后面的写操作 保证提交顺序。【pass：写屏障应该与读屏障或者数据依赖屏障搭配使用，咳咳，不懂？没关系，看后面的 SMP 屏障对 一节的描述，因为 写是顺序提交了，读可能因为其他某种原因导致不顺序读~】</p>
+<p>2、读屏障（read barriers）</p>
+<p>读屏障是数据依赖屏障的升级版，用于保证所有 读屏障前的 load 操作 不会重排序到 读屏障后的 load 操作 后面。同 写屏障 一样，读屏障只针对 load 读取操作，对于读屏障前后的 store 写操作将不会影响。</p>
+<p>读屏障 包含了 以下介绍的 数据依赖屏障语义，因此在需要数据依赖屏障的地方，可以替换为 读屏障，但一定要注意：读屏障 的影响 大于 数据依赖屏障（只针对相邻的 两个 load 操作）。读屏障 通常 需要 与 写屏障 进行搭配使用，后面会详细介绍，这里了解即可。</p>
+<p>3、数据依赖屏障（data dependency barriers）</p>
+<p>数据依赖屏障是一个弱化过后的 读屏障。来看这样一个例子：执行两个加载指令时，第二个加载指令将使用 第一个加载指令的结果（ 例如：第一个 加载操作 从内存中获取了一个地址值，而第二个 加载操作 将使用第一个操作获取到的这个地址值，去内存中加载数据 ），那么此时就需要一个数据依赖性屏障，以确保在第二个加载操作在读取对应内存地址的数据时，第一个操作先完成并获取到了正确的地址。</p>
+<p>由此可见，数据依赖屏障仅仅对两个相邻的读操作指令生效，对于其他的 独立的读操作、写操作或者重叠的读操作不会产生任何影响。</p>
+<p>正如 写屏障 的描述那样，系统中的其他 CPU 可以被看作不断向内存系统提交存储序列的处理机，然后其他 CPU 可以感知这些存储序列。此时，我们可以说：当 另一个 CPU 执行 数据依赖屏障时，就可以保证 对于它之前的任何 加载操作已经 完成，也即：如果 当前加载操作 使用了来自另一个CPU的存储序列中的一个值，那么当CPU 执行完 数据依赖屏障时，在屏障后面的 加载操作 执行前，当前加载操作 的数据一定能够被 屏障后面的指令所看见，也即完成了实际的 加载 -存储 操作（事实上，这种问题 在 特定的 CPU平台上才会出现，比如 拥有 invalidate queue 的队列，此时使用 数据依赖屏障，可以让 CPU 的缓存的数据 失效从而读取 失效队列的最新值~详细参考 混沌学堂 的描述）。</p>
+<p>注意：如果第二加载 操作 不是直接紧跟在 第一个加载操作的后面，比如：通过 条件判断，成功后才使用该地址完成操作，那么需要一个 使用其他屏障来完成 该数据依赖操作，比如：读屏障。同时，数据依赖屏障 通常与 写屏障 搭配使用~</p>
+<p>4、通用内存屏障（全屏障）</p>
+<p>通用内存屏障同时包含 写屏障和读屏障 的功能，用于保证 屏障前 的所有 读操作（load） 和 写操作（store）不会重排序到 屏障后的 所有 读操作 和 写操作 之后。这就意味着，全屏障 可以用于代替 写屏障、读屏障、数据依赖屏障，但，意味着 性能的下降。</p>
+<p>接下来我们来看看 获取锁操作 和 释放锁操作 隐含的 屏障原理：</p>
+<p>1、获取锁操作（LOCK）</p>
+<p>获取锁操作，将保证 所有 获取锁之前 的内存操作（包含读操作和写操作）不会重排序到获取锁之后。也即，LOCK 上锁操作之前的 所有 读写操作 ，在 LOCK 操作 后面的 读写操作 可见。</p>
+<p>但请注意：当 LOCK 操作 只保证 LOCK 本身操作 与 LOCK 前面的 内存操作 不会重排序，但，并不保证 LOCK 操作 后面的 内存操作不会重排序到 LOCK 前面的 内存操作之前，也即 STORE；LOAD； LOCK；STORE；LOAD；仅仅保证 STORE；LOAD； LOCK；的 顺序，但 ，不会保证 STORE；LOAD； LOCK；STORE；LOAD；的整体顺序，它可能是这样的执行语序：STORE；STORE；LOAD； LOCK；LOAD。</p>
+<p>2、释放锁操作（UNLOCK）</p>
+<p>同获取锁操作一样，释放锁操作 将会保证 释放锁操作 之前的 读写操作 不会与 释放锁 操作 本身发生重排序，但，并不保证 UNLOCK 操作 后的 读写操作 不会重排序 到 UNLOCK 前面。原理与 获取锁一样，只需要保证整体 STORE LOAD UNLOCK 的整体语序即可。此时，我们只需要将 LOCK 和 UNLOCK 联合使用，那么就可以满足 上锁和释放锁 之间的内存操作对于 LOCK 和 UNLOCK 之间的内存操作的执行顺序。比如：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  STORE A；LOAD B；
+ </div>
+ <div class="ql-code-block">
+  LOCK；
+ </div>
+ <div class="ql-code-block">
+  STORE A；LOAD B； // 保证锁操作内部的内存操作与LOCK之前 和 UNLOCK之后 的内存操作顺序
+ </div>
+ <div class="ql-code-block">
+  UNLOCK；
+ </div>
+ <div class="ql-code-block">
+  STORE C；LOAD D；
+ </div>
+</div>
+<p>此时，我们看到 LOCK 和 UNLOCK 操作，包含了其他类型内存屏障的语义（除了后面介绍的：MMIO（IO内存映射技术----- 映射虚拟内存作为 PORT 操作外设） 写屏障）。</p>
+<p>在内核开发中我们通常使用最小原则：若内存访问操作的数据，不会在多个设备（CPU之间、CPU 和 外设之间）交互，如果 CPU 本身能够保证正确的顺序，那么不需要在这些代码中包含任何屏障语义，同时，不同的CPU架构的数据访问模型并不一样，若当前执行指令的CPU架构 本身不会发生 重排序的可能，那么虽然在当前场景需要屏障，那么这些代码也不需要任何屏障语义。比如：STORE ; STORE；写屏障；STORE；此时，我们需要交互行为，需要保证 写屏障 之前的 所有写操作已经完成 内存提交，那么如果当前CPU架构本身不会重排序STORE，那么该写屏障将不会出现在代码中。</p>
+<p>换言之：能不用就不用。</p>
+<p><br></p></p>
+</body>
+</html>

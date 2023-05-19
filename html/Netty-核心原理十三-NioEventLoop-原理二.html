@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理十三 NioEventLoop 原理二</h1>
+<p>2022-03-21T22:07:26.164+0800</p>
+<p><p><strong>核心方法rebuildSelector原理</strong></p>
+<p>该方法将在select方法中对Selector空转的bug进行处理，这里处理方式为：重新构建Selector对象。流程如下：</p>
+<ol>
+ <li>如果当前执行线程不是事件循环组的线程，那么向队列中提交任务来让执行线程执行重新构建操作</li>
+ <li>判断当前选择器不存在，那么直接返回</li>
+ <li>通过SelectorProvider创建一个新的选择器实例</li>
+ <li>将旧Selector中注册的通道注册到新的Selector中</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">rebuildSelector</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!inEventLoop</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">execute</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Runnable</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">rebuildSelector</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;});</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Selector</span> <span style="color: rgb(184, 191, 198);">oldSelector</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">selector</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Selector</span> <span style="color: rgb(184, 191, 198);">newSelector</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">oldSelector</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 当前选择器不存在，那么直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newSelector</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">openSelector</span>(); <span style="color: rgb(218, 146, 74);">// 通过SelectorProvider创建一个新的选择器实例</span></p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Exception</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(<span style="color: rgb(210, 107, 107);">"Failed to create a new Selector."</span>, <span style="color: rgb(184, 191, 198);">e</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将旧Selector中注册的通道注册到新的Selector中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nChannels</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">SelectionKey</span> <span style="color: rgb(184, 191, 198);">key</span>: <span style="color: rgb(184, 191, 198);">oldSelector</span>.<span style="color: rgb(184, 191, 198);">keys</span>()) { <span style="color: rgb(218, 146, 74);">// 遍历之前注册的通道选择集</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">a</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">key</span>.<span style="color: rgb(184, 191, 198);">attachment</span>();&nbsp;<span style="color: rgb(218, 146, 74);">// 获取与SelectionKey绑定的对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!key</span>.<span style="color: rgb(184, 191, 198);">isValid</span>() <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">key</span>.<span style="color: rgb(184, 191, 198);">channel</span>().<span style="color: rgb(184, 191, 198);">keyFor</span>(<span style="color: rgb(184, 191, 198);">newSelector</span>) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 避免重复注册</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">interestOps</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">key</span>.<span style="color: rgb(184, 191, 198);">interestOps</span>(); <span style="color: rgb(218, 146, 74);">// 获取之前注册的感兴趣事件集</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">key</span>.<span style="color: rgb(184, 191, 198);">cancel</span>(); <span style="color: rgb(218, 146, 74);">// 将key从旧的选择器中取消</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SelectionKey</span> <span style="color: rgb(184, 191, 198);">newKey</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">key</span>.<span style="color: rgb(184, 191, 198);">channel</span>().<span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">newSelector</span>, <span style="color: rgb(184, 191, 198);">interestOps</span>, <span style="color: rgb(184, 191, 198);">a</span>); <span style="color: rgb(218, 146, 74);">// 重新将通道注册到新的Selector中，注意这里需要携带：之前的感兴趣事件集、绑定对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">a</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">AbstractNioChannel</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果绑定的对象是AbstractNioChannel实例，那么需要将其中保存的选择键更新</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;((<span style="color: rgb(184, 191, 198);">AbstractNioChannel</span>) <span style="color: rgb(184, 191, 198);">a</span>).<span style="color: rgb(184, 191, 198);">selectionKey</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newKey</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nChannels</span> <span style="color: rgb(184, 191, 198);">++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Exception</span> <span style="color: rgb(184, 191, 198);">e</span>) { <span style="color: rgb(218, 146, 74);">// 发生异常，关闭通道</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(<span style="color: rgb(210, 107, 107);">"Failed to re-register a Channel to the new Selector."</span>, <span style="color: rgb(184, 191, 198);">e</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">a</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">AbstractNioChannel</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">AbstractNioChannel</span> <span style="color: rgb(184, 191, 198);">ch</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">AbstractNioChannel</span>) <span style="color: rgb(184, 191, 198);">a</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">unsafe</span>().<span style="color: rgb(184, 191, 198);">close</span>(<span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">unsafe</span>().<span style="color: rgb(184, 191, 198);">voidPromise</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@SuppressWarnings</span>(<span style="color: rgb(210, 107, 107);">"unchecked"</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">NioTask&lt;SelectableChannel&gt;</span> <span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">NioTask&lt;SelectableChannel&gt;</span>) <span style="color: rgb(184, 191, 198);">a</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">invokeChannelUnregistered</span>(<span style="color: rgb(184, 191, 198);">task</span>, <span style="color: rgb(184, 191, 198);">key</span>, <span style="color: rgb(184, 191, 198);">e</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">ConcurrentModificationException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selector</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newSelector</span>; <span style="color: rgb(218, 146, 74);">// 更新选择器对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 关闭旧的选择器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">oldSelector</span>.<span style="color: rgb(184, 191, 198);">close</span>();</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">isWarnEnabled</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(<span style="color: rgb(210, 107, 107);">"Failed to close the old Selector."</span>, <span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法processSelectedKeys原理</strong></p>
+<p>该方法用于执行Selector中注册的通道发生的事件：可读、可写、新连接。可以看到这里如果使用了优化的选择集，那么调用processSelectedKeysOptimized方法执行，否则使用普通的processSelectedKeysPlain方法来执行准备好的事件。执行流程如下：</p>
+<ol>
+ <li>获取需要处理的SelectionKey，并将其从publicSelectedKeys中移除</li>
+ <li>根据携带对象的类型来选择处理，如果是AbstractNioChannel的子类那么直接调用方法processSelectedKey执行，否则先将携带对象转为NioTask再调用方法执行</li>
+ <li>如果设置了needsToSelectAgain标志位，那么在处理完当前选择键后需要再次选择</li>
+</ol>
+<p>可以看到这里的优化操作主要是对原生的HashSet进行优化，这里直接操作数组索引下标，不需要计算hash，同时也不使用迭代器对象。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">processSelectedKeys</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">selectedKeys</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processSelectedKeysOptimized</span>(<span style="color: rgb(184, 191, 198);">selectedKeys</span>.<span style="color: rgb(184, 191, 198);">flip</span>());</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processSelectedKeysPlain</span>(<span style="color: rgb(184, 191, 198);">selector</span>.<span style="color: rgb(184, 191, 198);">selectedKeys</span>());</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 使用优化的选择键集执行</span></p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">processSelectedKeysOptimized</span>(<span style="color: rgb(184, 191, 198);">SelectionKey</span>[] <span style="color: rgb(184, 191, 198);">selectedKeys</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">SelectionKey</span> <span style="color: rgb(184, 191, 198);">k</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">selectedKeys</span>[<span style="color: rgb(184, 191, 198);">i</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">k</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 检测数组项是否为空</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectedKeys</span>[<span style="color: rgb(184, 191, 198);">i</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>; <span style="color: rgb(218, 146, 74);">// 直接将数组项设置为空</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 根据携带对象的类型来选择处理</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">a</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">k</span>.<span style="color: rgb(184, 191, 198);">attachment</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">a</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">AbstractNioChannel</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processSelectedKey</span>(<span style="color: rgb(184, 191, 198);">k</span>, (<span style="color: rgb(184, 191, 198);">AbstractNioChannel</span>) <span style="color: rgb(184, 191, 198);">a</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@SuppressWarnings</span>(<span style="color: rgb(210, 107, 107);">"unchecked"</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">NioTask&lt;SelectableChannel&gt;</span> <span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">NioTask&lt;SelectableChannel&gt;</span>) <span style="color: rgb(184, 191, 198);">a</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processSelectedKey</span>(<span style="color: rgb(184, 191, 198);">k</span>, <span style="color: rgb(184, 191, 198);">task</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置需要再次选择，那么此时将原有的selectedKeys数组中当前i后面的selectedKey清空，然后执行再次选择，并将selectedKeys中的数组进行切换，此时将获得正确的selectedKeys数组并且重置index循环下标为-1，当开始循环时设置为0，表示重新从数组最开始执行</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">needsToSelectAgain</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">i++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">selectedKeys</span>[<span style="color: rgb(184, 191, 198);">i</span>] <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectedKeys</span>[<span style="color: rgb(184, 191, 198);">i</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectAgain</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectedKeys</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">selectedKeys</span>.<span style="color: rgb(184, 191, 198);">flip</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 使用普通的选择键集来完成处理</span></p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">processSelectedKeysPlain</span>(<span style="color: rgb(184, 191, 198);">Set&lt;SelectionKey&gt;</span> <span style="color: rgb(184, 191, 198);">selectedKeys</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">selectedKeys</span>.<span style="color: rgb(184, 191, 198);">isEmpty</span>()) { <span style="color: rgb(218, 146, 74);">// 键集为空，则返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Iterator&lt;SelectionKey&gt;</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">selectedKeys</span>.<span style="color: rgb(184, 191, 198);">iterator</span>(); <span style="color: rgb(218, 146, 74);">// 获取迭代器对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取需要处理的SelectionKey，并将其从publicSelectedKeys中移除</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">SelectionKey</span> <span style="color: rgb(184, 191, 198);">k</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">i</span>.<span style="color: rgb(184, 191, 198);">next</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">a</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">k</span>.<span style="color: rgb(184, 191, 198);">attachment</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">i</span>.<span style="color: rgb(184, 191, 198);">remove</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">a</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">AbstractNioChannel</span>) { <span style="color: rgb(218, 146, 74);">// 处理AbstractNioChannel的子类</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processSelectedKey</span>(<span style="color: rgb(184, 191, 198);">k</span>, (<span style="color: rgb(184, 191, 198);">AbstractNioChannel</span>) <span style="color: rgb(184, 191, 198);">a</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 处理NioTask</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">NioTask&lt;SelectableChannel&gt;</span> <span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">NioTask&lt;SelectableChannel&gt;</span>) <span style="color: rgb(184, 191, 198);">a</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processSelectedKey</span>(<span style="color: rgb(184, 191, 198);">k</span>, <span style="color: rgb(184, 191, 198);">task</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!i</span>.<span style="color: rgb(184, 191, 198);">hasNext</span>()) { <span style="color: rgb(218, 146, 74);">// 迭代器处理完成，那么结束循环</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">needsToSelectAgain</span>) { <span style="color: rgb(218, 146, 74);">// 如果设置了在处理完选择键后需要再次选择，然后继续执行，此时需要重新创建迭代器对象，避免发生ConcurrentModificationException异常</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectAgain</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selectedKeys</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">selector</span>.<span style="color: rgb(184, 191, 198);">selectedKeys</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">selectedKeys</span>.<span style="color: rgb(184, 191, 198);">isEmpty</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">selectedKeys</span>.<span style="color: rgb(184, 191, 198);">iterator</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 重新对选择器进行选择</span></p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">selectAgain</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">needsToSelectAgain</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>; <span style="color: rgb(218, 146, 74);">// 还原标识变量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">selector</span>.<span style="color: rgb(184, 191, 198);">selectNow</span>();</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(<span style="color: rgb(210, 107, 107);">"Failed to update SelectionKeys."</span>, <span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法processSelectedKey(SelectionKey k, AbstractNioChannel ch)原理</strong></p>
+<p>该方法用于处理SelectionKey 和其携带的AbstractNioChannel 子类对象。流程如下：</p>
+<ol>
+ <li>获取通道NioUnsafe对象</li>
+ <li>判断选择键无效而关闭通道</li>
+ <li>获取准备好的事件集</li>
+ <li>根据事件集的类型：OP_READ、OP_ACCEPT、OP_WRITE、OP_CONNECT来调用Channel的相应方法来完成处理</li>
+</ol>
+<p>我们这里可以看见：所有处理方法将由Channel来完成实现。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">processSelectedKey</span>(<span style="color: rgb(184, 191, 198);">SelectionKey</span> <span style="color: rgb(184, 191, 198);">k</span>, <span style="color: rgb(184, 191, 198);">AbstractNioChannel</span> <span style="color: rgb(184, 191, 198);">ch</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AbstractNioChannel</span>.<span style="color: rgb(184, 191, 198);">NioUnsafe</span> <span style="color: rgb(184, 191, 198);">unsafe</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">unsafe</span>(); <span style="color: rgb(218, 146, 74);">// 获取通道NioUnsafe对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!k</span>.<span style="color: rgb(184, 191, 198);">isValid</span>()) { <span style="color: rgb(218, 146, 74);">// 选择键无效（选择键被cancel、channel关闭、Selector被关闭）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">eventLoop</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">eventLoop</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">ignored</span>) { <span style="color: rgb(218, 146, 74);">// Channel的实现没有使用事件循环组则返回，如果没有实现该方法，那么可能抛出异常，这里我们不做处理，直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">eventLoop</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(200, 143, 208);">this</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">eventLoop</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// Channel已经从事件循环组中解除注册，那么直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unsafe</span>.<span style="color: rgb(184, 191, 198);">close</span>(<span style="color: rgb(184, 191, 198);">unsafe</span>.<span style="color: rgb(184, 191, 198);">voidPromise</span>()); <span style="color: rgb(218, 146, 74);">// 通道仍然注册在事件循环组中，那么将其关闭</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">readyOps</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">k</span>.<span style="color: rgb(184, 191, 198);">readyOps</span>(); <span style="color: rgb(218, 146, 74);">// 获取准备好的事件集</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">readyOps</span> <span style="color: rgb(184, 191, 198);">&amp;</span> (<span style="color: rgb(184, 191, 198);">SelectionKey</span>.<span style="color: rgb(184, 191, 198);">OP_READ</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">SelectionKey</span>.<span style="color: rgb(184, 191, 198);">OP_ACCEPT</span>)) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">readyOps</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 如果为OP_READ和OP_ACCEPT则处理读操作，这里同样对readyOps=0进行判断，是为了避免发生JDK的事件集空返回Bug（其实这可能是操作系统的Bug：在部分Linux的2.6的kernel中，poll和epoll对于突然中断的连接socket会对返回的eventSet事件集合置为POLLHUP，也可能是POLLERR，eventSet事件集合发生了变化，这就可能导致Selector会被唤醒）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unsafe</span>.<span style="color: rgb(184, 191, 198);">read</span>(); <span style="color: rgb(218, 146, 74);">// 处理读操作</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!ch</span>.<span style="color: rgb(184, 191, 198);">isOpen</span>()) { <span style="color: rgb(218, 146, 74);">// 通道已经关闭直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">readyOps</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">SelectionKey</span>.<span style="color: rgb(184, 191, 198);">OP_WRITE</span>) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 执行通道写操作</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">unsafe</span>().<span style="color: rgb(184, 191, 198);">forceFlush</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">readyOps</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">SelectionKey</span>.<span style="color: rgb(184, 191, 198);">OP_CONNECT</span>) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 执行连接操作</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ops</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">k</span>.<span style="color: rgb(184, 191, 198);">interestOps</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ops</span> <span style="color: rgb(184, 191, 198);">&amp;=</span> <span style="color: rgb(184, 191, 198);">~SelectionKey</span>.<span style="color: rgb(184, 191, 198);">OP_CONNECT</span>; <span style="color: rgb(218, 146, 74);">// 这里去掉了选择集中的OP_CONNECT，因为如果不去掉，那么将会总是返回该事件集</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">k</span>.<span style="color: rgb(184, 191, 198);">interestOps</span>(<span style="color: rgb(184, 191, 198);">ops</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unsafe</span>.<span style="color: rgb(184, 191, 198);">finishConnect</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">CancelledKeyException</span> <span style="color: rgb(184, 191, 198);">ignored</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unsafe</span>.<span style="color: rgb(184, 191, 198);">close</span>(<span style="color: rgb(184, 191, 198);">unsafe</span>.<span style="color: rgb(184, 191, 198);">voidPromise</span>());</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法processSelectedKey(SelectionKey k, NioTask</strong><strong style="color: inherit;">&lt;SelectableChannel&gt;</strong><strong> task)原理</strong></p>
+<p>该方法用于处理SelectionKey 和其携带的NioTask对象。可以看到该方法主要回调task的channelReady方法来完成对通道的处理。同时根据处理结果来完成进一步的处理。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">processSelectedKey</span>(<span style="color: rgb(184, 191, 198);">SelectionKey</span> <span style="color: rgb(184, 191, 198);">k</span>, <span style="color: rgb(184, 191, 198);">NioTask&lt;SelectableChannel&gt;</span> <span style="color: rgb(184, 191, 198);">task</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(218, 146, 74);">// 标志执行状态：1：task回调方法正常执行 2、执行发生异常</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">task</span>.<span style="color: rgb(184, 191, 198);">channelReady</span>(<span style="color: rgb(184, 191, 198);">k</span>.<span style="color: rgb(184, 191, 198);">channel</span>(), <span style="color: rgb(184, 191, 198);">k</span>); <span style="color: rgb(218, 146, 74);">// 回调task方法</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Exception</span> <span style="color: rgb(184, 191, 198);">e</span>) { <span style="color: rgb(218, 146, 74);">// 发生异常将选择键删除同时回调任务的channelUnregistered方法</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">k</span>.<span style="color: rgb(184, 191, 198);">cancel</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">invokeChannelUnregistered</span>(<span style="color: rgb(184, 191, 198);">task</span>, <span style="color: rgb(184, 191, 198);">k</span>, <span style="color: rgb(184, 191, 198);">e</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">2</span>;</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">switch</span> (<span style="color: rgb(184, 191, 198);">state</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(100, 171, 143);">0</span>:&nbsp;<span style="color: rgb(218, 146, 74);">// 发生非Exception异常，那么取消选择键同时回调任务的channelUnregistered方法</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">k</span>.<span style="color: rgb(184, 191, 198);">cancel</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">invokeChannelUnregistered</span>(<span style="color: rgb(184, 191, 198);">task</span>, <span style="color: rgb(184, 191, 198);">k</span>, <span style="color: rgb(132, 182, 203);">null</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(100, 171, 143);">1</span>: <span style="color: rgb(218, 146, 74);">// 正常状态，那么验证选择键是否仍然有效</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!k</span>.<span style="color: rgb(184, 191, 198);">isValid</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">invokeChannelUnregistered</span>(<span style="color: rgb(184, 191, 198);">task</span>, <span style="color: rgb(184, 191, 198);">k</span>, <span style="color: rgb(132, 182, 203);">null</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

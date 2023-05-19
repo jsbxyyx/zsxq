@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理九 NioEventLoopGroup与EventLoopGroup 原理</h1>
+<p>2022-03-08T09:54:06.830+0800</p>
+<p><p>在SingleThreadEventExecutor中我们看到，当我们执行execute方法时会将任务放入到普通任务队列中，同时调用doStartThread方法启动执行线程，而执行线程将会调用子类实现的run方法，完成执行器任务的执行。那么很容易想到，该类作为默认执行器，那么将会重写run方法完成自身的逻辑，而其他所有的操作，都已经在SingleThreadEventExecutor中完成。所以我们这里直接看run方法和构造函数实现即可。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultEventExecutor</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">SingleThreadEventExecutor</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器：通过指定执行器初始化父类</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">DefaultEventExecutor</span>(<span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(132, 182, 203);">null</span>, <span style="color: rgb(184, 191, 198);">executor</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器：通过指定事件执行器组初始化父类</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">DefaultEventExecutor</span>(<span style="color: rgb(184, 191, 198);">EventExecutorGroup</span> <span style="color: rgb(184, 191, 198);">parent</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultThreadFactory</span>(<span style="color: rgb(184, 191, 198);">DefaultEventExecutor</span>.<span style="color: rgb(200, 143, 208);">class</span>));</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器：通过指定事件执行器组和线程工厂初始化父类</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">DefaultEventExecutor</span>(<span style="color: rgb(184, 191, 198);">EventExecutorGroup</span> <span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">threadFactory</span>, <span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 重写父类的run方法，在该方法中不断循环执行任务队列中的任务</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 从队列中获取任务执行，并且更新最后任务执行时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">takeTask</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">task</span>.<span style="color: rgb(184, 191, 198);">run</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">updateLastExecutionTime</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">confirmShutdown</span>()) { <span style="color: rgb(218, 146, 74);">// 确认是否需要关闭事件执行器，如果关闭，那么直接退出循环结束任务执行</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>EventLoopGroup 原理</strong></p>
+<p>EventLoopGroup 是一个特殊的 EventExecutorGroup 事件执行器组，这里笔者将其翻译为事件循环组。它在EventExecutorGroup的基础上增加了对Channel通道的注册操作。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">EventLoopGroup</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">EventExecutorGroup</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 返回事件循环组中的下一个事件循环对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">next</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 将channel注册到事件循环组中，返回的ChannelFuture表明执行结果</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">channel</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 使用ChannelPromise来注册通道，这里读者只需要知道是将channel通道包装在ChannelPromise中即可</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>);</p>
+<p>}</p>
+<p><strong>EventLoop 原理</strong></p>
+<p>EventLoop 表示 EventLoopGroup 中的事件循环，我们看到该接口是一个特殊的EventLoopGroup，很明显，又是一个只有自己的组。所以该组将处理所有注册到其中的channel操作，同时由于其包含在EventLoopGroup中，所以增加了一个用于获取所属事件循环组的parent方法。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">EventLoop</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">OrderedEventExecutor</span>, <span style="color: rgb(184, 191, 198);">EventLoopGroup</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventLoopGroup</span> <span style="color: rgb(184, 191, 198);">parent</span>();</p>
+<p>}</p>
+<p><strong>MultithreadEventLoopGroup 原理</strong></p>
+<p>MultithreadEventLoopGroup表示一个多线程处理的事件循环组，实现相当简单，因为大部分操作都在MultithreadEventExecutorGroup抽象类中实现了，这里只不过对register方法进行了默认实现。可以看到，所有操作均是调用next方法来获取事件循环组中的下一个EventLoop事件循环来处理。所以更加能表现了MultithreadEventLoopGroup仅仅只是管理了EventLoop，真正干活的是EventLoop。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">MultithreadEventLoopGroup</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">MultithreadEventExecutorGroup</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">EventLoopGroup</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">DEFAULT_EVENT_LOOP_THREADS</span>; <span style="color: rgb(218, 146, 74);">// 默认事件循环线程个数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 默认取 CPU核心数 * 2</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">DEFAULT_EVENT_LOOP_THREADS</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Math</span>.<span style="color: rgb(184, 191, 198);">max</span>(<span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(184, 191, 198);">SystemPropertyUtil</span>.<span style="color: rgb(184, 191, 198);">getInt</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"io.netty.eventLoopThreads"</span>, <span style="color: rgb(184, 191, 198);">Runtime</span>.<span style="color: rgb(184, 191, 198);">getRuntime</span>().<span style="color: rgb(184, 191, 198);">availableProcessors</span>() <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(100, 171, 143);">2</span>));</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器：如果线程数为0，那么将使用默认线程数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">MultithreadEventLoopGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(28, 198, 133);">Object</span>... <span style="color: rgb(184, 191, 198);">args</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">nThreads</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">DEFAULT_EVENT_LOOP_THREADS</span> : <span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(184, 191, 198);">args</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 默认线程工厂，指定优先级为最高优先级</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">newDefaultThreadFactory</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultThreadFactory</span>(<span style="color: rgb(184, 191, 198);">getClass</span>(), <span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">MAX_PRIORITY</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 直接调用父类的Chooser来完成下一个事件循环对象的选择</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">next</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> (<span style="color: rgb(184, 191, 198);">EventLoop</span>) <span style="color: rgb(200, 143, 208);">super</span>.<span style="color: rgb(184, 191, 198);">next</span>();</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 由子类完成对事件循环对象的创建</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">newChild</span>(<span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(28, 198, 133);">Object</span>... <span style="color: rgb(184, 191, 198);">args</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/****************所有操作均由事件循环对象来完成****************/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">channel</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">next</span>().<span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">channel</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">next</span>().<span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">promise</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Deprecated</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">channel</span>, <span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">next</span>().<span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">channel</span>, <span style="color: rgb(184, 191, 198);">promise</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><br></p>
+<p><strong>DefaultEventLoopGroup 原理</strong></p>
+<p>DefaultEventLoopGroup为默认的事件循环组实现，同样较为简单：既然是默认事件循环组，那么真实处理的肯定也是默认的事件循环对象，DefaultEventLoop。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultEventLoopGroup</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">MultithreadEventLoopGroup</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 使用默认的线程数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">DefaultEventLoopGroup</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 指定线程数创建</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">DefaultEventLoopGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nThreads</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(132, 182, 203);">null</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 指定线程数和线程工厂</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">DefaultEventLoopGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">threadFactory</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 事件循环对象为默认事件循环</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">newChild</span>(<span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(28, 198, 133);">Object</span>... <span style="color: rgb(184, 191, 198);">args</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultEventLoop</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">executor</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><br></p>
+<p><strong>NioEventLoopGroup 原理</strong></p>
+<p>NioEventLoopGroup用于处理NIO Channel操作的事件循环组。我们看到这里创建的子事件循环为NioEventLoop，同理这里由于是操作NIO的事件，所以需要初始化SelectorProvider来创建Selector实例。该类也是在生产环境中常用的事件循环组，但是实现也较为简单，因为大量的操作也是在MultithreadEventLoopGroup中完成。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">NioEventLoopGroup</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">MultithreadEventLoopGroup</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 构造器：初始化SelectorProvider，该对象将初始化Selector选择器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">NioEventLoopGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">threadFactory</span>, <span style="color: rgb(184, 191, 198);">SelectorProvider</span>.<span style="color: rgb(184, 191, 198);">provider</span>());</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 构造器：使用默认的选择策略</span>（作者：黄俊，微信：bx_java）<span style="color: rgb(218, 146, 74);">DefaultSelectStrategyFactory.INSTANCE，该选择策略将会在EventLoop事件循环对象中处理Selector通道选择时使用</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">NioEventLoopGroup</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>, <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">SelectorProvider</span> <span style="color: rgb(184, 191, 198);">selectorProvider</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">threadFactory</span>, <span style="color: rgb(184, 191, 198);">selectorProvider</span>, <span style="color: rgb(184, 191, 198);">DefaultSelectStrategyFactory</span>.<span style="color: rgb(184, 191, 198);">INSTANCE</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 使用默认拒绝策略初始化父类</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">NioEventLoopGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">SelectorProvider</span> <span style="color: rgb(184, 191, 198);">selectorProvider</span>, <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">SelectStrategyFactory</span> <span style="color: rgb(184, 191, 198);">selectStrategyFactory</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">nThreads</span>, <span style="color: rgb(184, 191, 198);">threadFactory</span>, <span style="color: rgb(184, 191, 198);">selectorProvider</span>, <span style="color: rgb(184, 191, 198);">selectStrategyFactory</span>, <span style="color: rgb(184, 191, 198);">RejectedExecutionHandlers</span>.<span style="color: rgb(184, 191, 198);">reject</span>());</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 设置事件循环处理线程，在处理Channel IO的时间占比和执行普通任务的时间占比，默认为 50%</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">setIoRatio</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ioRatio</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">e</span>: <span style="color: rgb(200, 143, 208);">this</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;((<span style="color: rgb(184, 191, 198);">NioEventLoop</span>) <span style="color: rgb(184, 191, 198);">e</span>).<span style="color: rgb(184, 191, 198);">setIoRatio</span>(<span style="color: rgb(184, 191, 198);">ioRatio</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 用于修复JDK的epoll 100% CPU的bug（在部分Linux的2.6的kernel中，poll和epoll对于突然中断的连接socket会对返回的eventSet事件集合置为POLLHUP，也可能是POLLERR，eventSet事件集合发生了变化，这就可能导致Selector会被唤醒。了解下即可），这里采取的办法就是让所有的事件循环重新创建Selector对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">rebuildSelectors</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">e</span>: <span style="color: rgb(200, 143, 208);">this</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;((<span style="color: rgb(184, 191, 198);">NioEventLoop</span>) <span style="color: rgb(184, 191, 198);">e</span>).<span style="color: rgb(184, 191, 198);">rebuildSelector</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建的事件循环对象为NioEventLoop，这里将传递给事件循环组的SelectorProvider、SelectStrategyFactory、RejectedExecutionHandler传递给了事件循环对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">newChild</span>(<span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(28, 198, 133);">Object</span>... <span style="color: rgb(184, 191, 198);">args</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NioEventLoop</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">executor</span>, (<span style="color: rgb(184, 191, 198);">SelectorProvider</span>) <span style="color: rgb(184, 191, 198);">args</span>[<span style="color: rgb(100, 171, 143);">0</span>],</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;((<span style="color: rgb(184, 191, 198);">SelectStrategyFactory</span>) <span style="color: rgb(184, 191, 198);">args</span>[<span style="color: rgb(100, 171, 143);">1</span>]).<span style="color: rgb(184, 191, 198);">newSelectStrategy</span>(), (<span style="color: rgb(184, 191, 198);">RejectedExecutionHandler</span>) <span style="color: rgb(184, 191, 198);">args</span>[<span style="color: rgb(100, 171, 143);">2</span>]);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

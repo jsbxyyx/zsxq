@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Redis AOF 原理</h1>
+<p>2022-07-12T09:48:52.314+0800</p>
+<p><p>前面我们详细描述了RDB的原理：</p>
+<ol>
+ <li>每1毫秒回调serverCron函数</li>
+ <li>检测RDB临界值：server.saveparams</li>
+ <li>fork 子进程，由子进程完成数据写入</li>
+</ol>
+<p>本文将详细解释保证数据安全的aof机制，该机制将会在每次执行完用户的写操作后，将写入数据实时同步到磁盘，但是，很容易想到：性能相对于RDB较低。为了找到 aof 的实现原理，我们这里需要找到修改内存数据的操作，笔者这里以最简单的 set 命令举例，其他操作与此相同。</p>
+<p><strong>set 命令原理</strong></p>
+<p>该命令我们可以很轻易的从源代码中看到：</p>
+<ol>
+ <li>尝试编码字符串为长整型以节约空间</li>
+ <li>将 key - value 保存到db的 dict 表中，而对于 dict 而言，就是标准的hash表实现</li>
+ <li>将 <a href="http://server.dirty" target="_blank">server.dirty</a> 自增，此时表明内存中的数据已经被修改</li>
+</ol>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">setCommand</span>(<span style="color: rgb(184, 191, 198);">redisClient</span> <span style="color: rgb(184, 191, 198);">*c</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">c-&gt;argv</span>[<span style="color: rgb(100, 171, 143);">2</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tryObjectEncoding</span>(<span style="color: rgb(184, 191, 198);">c-&gt;argv</span>[<span style="color: rgb(100, 171, 143);">2</span>]); <span style="color: rgb(218, 146, 74);">// 尝试对字符串进行编码以节约空间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">setGenericCommand</span>(<span style="color: rgb(184, 191, 198);">c</span>,<span style="color: rgb(100, 171, 143);">0</span>,<span style="color: rgb(184, 191, 198);">c-&gt;argv</span>[<span style="color: rgb(100, 171, 143);">1</span>],<span style="color: rgb(184, 191, 198);">c-&gt;argv</span>[<span style="color: rgb(100, 171, 143);">2</span>],<span style="color: rgb(184, 191, 198);">NULL</span>,<span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 字符串编码为整形节约空间</span></p>
+<p><span style="color: rgb(184, 191, 198);">robj</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">tryObjectEncoding</span>(<span style="color: rgb(184, 191, 198);">robj</span> <span style="color: rgb(184, 191, 198);">*o</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">value</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sds</span> <span style="color: rgb(184, 191, 198);">s</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">o-&gt;ptr</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">o-&gt;encoding</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">REDIS_ENCODING_RAW</span>) <span style="color: rgb(218, 146, 74);">// 已经完成编码</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">o</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">o-&gt;refcount</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">1</span>) <span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">o</span>; <span style="color: rgb(218, 146, 74);">// 不能对共享对象编码，共享对象应该在 object space 中保存</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">redisAssertWithInfo</span>(<span style="color: rgb(184, 191, 198);">NULL</span>,<span style="color: rgb(184, 191, 198);">o</span>,<span style="color: rgb(184, 191, 198);">o-&gt;type</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">REDIS_STRING</span>); <span style="color: rgb(218, 146, 74);">// 当前函数只支持字符串类型编码</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!string2l</span>(<span style="color: rgb(184, 191, 198);">s</span>,<span style="color: rgb(184, 191, 198);">sdslen</span>(<span style="color: rgb(184, 191, 198);">s</span>),<span style="color: rgb(184, 191, 198);">&amp;value</span>)) <span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">o</span>; <span style="color: rgb(218, 146, 74);">// 尝试对字符串编码为整形值</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 此时可以完成对字符串的编码，如果字符串中的整型值处于共享整型值中，那么我们直接返回共享对象（REDIS_SHARED_INTEGERS 10000）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">maxmemory</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">value</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">value</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">REDIS_SHARED_INTEGERS</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">decrRefCount</span>(<span style="color: rgb(184, 191, 198);">o</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">incrRefCount</span>(<span style="color: rgb(184, 191, 198);">shared</span>.<span style="color: rgb(184, 191, 198);">integers</span>[<span style="color: rgb(184, 191, 198);">value</span>]);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">shared</span>.<span style="color: rgb(184, 191, 198);">integers</span>[<span style="color: rgb(184, 191, 198);">value</span>];</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 否则我们将其编码为整形值保存</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">o-&gt;encoding</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">REDIS_ENCODING_INT</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sdsfree</span>(<span style="color: rgb(184, 191, 198);">o-&gt;ptr</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">o-&gt;ptr</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">void*</span>) <span style="color: rgb(184, 191, 198);">value</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">o</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 尝试将字符串转为长整形值保存</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">string2l</span>(<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">s</span>, <span style="color: rgb(28, 198, 133);">size_t</span> <span style="color: rgb(184, 191, 198);">slen</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">lval</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">llval</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!string2ll</span>(<span style="color: rgb(184, 191, 198);">s</span>,<span style="color: rgb(184, 191, 198);">slen</span>,<span style="color: rgb(184, 191, 198);">&amp;llval</span>)) <span style="color: rgb(218, 146, 74);">// 尝试转为 long long 类型</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 超出界限</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">llval</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">LONG_MIN</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">llval</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">LONG_MAX</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">*lval</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">long</span>)<span style="color: rgb(184, 191, 198);">llval</span>; <span style="color: rgb(218, 146, 74);">// 否则直接强转</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 将编码后的字符串：key - value 保存</span></p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">setGenericCommand</span>(<span style="color: rgb(184, 191, 198);">redisClient</span> <span style="color: rgb(184, 191, 198);">*c</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nx</span>, <span style="color: rgb(184, 191, 198);">robj</span> <span style="color: rgb(184, 191, 198);">*key</span>, <span style="color: rgb(184, 191, 198);">robj</span> <span style="color: rgb(184, 191, 198);">*val</span>, <span style="color: rgb(184, 191, 198);">robj</span> <span style="color: rgb(184, 191, 198);">*expire</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">unit</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">milliseconds</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">expire</span>) { <span style="color: rgb(218, 146, 74);">// 指定过期时间，那么计算过期时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">getLongLongFromObjectOrReply</span>(<span style="color: rgb(184, 191, 198);">c</span>, <span style="color: rgb(184, 191, 198);">expire</span>, <span style="color: rgb(184, 191, 198);">&amp;milliseconds</span>, <span style="color: rgb(184, 191, 198);">NULL</span>) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">REDIS_OK</span>) <span style="color: rgb(218, 146, 74);">// 从传递参数中获取指定的过期时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">milliseconds</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 无效过期时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addReplyError</span>(<span style="color: rgb(184, 191, 198);">c</span>,<span style="color: rgb(210, 107, 107);">"invalid expire time in SETEX"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">unit</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">UNIT_SECONDS</span>) <span style="color: rgb(184, 191, 198);">milliseconds</span> <span style="color: rgb(184, 191, 198);">*=</span> <span style="color: rgb(100, 171, 143);">1000</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">lookupKeyWrite</span>(<span style="color: rgb(184, 191, 198);">c-&gt;db</span>,<span style="color: rgb(184, 191, 198);">key</span>) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">nx</span>) { <span style="color: rgb(218, 146, 74);">// 如果当前key已经存在 同时为 setnx 命令，那么直接返回，因为setnx 不会覆盖原值</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addReply</span>(<span style="color: rgb(184, 191, 198);">c</span>,<span style="color: rgb(184, 191, 198);">shared</span>.<span style="color: rgb(184, 191, 198);">czero</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 保存 key - value，并增加</span><a href="http://server.dirty" target="_blank" style="color: rgb(218, 146, 74);">server.dirty</a><span style="color: rgb(218, 146, 74);">值，表示内存值的修改次数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">setKey</span>(<span style="color: rgb(184, 191, 198);">c-&gt;db</span>,<span style="color: rgb(184, 191, 198);">key</span>,<span style="color: rgb(184, 191, 198);">val</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">dirty++</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">expire</span>) <span style="color: rgb(184, 191, 198);">setExpire</span>(<span style="color: rgb(184, 191, 198);">c-&gt;db</span>,<span style="color: rgb(184, 191, 198);">key</span>,<span style="color: rgb(184, 191, 198);">mstime</span>()<span style="color: rgb(184, 191, 198);">+milliseconds</span>); <span style="color: rgb(218, 146, 74);">// 设置过期时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addReply</span>(<span style="color: rgb(184, 191, 198);">c</span>, <span style="color: rgb(184, 191, 198);">nx</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">shared</span>.<span style="color: rgb(184, 191, 198);">cone</span> : <span style="color: rgb(184, 191, 198);">shared</span>.<span style="color: rgb(184, 191, 198);">ok</span>); <span style="color: rgb(218, 146, 74);">// 响应客户端</span></p>
+<p>}</p>
+<p><strong>处理流程分析</strong></p>
+<p>我们看到 set 命令 仅仅只是更改了 <a href="http://server.dirty" target="_blank">server.dirty</a> 计数，本身并没有参与 aof 的操作，那么谁来执行aof操作呢？我们得回到前面描述的处理流程中（可别忘了前面我们描述的 ae 事件循环原理哦，这里我们省略掉无关代码）。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">acceptTcpHandler</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*el</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">privdata</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mask</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">acceptCommonHandler</span>(<span style="color: rgb(184, 191, 198);">cfd</span>);&nbsp;&nbsp;</p>
+<p>}</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">acceptCommonHandler</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">c</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">createClient</span>(<span style="color: rgb(184, 191, 198);">fd</span>)) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">redisLog</span>(<span style="color: rgb(184, 191, 198);">REDIS_WARNING</span>,<span style="color: rgb(210, 107, 107);">"Error allocating resoures for the client"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">close</span>(<span style="color: rgb(184, 191, 198);">fd</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">redisClient</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">createClient</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">anetNonBlock</span>(<span style="color: rgb(184, 191, 198);">NULL</span>,<span style="color: rgb(184, 191, 198);">fd</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">anetTcpNoDelay</span>(<span style="color: rgb(184, 191, 198);">NULL</span>,<span style="color: rgb(184, 191, 198);">fd</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">aeCreateFileEvent</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">el</span>,<span style="color: rgb(184, 191, 198);">fd</span>,<span style="color: rgb(184, 191, 198);">AE_READABLE</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">readQueryFromClient</span>, <span style="color: rgb(184, 191, 198);">c</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AE_ERR</span>) <span style="color: rgb(218, 146, 74);">// 可以看到当客户端发送数据后，回调该函数</span></p>
+<p>&nbsp;&nbsp;&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">close</span>(<span style="color: rgb(184, 191, 198);">fd</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">zfree</span>(<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 处理客户端发送指令</span></p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">readQueryFromClient</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*el</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">privdata</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mask</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processInputBuffer</span>(<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">processInputBuffer</span>(<span style="color: rgb(184, 191, 198);">redisClient</span> <span style="color: rgb(184, 191, 198);">*c</span>) {</p>
+<p>&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">processCommand</span>(<span style="color: rgb(184, 191, 198);">c</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">REDIS_OK</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">resetClient</span>(<span style="color: rgb(184, 191, 198);">c</span>);</p>
+<p>&nbsp;&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 实际执行操作</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">processCommand</span>(<span style="color: rgb(184, 191, 198);">redisClient</span> <span style="color: rgb(184, 191, 198);">*c</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">c-&gt;cmd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">c-&gt;lastcmd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">lookupCommand</span>(<span style="color: rgb(184, 191, 198);">c-&gt;argv</span>[<span style="color: rgb(100, 171, 143);">0</span>]<span style="color: rgb(184, 191, 198);">-&gt;ptr</span>); <span style="color: rgb(218, 146, 74);">// 从命令表中获取指令函数指针</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">call</span>(<span style="color: rgb(184, 191, 198);">c</span>,<span style="color: rgb(184, 191, 198);">REDIS_CALL_FULL</span>); <span style="color: rgb(218, 146, 74);">// 调用命令，注意这里的 REDIS_CALL_FULL（描述： #define REDIS_CALL_FULL (REDIS_CALL_SLOWLOG | REDIS_CALL_STATS | REDIS_CALL_PROPAGATE) 注意这里包含了 REDIS_CALL_PROPAGATE ）</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">call</span>(<span style="color: rgb(184, 191, 198);">redisClient</span> <span style="color: rgb(184, 191, 198);">*c</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">c-&gt;cmd-&gt;proc</span>(<span style="color: rgb(184, 191, 198);">c</span>); <span style="color: rgb(218, 146, 74);">// 调用 函数指针 完成处理，这里就是我们上面描述的 set 命令</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">REDIS_CALL_PROPAGATE</span>) { <span style="color: rgb(218, 146, 74);">// 执行标志位存在调用传播，那么传播</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">REDIS_PROPAGATE_NONE</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">c-&gt;cmd-&gt;flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">REDIS_CMD_FORCE_REPLICATION</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">REDIS_PROPAGATE_REPL</span>; <span style="color: rgb(218, 146, 74);">// 将修改传播给副本集</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">dirty</span>) <span style="color: rgb(218, 146, 74);">// 存在内存数据修改，那么增加 REDIS_PROPAGATE_AOF 传播</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">|=</span> (<span style="color: rgb(184, 191, 198);">REDIS_PROPAGATE_REPL</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">REDIS_PROPAGATE_AOF</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">REDIS_PROPAGATE_NONE</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">propagate</span>(<span style="color: rgb(184, 191, 198);">c-&gt;cmd</span>,<span style="color: rgb(184, 191, 198);">c-&gt;db-&gt;id</span>,<span style="color: rgb(184, 191, 198);">c-&gt;argv</span>,<span style="color: rgb(184, 191, 198);">c-&gt;argc</span>,<span style="color: rgb(184, 191, 198);">flags</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>propagate 函数</strong></p>
+<p>最终，我们看到在执行完set命令后，将会根据 flag 来调用propagate 函数，而我们制定了 call 函数的 flag 总是为 REDIS_CALL_FULL，其中包含了 REDIS_CALL_PROPAGATE 标志位，所以我们将关注点放到该函数即可。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">propagate</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">redisCommand</span> <span style="color: rgb(184, 191, 198);">*cmd</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">dbid</span>, <span style="color: rgb(184, 191, 198);">robj</span> <span style="color: rgb(184, 191, 198);">**argv</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">argc</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_state</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">REDIS_AOF_OFF</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">REDIS_PROPAGATE_AOF</span>) <span style="color: rgb(218, 146, 74);">// 当前没有关闭AOF机制，同时需要传播到AOF中，那么执行 feedAppendOnlyFile 函数完成AOF处理</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">feedAppendOnlyFile</span>(<span style="color: rgb(184, 191, 198);">cmd</span>,<span style="color: rgb(184, 191, 198);">dbid</span>,<span style="color: rgb(184, 191, 198);">argv</span>,<span style="color: rgb(184, 191, 198);">argc</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">REDIS_PROPAGATE_REPL</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">listLength</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">slaves</span>))</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">replicationFeedSlaves</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">slaves</span>,<span style="color: rgb(184, 191, 198);">dbid</span>,<span style="color: rgb(184, 191, 198);">argv</span>,<span style="color: rgb(184, 191, 198);">argc</span>);</p>
+<p>}</p>
+<p><strong>feedAppendOnlyFile 函数</strong></p>
+<p>该函数将完成实际 AOF 操作。我们看到该函数将通过命令构建 sds buf ，并将该缓冲区数据添加到 aof_buf 中。源码如下。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">feedAppendOnlyFile</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">redisCommand</span> <span style="color: rgb(184, 191, 198);">*cmd</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">dictid</span>, <span style="color: rgb(184, 191, 198);">robj</span> <span style="color: rgb(184, 191, 198);">**argv</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">argc</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sds</span> <span style="color: rgb(184, 191, 198);">buf</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sdsempty</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">robj</span> <span style="color: rgb(184, 191, 198);">*tmpargv</span>[<span style="color: rgb(100, 171, 143);">3</span>];</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cmd-&gt;proc</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">expireCommand</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">cmd-&gt;proc</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">pexpireCommand</span> <span style="color: rgb(184, 191, 198);">||</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cmd-&gt;proc</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">expireatCommand</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 过期命令我们将其转为 PEXPIREAT 命令方便在存储到文件中时保持精度，并且保存的时间总是绝对时间，而不是相对时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">buf</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">catAppendOnlyExpireAtCommand</span>(<span style="color: rgb(184, 191, 198);">buf</span>,<span style="color: rgb(184, 191, 198);">cmd</span>,<span style="color: rgb(184, 191, 198);">argv</span>[<span style="color: rgb(100, 171, 143);">1</span>],<span style="color: rgb(184, 191, 198);">argv</span>[<span style="color: rgb(100, 171, 143);">2</span>]);</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cmd-&gt;proc</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">setexCommand</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">cmd-&gt;proc</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">psetexCommand</span>) { <span style="color: rgb(218, 146, 74);">// SETEX/PSETEX 命令也需要转为 SET 和 PEXPIREAT 指令</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tmpargv</span>[<span style="color: rgb(100, 171, 143);">0</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">createStringObject</span>(<span style="color: rgb(210, 107, 107);">"SET"</span>,<span style="color: rgb(100, 171, 143);">3</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tmpargv</span>[<span style="color: rgb(100, 171, 143);">1</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">argv</span>[<span style="color: rgb(100, 171, 143);">1</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tmpargv</span>[<span style="color: rgb(100, 171, 143);">2</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">argv</span>[<span style="color: rgb(100, 171, 143);">3</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">buf</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">catAppendOnlyGenericCommand</span>(<span style="color: rgb(184, 191, 198);">buf</span>,<span style="color: rgb(100, 171, 143);">3</span>,<span style="color: rgb(184, 191, 198);">tmpargv</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">decrRefCount</span>(<span style="color: rgb(184, 191, 198);">tmpargv</span>[<span style="color: rgb(100, 171, 143);">0</span>]);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">buf</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">catAppendOnlyExpireAtCommand</span>(<span style="color: rgb(184, 191, 198);">buf</span>,<span style="color: rgb(184, 191, 198);">cmd</span>,<span style="color: rgb(184, 191, 198);">argv</span>[<span style="color: rgb(100, 171, 143);">1</span>],<span style="color: rgb(184, 191, 198);">argv</span>[<span style="color: rgb(100, 171, 143);">2</span>]);</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 其他命令直接转为对应的append数据即可，我们的 set 命令便是如此</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">buf</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">catAppendOnlyGenericCommand</span>(<span style="color: rgb(184, 191, 198);">buf</span>,<span style="color: rgb(184, 191, 198);">argc</span>,<span style="color: rgb(184, 191, 198);">argv</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果我们开启了AOF机制，那么我们将数据添加到 aof_buf 缓冲区中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_state</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">REDIS_AOF_ON</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_buf</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sdscatlen</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_buf</span>,<span style="color: rgb(184, 191, 198);">buf</span>,<span style="color: rgb(184, 191, 198);">sdslen</span>(<span style="color: rgb(184, 191, 198);">buf</span>));</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果后台AOF重写正在进行中，我们希望在缓冲区中保存子进程和当前文件之间的差异，这样当子进程完成它的工作时，我们可以将两者之间差异值保存到新的aof件中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_child_pid</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aofRewriteBufferAppend</span>((<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">char*</span>)<span style="color: rgb(184, 191, 198);">buf</span>,<span style="color: rgb(184, 191, 198);">sdslen</span>(<span style="color: rgb(184, 191, 198);">buf</span>));</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sdsfree</span>(<span style="color: rgb(184, 191, 198);">buf</span>);</p>
+<p>}</p>
+<p>那么，谁来处理 aof_buf 中的数据呢？还记得 beforeSleep 函数和 aeMain 函数么？很容易关联了吧？所以之前学到的东西并没有多余的，此时又再一次用到了，有时候你认为不重要的东西，到最后总会看到（pass：不学 点，怎么连成线？）</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">aeMain</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;stop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">!eventLoop-&gt;stop</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">eventLoop-&gt;beforesleep</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;beforesleep</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeProcessEvents</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(184, 191, 198);">AE_ALL_EVENTS</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">beforeSleep</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">flushAppendOnlyFile</span>(<span style="color: rgb(100, 171, 143);">0</span>); <span style="color: rgb(218, 146, 74);">// 将aof 缓存区中的数据写入磁盘，参数 0 表示在后台线程中异步 fsync 将page cache 中的数据写入磁盘持久化</span></p>
+<p>}</p>
+<p><strong>flushAppendOnlyFile 函数</strong></p>
+<p>那么我们直接看看该函数如何操作缓冲区即可。我们看到处理流程分为：</p>
+<ol>
+ <li>异步落盘（由后台线程完成处理）</li>
+ <li>同步落盘（主线程完成：write函数、fsync 函数）</li>
+</ol>
+<p><span style="color: rgb(218, 146, 74);">// 控制 fsync 函数的调用时间（该函数用于将OS中文件的缓存实时与磁盘同步，保证数据落盘）</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define AOF_FSYNC_NO 0</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define AOF_FSYNC_ALWAYS 1</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define AOF_FSYNC_EVERYSEC 2</span></p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">flushAppendOnlyFile</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">force</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_fsync</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AOF_FSYNC_EVERYSEC</span>) <span style="color: rgb(218, 146, 74);">// 指定每秒落盘一次</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sync_in_progress</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">bioPendingJobsOfType</span>(<span style="color: rgb(184, 191, 198);">REDIS_BIO_AOF_FSYNC</span>) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(218, 146, 74);">// 检查后台线程是否正在处理 REDIS_BIO_AOF_FSYNC 同步</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_fsync</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AOF_FSYNC_EVERYSEC</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">!force</span>) { <span style="color: rgb(218, 146, 74);">// 指定 force 为 0 时，异步落盘</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">sync_in_progress</span>) { <span style="color: rgb(218, 146, 74);">// 存在未完成的异步落盘任务（也即后台执行线程仍旧在执行fsync函数，但是由于磁盘执行缓慢，存在任务还未处理），那么我们设置 aof_flush_postponed_start ，该函数将会在serverCron 函数中调用，相当于延迟一会儿再次调用该函数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_flush_postponed_start</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_flush_postponed_start</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">unixtime</span>; <span style="color: rgb(218, 146, 74);">// 设置推迟执行时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">unixtime</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_flush_postponed_start</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">2</span>) { <span style="color: rgb(218, 146, 74);">// 等待2秒钟以内，那么再次尝试异步落盘</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 否则增加延迟fsync计数，因为可能磁盘写入过于缓慢，那么需要打印报警信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_delayed_fsync++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">redisLog</span>(<span style="color: rgb(184, 191, 198);">REDIS_NOTICE</span>,<span style="color: rgb(210, 107, 107);">"Asynchronous AOF fsync is taking too long (disk is busy?). Writing the AOF buffer without waiting for fsync to complete, this may slow down Redis."</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_flush_postponed_start</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(218, 146, 74);">// 重置推迟时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nwritten</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">write</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_fd</span>,<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_buf</span>,<span style="color: rgb(184, 191, 198);">sdslen</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_buf</span>)); <span style="color: rgb(218, 146, 74);">// 执行写入操作</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">nwritten</span> <span style="color: rgb(184, 191, 198);">!=</span> (<span style="color: rgb(28, 198, 133);">signed</span>)<span style="color: rgb(184, 191, 198);">sdslen</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_buf</span>)) { <span style="color: rgb(218, 146, 74);">// 写入失败，那么打印报警信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">nwritten</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>) {&nbsp;<span style="color: rgb(218, 146, 74);">// 未完成任何写入</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">redisLog</span>(<span style="color: rgb(184, 191, 198);">REDIS_WARNING</span>,<span style="color: rgb(210, 107, 107);">"Exiting on error writing to the append-only file: %s"</span>,<span style="color: rgb(184, 191, 198);">strerror</span>(<span style="color: rgb(184, 191, 198);">errno</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 写入了部分信息，但是并没有完全写入</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">redisLog</span>(<span style="color: rgb(184, 191, 198);">REDIS_WARNING</span>,<span style="color: rgb(210, 107, 107);">"Exiting on short write while writing to "</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"the append-only file: %s (nwritten=%ld, "</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"expected=%ld)"</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">strerror</span>(<span style="color: rgb(184, 191, 198);">errno</span>),</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(<span style="color: rgb(28, 198, 133);">long</span>)<span style="color: rgb(184, 191, 198);">nwritten</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(<span style="color: rgb(28, 198, 133);">long</span>)<span style="color: rgb(184, 191, 198);">sdslen</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_buf</span>));</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ftruncate</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_fd</span>, <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_current_size</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>) { <span style="color: rgb(218, 146, 74);">// 尝试清除文件中写入的部分信息，失败后报警</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">redisLog</span>(<span style="color: rgb(184, 191, 198);">REDIS_WARNING</span>, <span style="color: rgb(210, 107, 107);">"Could not remove short write "</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"from the append-only file. Redis may refuse "</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"to load the AOF the next time it starts. "</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"ftruncate: %s"</span>, <span style="color: rgb(184, 191, 198);">strerror</span>(<span style="color: rgb(184, 191, 198);">errno</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">exit</span>(<span style="color: rgb(100, 171, 143);">1</span>); <span style="color: rgb(218, 146, 74);">// 退出redis进程</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_current_size</span> <span style="color: rgb(184, 191, 198);">+=</span> <span style="color: rgb(184, 191, 198);">nwritten</span>; <span style="color: rgb(218, 146, 74);">// 否则写入成功，那么aof计数信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 当缓冲区较小时，可以复用该缓冲区，否则我们分配一个空的缓冲区（内存与性能的平衡）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">sdslen</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_buf</span>)<span style="color: rgb(184, 191, 198);">+sdsavail</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_buf</span>)) <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">4000</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sdsclear</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_buf</span>);</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sdsfree</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_buf</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_buf</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sdsempty</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果no-appendfsync-on-rewrite 参数设置为 1，并且有子进程在后台进行I/O操作，则不要进行fsync</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_no_fsync_on_rewrite</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span></p>
+<p>&nbsp;&nbsp;&nbsp;(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_child_pid</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">rdb_child_pid</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>))</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 执行fsync（注意：write 函数仅仅只是将数据写入内核buffer中，并没有同步到磁盘，调用该函数后，数据才会完全落盘）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_fsync</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AOF_FSYNC_ALWAYS</span>) { <span style="color: rgb(218, 146, 74);">// 总是执行fsync</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aof_fsync</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_fd</span>); <span style="color: rgb(218, 146, 74);">// 调用fsync完成落盘</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_last_fsync</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">unixtime</span>;</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_fsync</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AOF_FSYNC_EVERYSEC</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">unixtime</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_last_fsync</span>)) { <span style="color: rgb(218, 146, 74);">// 否则将fsync的操作交由 后台 线程完成处理</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!sync_in_progress</span>) <span style="color: rgb(184, 191, 198);">aof_background_fsync</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_fd</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">aof_last_fsync</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">unixtime</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 在linux中，使用fdatasync，只同步数据，而不同步fd的元数据，比如：修改时间、用户信息等等，用于优化写入速度</span></p>
+<p><span style="color: rgb(183, 179, 179);">#ifdef __linux__</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define aof_fsync fdatasync</span></p>
+<p><span style="color: rgb(183, 179, 179);">#else</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define aof_fsync fsync</span></p>
+<p><span style="color: rgb(183, 179, 179);">#endif</span></p>
+<p><strong>AOF重写机制</strong></p>
+<p>因为AOF是通过保存被执行的写命令来记录数据库状态的，所以随着服务器的运行时间久，AOF的文件会变得越来越大，不仅占用系统资源，而且当通过AOF文件来进行数据还原时花费的额时间也会更久。为了解决AOF文件体积膨胀的问题，Redis提供了AOF文件重写功能（注意：新旧两个 aof 文件所保存的数据库状态是相同的，但是新的AOF文件不会包含任何浪费空间的冗余命令，通常体积会较旧AOF文件小很多。同时，AOF重写其实是一个有歧义的名字，实际上重写工作是针对当前最新 redis 数据库状态来进行的，重写过程中不会读写、也不适用原来的AOF文件）：</p>
+<ol>
+ <li>AOF文件重写功能是通过子进程来执行</li>
+ <li>不过子进程在进行AOF重写期间，服务器进程还会继续处理命令请求，而新的命令可能会对现有的数据库状态进行修改，从而导致服务器当前的数据库状态和重写后的AOF文件所保存的数据库状态不一致</li>
+ <li>为了解决这一个问题，Redis服务器设置了一个AOF重写缓冲区，这个缓冲区会在服务器进程创建子进程时使用，当redis服务器执行完一个写命令后，会把这个写命令发送给AOF缓冲区和AOF重写缓冲区（也即上述 RewriteBuffer）</li>
+</ol>
+<p><br></p></p>
+</body>
+</html>

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>并发编程前序五</h1>
+<p>2022-01-24T12:09:04.838+0800</p>
+<p><p>在《并发编程前序四》中我们知道了C语言的方法调用原理：</p>
+<ol>
+ <li>通过bp和sp寄存器分别用于保存栈底和栈顶</li>
+ <li>每个方法拥有自己的方法帧，在方法帧中保存本地变量</li>
+ <li>当调用方法时，我们使用call指令，该指令将会把下一条指令压入栈中，同时跳转到对应的函数执行</li>
+ <li>在新的函数中将会保存旧的栈底bp，然后将bp赋值为当前sp的值，这样就开辟了一个新的栈帧（pushq %rbp； movq %rsp, %rbp）</li>
+ <li>当我们需要从调用方法返回时，那么只需要将保存的旧的栈底bp还原，然后将放入的返回地址弹出即可（popq %rbp；ret）</li>
+ <li>对于参数传递而言，是根据寄存器的个数来决定的，32位机和64位机的寄存器个数不一样，所以，编译器会尽量使用寄存器来传参，如果参数个数大于寄存器个数，那么将会通过栈来传递参数</li>
+ <li>eax寄存器用于保存函数返回值</li>
+</ol>
+<p>那么，本文将详细解释如下知识点：</p>
+<ol>
+ <li>C语言中数组与结构体的原理</li>
+ <li>指针原理</li>
+ <li>常量指针、指针常量的原理</li>
+ <li>值传递与引用传递原理</li>
+</ol>
+<p>通过以上知识点，帮助读者不在害怕指针，同时使用汇编语言揭示它们底层的构建，这样知其先后，则近道矣。</p>
+<p><strong>前置知识</strong></p>
+<p>很多读者在研究C语言原理时，并不具备计算机组成原理的知识，所以感觉很蒙蔽，始终学不会，同时在其他书本和学校中C语言又是第一门编程课，因为它足够精华、足够简单，是的，但是简单并不意味着学得会。笔者认为：</p>
+<ol>
+ <li>学习Java原理，那么面向JVM学习，这就意味着JVM知识越弱，Java原理你越学不懂，CRUD再多又如何</li>
+ <li>那么学习JVM，那么必然面向OS学习，何为虚拟机？虚拟了一台计算机，计算机和操作系统都不会，那更不用说研究JVM了</li>
+ <li>那么学习C语言呢？那么必然需要面向操作系统编程，并且需要了解汇编语言。不过没关系，这里只需要介绍一点点操作系统和计算机组成的知识就好。好在，我们前面已经熟悉了常用的汇编语言，所以汇编语言问题不大</li>
+</ol>
+<p>我们在研究C语言时，直接把内存当做一个字节数组，注意，是字节数组，一个单元为 1 byte = 8 位，那么它将会是这样，共4GB大小的字节数组，那么很容易理解，这里的基本操作单元为1byte（其实计算机组成原理中，内存的基础操作单元就是1byte，比如你想放4bit，那么也是需要1byte来存放）。</p>
+<p><span style="color: rgb(28, 198, 133);">byte</span> <span style="color: rgb(184, 191, 198);">mem</span>[]<span style="color: rgb(184, 191, 198);">=</span><span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(28, 198, 133);">byte</span>[<span style="color: rgb(100, 171, 143);">4</span><span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(100, 171, 143);">1024</span><span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(100, 171, 143);">1024</span><span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(100, 171, 143);">1024</span>];</p>
+<p>那么这时就非常容易理解了。以后我们在研究C语言底层时，脑子里就放一个这个数组就行了。我们来看这样一个简单赋值操作，前面我们从汇编看到过，无外乎通过sp开辟一个4byte的空间，然后用mov指令将1放入该空间即可。那么现在读者想想sp和bp对应于这个数组的什么？答案必然是索引下标。比如我这样：bp=0，sp=4，这时是不是就开辟了一个4byte的空间 sp -bp ，那么我就把1放到里面即可。这个时候问题来了：十进制1表示为16进制为0 x 00 00 00 01，总共32位（int等于4byte，一个16进制等于4位二进制），那么我们开辟的4byte怎么放呢？00（0下标） 00（1下标） 00（2下标） 01（3下标）或者01 00 00 00 。我们可看到怎么放都OK，但是需要依赖于CPU架构，比如在Intel中，我们只能这么放：01 00 00 00。而我们知道数组下标由0开始向上递增：0GB - 4GB，这时我们称0GB这边为低地址，而4GB为高地址。而对于0 x 00 00 00 01来说，我们称0 x 00 00为高8位，0 x 00 01为低8位。嗯，这时我们就可以定义以下 字节序 知识：</p>
+<ol>
+ <li>存放数据的高位放置在内存的低地址，那么为大端序</li>
+ <li>存放数据的高位放置在内存的高地址，那么为小端序</li>
+</ol>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a=</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p><strong>C语言中数组与结构体</strong></p>
+<p>有时候，我们需要在内存中开辟一块空间，来放置内容，这时候有两种放置方式：</p>
+<ol>
+ <li>相同的数据内容</li>
+ <li>不相同的数据内容</li>
+</ol>
+<p>而他们的唯一共同点，就是连续的内存，用上面的mem字节数组来说，就是放置内容的下标要连续，比如：0 - 4。不同点在于他们的命名方式不同：</p>
+<ol>
+ <li>数组用于存放相同的数据内容</li>
+ <li>结构体不相同的数据内容</li>
+</ol>
+<p>我们来看个例子，并且看看他们的汇编代码。我们在C的源代码中创建了一个数组arr，一个结构体s。通过汇编代码来看，非常符合我们的描述：</p>
+<ol>
+ <li>空间连续</li>
+ <li>数组放置内容类型相同</li>
+ <li>结构体可以不同</li>
+ <li>均是操作rbp来在内存中放置数据</li>
+ <li>在汇编代码阶段来看，数组和结构体并没有什么不同：movl 数据, -地址(%rbp)</li>
+</ol>
+<p>对的，结构体和数组本身就没有什么区别（从汇编角度）。那么我们现在来用mem字节数组分析下这个movl $3, -32(%rbp)指令干了什么：</p>
+<ol>
+ <li>假如rbp保存了数组下标 64，那么该下标就是栈基址</li>
+ <li>那么我们用 64 - 32 ，那么得到下标 32，该下标就是用于存放这个4字节的3</li>
+ <li>movl指令等于 arr[32] = 0x03，arr[33] = 0x00，arr[34] = 0x00，arr[35] = 0x00</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">test</span>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">b</span>;</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">func</span>(){</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">arr</span>[]<span style="color: rgb(184, 191, 198);">=</span>{<span style="color: rgb(100, 171, 143);">3</span>,<span style="color: rgb(100, 171, 143);">5</span>};</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">test</span> <span style="color: rgb(141, 141, 240);">s</span> <span style="color: rgb(184, 191, 198);">=</span> {<span style="color: rgb(100, 171, 143);">7</span>,<span style="color: rgb(100, 171, 143);">9</span>};</p>
+<p>};</p>
+<p><span style="color: rgb(125, 244, 106);">func:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(218, 146, 74);"># 数组</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $3, -32(%<span style="color: rgb(28, 198, 133);">rbp</span>) <span style="color: rgb(218, 146, 74);"># 栈内存由高地址向低地址扩张，所以减32</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $5, -28(%<span style="color: rgb(28, 198, 133);">rbp</span>) <span style="color: rgb(218, 146, 74);"># 32-28 = 4 正好 一个 整形的长度</span></p>
+<p><span style="color: rgb(218, 146, 74);"># 结构体</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $7, -16(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> $9, -8(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">popq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p><strong>指针原理</strong></p>
+<p>很多读者特别怕这东西，但是它真的很简单。我们先来看语法推理：</p>
+<ol>
+ <li>以下代码我们声明一个变量a，那么这时肯定通过bp或者sp减掉一个4byte的空间来存放a。想想mem字节数组，找一个下标index 比如为 64给bp，然后用bp - 4 ，也即 64 - 4 = 60，此时我用index为60 - 64的空间来存放4byte的变量a</li>
+ <li>核心来了，&amp;符号是啥？*p又是啥？</li>
+ <li>我们知道a变量的起始地址在下标index为60处，那么&amp;运算符就是获取下标60，注意，不是变量a的值</li>
+ <li>那么*p呢？就是开辟了一个空间，来存放这个下标60</li>
+ <li>那么这时，我们称存储下标60，也即变量a的地址为指针（尼玛？不就是个地址么？）</li>
+ <li>这时只需要解决一个问题就行了：存储下标60的空间需要多大？读者可以想想，数组长度有多大？我们以4GB为例，那么这时可以很轻松的得出，这个空间必须能容纳最大为4GB的index下标对吧？这时很容易就推理出：32位机中地址最大为2^32，那么空间必须为4byte = 32位，同理 64位机，空间必须为 8byte = 64位</li>
+ <li>*p为一个空间，那么int *p呢？很容易理解，这个空间有多大。int表明这个地址指向的空间，也即变量a的大小为4byte</li>
+</ol>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">func</span>(){</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span>&nbsp;<span style="color: rgb(184, 191, 198);">a=</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">p=&amp;a</span>;</p>
+<p>}</p>
+<p>那么我们知道了，指针就是一个地址而已。我们来看下汇编代码。可以得出以下结论：</p>
+<ol>
+ <li>&amp;运算法等于leaq -12(%rbp), %rax ，lea指令就是取-12(%rbp)的地址，然后放入rax寄存器</li>
+ <li>*p就是将a的地址，也即rax中的值，放入栈中保存</li>
+ <li>那么此时-8(%rbp)中就保存了8byte的变量a的地址值</li>
+</ol>
+<p><span style="color: rgb(125, 244, 106);">func:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $1, -12(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">leaq</span> -12(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(28, 198, 133);">rax</span> <span style="color: rgb(218, 146, 74);"># 取a的地址放入rax</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rax</span>, -8(%<span style="color: rgb(28, 198, 133);">rbp</span>) <span style="color: rgb(218, 146, 74);"># 将a的地址放入栈中保存</span></p>
+<p><span style="color: rgb(200, 143, 208);">popq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p>接下来我们来看一个C程序。推理一下：</p>
+<ol>
+ <li>我们说指针就是个地址，那么这里笔者将数组的第一个元素的地址取了出来（&amp;arr[0]）</li>
+ <li>那么这时读者考虑下：arr[]和*p的地址是否相同呢？也即arr[N]运算符，和直接操作指针p有何区别？</li>
+</ol>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">func</span>(){</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">arr</span>[]<span style="color: rgb(184, 191, 198);">=</span>{<span style="color: rgb(100, 171, 143);">3</span>,<span style="color: rgb(100, 171, 143);">5</span>};</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">*p</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;arr</span>[<span style="color: rgb(100, 171, 143);">0</span>];</p>
+<p>}</p>
+<p>不管怎样，还得看汇编代码。我们看到这时*p空间中，存放的地址是不是就是数组的首地址。那么，由于数组空间是连续的，且间隔都相同，等于数组的类型。比如我们这里的arr类型为整形，那么此时空间就是：4+4，而我们的指针p指向首地址，那么好玩的就来了，我们是不是可以操作这个指针p对数组进行遍历：p地址 + 4byte x N 。简单吧，确实可以这样。</p>
+<p><span style="color: rgb(125, 244, 106);">func:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(218, 146, 74);"># 数组arr数据</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $3, -16(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $5, -12(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">leaq</span> -16(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(28, 198, 133);">rax</span> <span style="color: rgb(218, 146, 74);"># 取数组中第一个变量为3的地址放入rax</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rax</span>, -8(%<span style="color: rgb(28, 198, 133);">rbp</span>) <span style="color: rgb(218, 146, 74);"># 将rax的值放入栈中</span></p>
+<p><span style="color: rgb(200, 143, 208);">popq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p>​</p>
+<p>我们继续看C代码。推理一番：</p>
+<ol>
+ <li>arr[0]和arr[1]大家都不陌生，获取数组下标为0和1的值</li>
+ <li>那么对于int c = *p呢？读者想想，p这个空间是不是存放指向数组首地址的值？那么这时我将其取出来，然后获取该地址对应的值，是不是就是数组下标为0的值呢？</li>
+ <li>再看*(p+1)，还记得：p地址 + 4byte x N公式么？我们只需要将p保存的地址 + 4byte就行了，这时就可以得到下标为1的值，嗯是的，我们只需要p+1，这时编译器会自动对这个p保存的地址值加上int的大小，因为它指向的空间大小为4</li>
+</ol>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">func</span>(){</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">arr</span>[]<span style="color: rgb(184, 191, 198);">=</span>{<span style="color: rgb(100, 171, 143);">3</span>,<span style="color: rgb(100, 171, 143);">5</span>};</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">p</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;arr</span>[<span style="color: rgb(100, 171, 143);">0</span>];</p>
+<p>​</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">arr</span>[<span style="color: rgb(100, 171, 143);">0</span>];</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">b</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">arr</span>[<span style="color: rgb(100, 171, 143);">1</span>];</p>
+<p>​</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">c</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">*p</span>;</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">d</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">*</span>(<span style="color: rgb(184, 191, 198);">p+</span><span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>}</p>
+<p>最后我们看看汇编代码，直接就明白了：</p>
+<ol>
+ <li>&amp;取地址 ，脑子里马上闪出 lea 指令</li>
+ <li>*p 解引用，脑子里马上闪出 (寄存器) 操作，注意：汇编中（）运算符，用于将括号中的值当做地址，寻址</li>
+</ol>
+<p><span style="color: rgb(125, 244, 106);">func:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(218, 146, 74);"># 数组arr</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $3, -16(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $5, -12(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(218, 146, 74);"># 保存数组arr的首地址到-8(%rbp)中</span></p>
+<p><span style="color: rgb(200, 143, 208);">leaq</span> -16(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(28, 198, 133);">rax</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rax</span>, -8(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(218, 146, 74);"># int a = arr[0]; </span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> -16(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(159, 186, 213);">eax</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> %<span style="color: rgb(159, 186, 213);">eax</span>, -32(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(218, 146, 74);"># int a = arr[1];</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> -12(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(159, 186, 213);">eax</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> %<span style="color: rgb(159, 186, 213);">eax</span>, -28(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(218, 146, 74);"># int c = *p; 注意：-8(%rbp)中保存了数组的首地址</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> -8(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(28, 198, 133);">rax</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> (%<span style="color: rgb(28, 198, 133);">rax</span>), %<span style="color: rgb(159, 186, 213);">eax</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> %<span style="color: rgb(159, 186, 213);">eax</span>, -24(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(218, 146, 74);"># int d = *(p+1);</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> -8(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(28, 198, 133);">rax</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> <span style="color: rgb(200, 143, 208);">4</span>(%<span style="color: rgb(28, 198, 133);">rax</span>), %<span style="color: rgb(159, 186, 213);">eax</span> <span style="color: rgb(218, 146, 74);"># 注意这里的 4(%rax) 等于 %rax + 4 ，so 你写的 (p+1) 就会自动给你在指令中加上单元大小</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> %<span style="color: rgb(159, 186, 213);">eax</span>, -20(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">popq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p><strong>常量指针、指针常量的原理</strong></p>
+<p>了解了指针就是个地址之后，我们来看看这两个概念：</p>
+<ol>
+ <li>常量指针：指向常量的指针。也即它不能指向变量，它指向的内容不能被改变，不能通过指针来修改它指向的内容。说白了，就是这个空间保存了一个地址，这个地址指向的内容不能改变</li>
+ <li>指针常量：指针本身是常量。它指向的地址是不可改变的，但地址里的内容可以通过指针改变。它指向的地址将伴其一生，直到生命周期结束。指针常量在定义时必须同时赋初值。说白了，就是这个空间保存的地址不能变，永远指向一片区域，但这个区域的值是可以改变的</li>
+</ol>
+<p>直接看例子。读者可以动手通过gcc反编译看看，其实在汇编层面，一样，只不过，编译时做了检查。</p>
+<p><span style="color: rgb(218, 146, 74);">// 常量指针例子</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">b=</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(184, 191, 198);">*a</span>; <span style="color: rgb(218, 146, 74);">// 声明常量指针，我们可以获取*a的值，但是不能修改，比如*a=3是非法的</span></p>
+<p><span style="color: rgb(184, 191, 198);">a</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;b</span>;</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 指针常量例子</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">b</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(28, 198, 133);">*</span> <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(184, 191, 198);">p</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;a</span>; <span style="color: rgb(218, 146, 74);">// 声明常量指针，指针常量一旦赋值，那么将不能再用p指向其他变量，如 p = &amp;b 非法。但是我们却可以 *p=3 修改其中的内容</span></p>
+<p>那么，读者想想能不能两个联合起来使用呢？比如：int const * const p = &amp;a，答案是必须的，肯定可以，这样的话，指针p不能被改变，同时指向的内容也不能改变。</p>
+<p><strong>值传递与引用传递原理</strong></p>
+<p>害，我相信，都了解了指针的原理了，就是个地址而已，那么这里值传递和引用传递原理，不说都可以，读者一看便知。我们先来看引用传递的原理：传递地址值而已。那么这时，用于操作的单元值为同一个，所以在func1中的3，将会影响func2中的a变量。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">func1</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">a</span>){ <span style="color: rgb(218, 146, 74);">// 这里表明接收一个地址</span></p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">*a</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">3</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">func2</span>(){</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a=</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">func1</span>(<span style="color: rgb(184, 191, 198);">&amp;a</span>);</p>
+<p>}</p>
+<p><span style="color: rgb(125, 244, 106);">func1:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rdi</span>, -8(%<span style="color: rgb(28, 198, 133);">rbp</span>) <span style="color: rgb(218, 146, 74);"># 将a的地址放入栈中</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> -8(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(28, 198, 133);">rax</span> <span style="color: rgb(218, 146, 74);"># 取a的地址放入rax</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $3, (%<span style="color: rgb(28, 198, 133);">rax</span>) <span style="color: rgb(218, 146, 74);"># 对a的地址的值赋值3</span></p>
+<p><span style="color: rgb(200, 143, 208);">popq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p></p>
+<p><span style="color: rgb(125, 244, 106);">func2:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">subq</span> $16, %<span style="color: rgb(28, 198, 133);">rsp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $1, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">leaq</span> -4(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(28, 198, 133);">rax</span> <span style="color: rgb(218, 146, 74);"># 将a的地址放入rax</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rax</span>, %<span style="color: rgb(28, 198, 133);">rdi</span> <span style="color: rgb(218, 146, 74);"># 将a的地址放入rdi</span></p>
+<p><span style="color: rgb(200, 143, 208);">call</span> <span style="color: rgb(200, 143, 208);">func1</span> <span style="color: rgb(218, 146, 74);"># 调用函数</span></p>
+<p><span style="color: rgb(200, 143, 208);">leave</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p>再来看值传递。可以看到值传递，将不会在func1中修改影响到func2的值，因为他们不是同一片空间，相当于变量a有两个空间，一个在func2中（ -4(%rbp) ），一个在func1中（ -20(%rbp) ）。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">func1</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a</span>){</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">a</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">3</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">func2</span>(){</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a=</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">func1</span>(<span style="color: rgb(184, 191, 198);">a</span>);</p>
+<p>}</p>
+<p><span style="color: rgb(125, 244, 106);">func1:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> %<span style="color: rgb(159, 186, 213);">edi</span>, -20(%<span style="color: rgb(28, 198, 133);">rbp</span>) <span style="color: rgb(218, 146, 74);"># 将a的值放入func1的栈帧中</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $3, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>) <span style="color: rgb(218, 146, 74);"># 将3放入rbp中，为何这里不是-20(%rbp)中呢？这时因为我们已经修改了变量a的值，这时变量a只不过代表了一个空间而已，这个空间可以不是-20(%rbp)，这个地址只是保存传入参数而已</span></p>
+<p><span style="color: rgb(200, 143, 208);">popq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p>​</p>
+<p><span style="color: rgb(125, 244, 106);">func2:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">subq</span> $16, %<span style="color: rgb(28, 198, 133);">rsp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $1, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> -4(%<span style="color: rgb(28, 198, 133);">rbp</span>), %<span style="color: rgb(159, 186, 213);">eax</span> <span style="color: rgb(218, 146, 74);"># 将a的值放入eax寄存器</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> %<span style="color: rgb(159, 186, 213);">eax</span>, %<span style="color: rgb(159, 186, 213);">edi</span> <span style="color: rgb(218, 146, 74);"># 将a的值放入edi寄存器</span></p>
+<p><span style="color: rgb(200, 143, 208);">call</span> <span style="color: rgb(200, 143, 208);">func1</span></p>
+<p><span style="color: rgb(200, 143, 208);">leave</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p><br></p></p>
+</body>
+</html>

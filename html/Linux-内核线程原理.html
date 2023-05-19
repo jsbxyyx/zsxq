@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux 内核线程原理</h1>
+<p>2022-07-15T08:22:11.218+0800</p>
+<p><p>何为线程？何为进程？这里不在赘述，一言以蔽之：共享资源的进程，PCB均为 task_struct，我们在混沌学堂说过：进程也好，线程也好对于CPU来说，就是一段指令流，而我们今天分析的内核线程，便是一段只执行内核中代码的指令流，它也拥有task_struct pcb结构，但是它不会执行任何用户空间的代码，当它被调度执行时，运行的代码是Linux内核的代码。</p>
+<p><strong>kernel_thread 函数</strong></p>
+<p>当内核启动时，将会执行rest_init 函数，在该函数将创建一个内核线程 init ，它将负责进一步初始化操作系统并执行init 1号进程执行初始化程序，这里我们无需过多了解启动后执行的流程，把关注点放在内核线程上。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">rest_init</span>(<span style="color: rgb(28, 198, 133);">void</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">kernel_thread</span>(<span style="color: rgb(184, 191, 198);">init</span>, <span style="color: rgb(184, 191, 198);">NULL</span>, <span style="color: rgb(184, 191, 198);">CLONE_KERNEL</span>); <span style="color: rgb(218, 146, 74);">// init 表示函数指针，也即内核进程执行的IP，NULL 表示没有传递参数， CLONE_KERNEL 标志位用于传递 内核线程共享的数据：FS 文件系统信息、FILES 打开文件信息、SIGHAND 信号及处理函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unlock_kernel</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cpu_idle</span>();</p>
+<p>}</p>
+<p><span style="color: rgb(183, 179, 179);">#define CLONE_KERNEL (CLONE_FS | CLONE_FILES | CLONE_SIGHAND) </span><span style="color: rgb(218, 146, 74);">// 内核线程标志位</span></p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">kernel_thread</span>(<span style="color: rgb(28, 198, 133);">int</span> (<span style="color: rgb(184, 191, 198);">*fn</span>)(<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span>), <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span> <span style="color: rgb(184, 191, 198);">arg</span>, <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">flags</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(141, 141, 240);">regs</span>; <span style="color: rgb(218, 146, 74);">// 保存进程 CPU 上下文中寄存器信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">memset</span>(<span style="color: rgb(184, 191, 198);">&amp;regs</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">regs</span>)); <span style="color: rgb(218, 146, 74);">// 初始化 pt_regs 内存</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">ebx</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span>) <span style="color: rgb(184, 191, 198);">fn</span>; <span style="color: rgb(218, 146, 74);">// 执行函数指针保存到ebx中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">edx</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span>) <span style="color: rgb(184, 191, 198);">arg</span>; <span style="color: rgb(218, 146, 74);">// 参数指针保存在edx中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">xds</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">__USER_DS</span>; <span style="color: rgb(218, 146, 74);">// 用户数据段 选择子 </span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">xes</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">__USER_DS</span>; <span style="color: rgb(218, 146, 74);">// 用户数据段 选择子 </span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">orig_eax</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">eip</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span>) <span style="color: rgb(184, 191, 198);">kernel_thread_helper</span>; <span style="color: rgb(218, 146, 74);">// 内核线程的起始代码为 kernel_thread_helper 函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">xcs</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">__KERNEL_CS</span>; <span style="color: rgb(218, 146, 74);">// 内核代码段 选择子</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">eflags</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0x286</span>; <span style="color: rgb(218, 146, 74);">// 为什么是这样？读者自己打开 intel 手册 一看便知</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 最后调用 do_fork 函数完成 创建（在混沌学堂的道友是不是发现：万物归一）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">do_fork</span>(<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_VM</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_UNTRACED</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">&amp;regs</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">NULL</span>, <span style="color: rgb(184, 191, 198);">NULL</span>);</p>
+<p>}</p>
+<p><strong>do_fork 函数</strong></p>
+<p>该函数较为复杂，均是创建 控制块 task_struct ，然后设置其参数，我们这里主要跟踪上述的 flags 和 regs 中设置的对应值处理即可（注意：由于内核中不区分 进程与线程，所以这里统一一进程描述，各位只需要知道这里描述的为内核线程即可）。</p>
+<p><span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">do_fork</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">clone_flags</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">stack_start</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(184, 191, 198);">*regs</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">stack_size</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*parent_tidptr</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*child_tidptr</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*p</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">pid</span>; <span style="color: rgb(218, 146, 74);">// 进程 id </span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">copy_process</span>(<span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(184, 191, 198);">stack_start</span>, <span style="color: rgb(184, 191, 198);">regs</span>, <span style="color: rgb(184, 191, 198);">stack_size</span>, <span style="color: rgb(184, 191, 198);">parent_tidptr</span>, <span style="color: rgb(184, 191, 198);">child_tidptr</span>); <span style="color: rgb(218, 146, 74);">// 完成实际控制块创建</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">IS_ERR</span>(<span style="color: rgb(184, 191, 198);">p</span>) <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">PTR_ERR</span>(<span style="color: rgb(184, 191, 198);">p</span>) : <span style="color: rgb(184, 191, 198);">p-&gt;pid</span>; <span style="color: rgb(218, 146, 74);">// 获取新进程的pid</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">pid</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">copy_process</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">clone_flags</span>,</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">stack_start</span>,</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(184, 191, 198);">*regs</span>,</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">stack_size</span>,</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*parent_tidptr</span>,</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*child_tidptr</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*p</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">dup_task_struct</span>(<span style="color: rgb(184, 191, 198);">current</span>);&nbsp;<span style="color: rgb(218, 146, 74);">// 创建 task_struct 并复制当前 task_struct 中的数据，同时在这里创建了内核栈</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">copy_files</span>(<span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(184, 191, 198);">p</span>))) <span style="color: rgb(218, 146, 74);">// 处理 打开文件信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">bad_fork_cleanup_semundo</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">copy_fs</span>(<span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(184, 191, 198);">p</span>))) <span style="color: rgb(218, 146, 74);">// 处理 文件系统信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">bad_fork_cleanup_files</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">copy_sighand</span>(<span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(184, 191, 198);">p</span>))) <span style="color: rgb(218, 146, 74);">// 处理 信号处理函数信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">bad_fork_cleanup_fs</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">copy_mm</span>(<span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(184, 191, 198);">p</span>))) <span style="color: rgb(218, 146, 74);">// 处理 内存信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">bad_fork_cleanup_signal</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">copy_thread</span>(<span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(184, 191, 198);">stack_start</span>, <span style="color: rgb(184, 191, 198);">stack_size</span>, <span style="color: rgb(184, 191, 198);">p</span>, <span style="color: rgb(184, 191, 198);">regs</span>); <span style="color: rgb(218, 146, 74);">// 处理进程CPU上下文 寄存器信息</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>copy_files 函数</strong></p>
+<p>该函数用于处理父进程打开文件fd的信息，我们看到对于内核线程来说，指定了 CLONE_FILES 标志位，所以这里与父进程共享打开文件。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">copy_files</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">tsk</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">files_struct</span> <span style="color: rgb(184, 191, 198);">*oldf</span>, <span style="color: rgb(184, 191, 198);">*newf</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">**old_fds</span>, <span style="color: rgb(184, 191, 198);">**new_fds</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">open_files</span>, <span style="color: rgb(184, 191, 198);">nfds</span>, <span style="color: rgb(184, 191, 198);">size</span>, <span style="color: rgb(184, 191, 198);">i</span>, <span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">oldf</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">current-&gt;files</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!oldf</span>) <span style="color: rgb(218, 146, 74);">// 父进程没有打开文件，那么直接返回（对于一些后台运行的进程来说，可能没有的打开文件）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">clone_flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">CLONE_FILES</span>) { <span style="color: rgb(218, 146, 74);">// 若设置 CLONE_FILES 标志位，那么直接增加父进程 files_struct 的引用计数即可，此时表明两者共享</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">atomic_inc</span>(<span style="color: rgb(184, 191, 198);">&amp;oldf-&gt;count</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 否则，给新进程创建新的 files_struct 然后复制信息</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>copy_fs 函数</strong></p>
+<p>该函数用于处理父进程文件系统的信息，我们看到对于内核线程来说，指定了 CLONE_FS 标志位，所以这里与父进程共享文件系统信息。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">inline</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">copy_fs</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">tsk</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">clone_flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">CLONE_FS</span>) { <span style="color: rgb(218, 146, 74);">// 若设置 CLONE_FS 标志位，那么直接增加父进程 fs_struct 的引用计数即可，此时表明两者共享</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">atomic_inc</span>(<span style="color: rgb(184, 191, 198);">&amp;current-&gt;fs-&gt;count</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;} <span style="color: rgb(218, 146, 74);">// 负创建新的fs_struct并将父进程的fs信息复制给子进程</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tsk-&gt;fs</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">__copy_fs_struct</span>(<span style="color: rgb(184, 191, 198);">current-&gt;fs</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!tsk-&gt;fs</span>) <span style="color: rgb(218, 146, 74);">// 创建失败，可能由于内存不足发生错误，那么返回异常信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-ENOMEM</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>}</p>
+<p><strong>copy_sighand 函数</strong></p>
+<p>该函数用于处理父进程信号处理函数的信息，我们看到对于内核线程来说，指定了 CLONE_SIGHAND 标志位，所以这里与父进程共享信号处理函数。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">inline</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">copy_sighand</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">tsk</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sighand_struct</span> <span style="color: rgb(184, 191, 198);">*sig</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">clone_flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> (<span style="color: rgb(184, 191, 198);">CLONE_SIGHAND</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_THREAD</span>)) { <span style="color: rgb(218, 146, 74);">// 若设置 CLONE_SIGHAND 或者 CLONE_THREAD 标志位，那么直接增加父进程 sighand_struct 的引用计数即可，此时表明两者共享</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">atomic_inc</span>(<span style="color: rgb(184, 191, 198);">&amp;current-&gt;sighand-&gt;count</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 否则分配新的 sighand_struct 结构，同时将父进程的信号处理函数复制到子进程中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sig</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">kmem_cache_alloc</span>(<span style="color: rgb(184, 191, 198);">sighand_cachep</span>, <span style="color: rgb(184, 191, 198);">GFP_KERNEL</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tsk-&gt;sighand</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sig</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!sig</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-ENOMEM</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 上锁并复制（避免进程的信号发生变换）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">spin_lock_init</span>(<span style="color: rgb(184, 191, 198);">&amp;sig-&gt;siglock</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">atomic_set</span>(<span style="color: rgb(184, 191, 198);">&amp;sig-&gt;count</span>, <span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">memcpy</span>(<span style="color: rgb(184, 191, 198);">sig-&gt;action</span>, <span style="color: rgb(184, 191, 198);">current-&gt;sighand-&gt;action</span>, <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">sig-&gt;action</span>));</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>}</p>
+<p><strong>copy_mm 函数</strong></p>
+<p>该函数用于处理父进程内存信息，我们看到对于内核线程来说，指定了 CLONE_VM 标志位，所以这里与父进程内存信息（毕竟内核线程们，都共享内核代码）。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">copy_mm</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">tsk</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">mm_struct</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">mm</span>, <span style="color: rgb(184, 191, 198);">*oldmm</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">retval</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">oldmm</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">current-&gt;mm</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!oldmm</span>) <span style="color: rgb(218, 146, 74);">// 当前进程没有内存信息，那么直接返回（这里可能是由于内核线程创建内核线程导致，因为对于内核线程来说，它不访问用户进程的空间，所以没有独立的mm，那么问题来了？内核访问自己的代码和数据肯定需要页表，这是由于CPU MMU 单元指定的，那么怎么做？很简单，直接用上一个用户进程的mm结构，用它的页表，因为所有用户进程的内核页表部分都是一样的）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">clone_flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">CLONE_VM</span>) {&nbsp;<span style="color: rgb(218, 146, 74);">// 若设置 CLONE_VM 标志位，那么直接增加父进程 mm_struct 的引用计数即可，此时表明两者共享</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">atomic_inc</span>(<span style="color: rgb(184, 191, 198);">&amp;oldmm-&gt;mm_users</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">mm</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">oldmm</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">spin_unlock_wait</span>(<span style="color: rgb(184, 191, 198);">&amp;oldmm-&gt;page_table_lock</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">good_mm</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 否则，分配新的 mm_struct，并将父进程的 mm_struct 信息复制到子进程中</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>copy_thread 函数</strong></p>
+<p>该函数用于初始化子进程的CPU 上下文信息（寄存器），在linux 2.6的内核中，不在使用TSS状态段描述符，混沌学堂的学员一定注意：进程的切换将由操作系统来完成，使用 thread_struct 结构来替代 tss_struct，此时将不再由CPU来完成切换了。源码描述如下。</p>
+<p><span style="color: rgb(183, 179, 179);">#define THREAD_SIZE (2*PAGE_SIZE) </span><span style="color: rgb(218, 146, 74);">// i386 中内核进程栈大小为2页（一页4KB）</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 替代tss，将进程的上下文信息保存在此（其他通用寄存器保存在内核栈）</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">thread_struct</span> {</p>
+<p><span style="color: rgb(218, 146, 74);">/* cached TLS descriptors. */</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">desc_struct</span> <span style="color: rgb(141, 141, 240);">tls_array</span>[<span style="color: rgb(184, 191, 198);">GDT_ENTRY_TLS_ENTRIES</span>];</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">esp0</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">eip</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">esp</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">fs</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">gs</span>;</p>
+<p><span style="color: rgb(218, 146, 74);">/* Hardware debugging registers */</span></p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">debugreg</span>[<span style="color: rgb(100, 171, 143);">8</span>];&nbsp;<span style="color: rgb(218, 146, 74);">/* %%db0-7 debug registers */</span></p>
+<p><span style="color: rgb(218, 146, 74);">/* fault info */</span></p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">cr2</span>, <span style="color: rgb(184, 191, 198);">trap_no</span>, <span style="color: rgb(184, 191, 198);">error_code</span>;</p>
+<p><span style="color: rgb(218, 146, 74);">/* floating point info */</span></p>
+<p><span style="color: rgb(200, 143, 208);">union</span> <span style="color: rgb(184, 191, 198);">i387_union</span> <span style="color: rgb(184, 191, 198);">i387</span>;</p>
+<p><span style="color: rgb(218, 146, 74);">/* virtual 86 mode info */</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">vm86_struct</span> <span style="color: rgb(141, 141, 240);">__user</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">vm86_info</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">screen_bitmap</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">v86flags</span>, <span style="color: rgb(184, 191, 198);">v86mask</span>, <span style="color: rgb(184, 191, 198);">saved_esp0</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">saved_fs</span>, <span style="color: rgb(184, 191, 198);">saved_gs</span>;</p>
+<p><span style="color: rgb(218, 146, 74);">/* IO permissions */</span></p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">io_bitmap_ptr</span>;</p>
+<p>};</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">copy_thread</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nr</span>, <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">esp</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">unused</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">p</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">regs</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">childregs</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*tsk</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">childregs</span> <span style="color: rgb(184, 191, 198);">=</span> ((<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(184, 191, 198);">*</span>) (<span style="color: rgb(184, 191, 198);">THREAD_SIZE</span> <span style="color: rgb(184, 191, 198);">+</span> (<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span>) <span style="color: rgb(184, 191, 198);">p-&gt;thread_info</span>)) <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(100, 171, 143);">1</span>; <span style="color: rgb(218, 146, 74);">// 首先将子进程的寄存器信息放置在进程栈的栈顶（struct thread_info 结构将放置在内核栈的栈底）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">struct_cpy</span>(<span style="color: rgb(184, 191, 198);">childregs</span>, <span style="color: rgb(184, 191, 198);">regs</span>); <span style="color: rgb(218, 146, 74);">// 将参数复制到指针指向的内存中（注意：我们在内核线程创建中放入寄存器值都会在该内存中）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">childregs-&gt;eax</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(218, 146, 74);">// 子进程的返回值为0</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">childregs-&gt;esp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">esp</span>; <span style="color: rgb(218, 146, 74);">// 设置子进程栈指针</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p-&gt;thread</span>.<span style="color: rgb(184, 191, 198);">esp</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span>) <span style="color: rgb(184, 191, 198);">childregs</span>; <span style="color: rgb(218, 146, 74);">// 将子进程的用户态栈指针指向childregs地址，也即内核栈的栈顶</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p-&gt;thread</span>.<span style="color: rgb(184, 191, 198);">esp0</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span>) (<span style="color: rgb(184, 191, 198);">childregs+</span><span style="color: rgb(100, 171, 143);">1</span>);&nbsp;<span style="color: rgb(218, 146, 74);">// 将子进程的内核态栈指针指向寄存器参数列表后的地址</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p-&gt;thread</span>.<span style="color: rgb(184, 191, 198);">eip</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span>) <span style="color: rgb(184, 191, 198);">ret_from_fork</span>; <span style="color: rgb(218, 146, 74);">// 设置返回IP 为 ret_from_fork</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>ret_from_fork 函数</strong></p>
+<p>该函数将会在进程在被调度执行时，执行的代码（当完成fork后，父进程负责将子进程的状态设置为RUNNABLE状态，同时将其放入就绪队列中（run_queue），然后由调度器调度执行，在上面我们看到ip设置的地址为该函数，所以这是一个执行的代码）特别注意：此时运行的代码为子进程的代码。源码如下。</p>
+<p><span style="color: rgb(218, 146, 74);">// 保存在进程内核栈底的结构，我们可以根据内核栈和该结构获取到进程的PCB ：task_struct</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">thread_info</span> {</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*task</span>; <span style="color: rgb(218, 146, 74);">/* main task structure */</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">exec_domain</span> <span style="color: rgb(184, 191, 198);">*exec_domain</span>; <span style="color: rgb(218, 146, 74);">/* execution domain */</span></p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">flags</span>; <span style="color: rgb(218, 146, 74);">/* low level flags */</span></p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">status</span>; <span style="color: rgb(218, 146, 74);">/* thread-synchronous flags */</span></p>
+<p><span style="color: rgb(184, 191, 198);">__u32</span> <span style="color: rgb(184, 191, 198);">cpu</span>; <span style="color: rgb(218, 146, 74);">/* current CPU */</span></p>
+<p><span style="color: rgb(184, 191, 198);">__s32</span> <span style="color: rgb(184, 191, 198);">preempt_count</span>; <span style="color: rgb(218, 146, 74);">/* 0 =&gt; preemptable, &lt;0 =&gt; BUG */</span></p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">mm_segment_t</span> <span style="color: rgb(184, 191, 198);">addr_limit</span>; <span style="color: rgb(218, 146, 74);">/* thread address space:</span></p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">0-0xBFFFFFFF for user-thead</span></p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">0-0xFFFFFFFF for kernel-thread</span></p>
+<p><span style="color: rgb(218, 146, 74);">*/</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">restart_block</span>&nbsp;&nbsp;<span style="color: rgb(141, 141, 240);">restart_block</span>;</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">__u8</span> <span style="color: rgb(184, 191, 198);">supervisor_stack</span>[<span style="color: rgb(100, 171, 143);">0</span>];</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">ENTRY</span>(<span style="color: rgb(184, 191, 198);">ret_from_fork</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">pushl</span> <span style="color: rgb(184, 191, 198);">%eax</span> <span style="color: rgb(218, 146, 74);">// 保存返回值 0 </span></p>
+<p><span style="color: rgb(184, 191, 198);">call</span> <span style="color: rgb(184, 191, 198);">schedule_tail</span> <span style="color: rgb(218, 146, 74);">// 调用schedule_tail函数，该函数主要完成一些清理操作了解即可</span></p>
+<p><span style="color: rgb(141, 141, 240);">GET_THREAD_INFO</span>(<span style="color: rgb(184, 191, 198);">%ebp</span>) <span style="color: rgb(218, 146, 74);">// 获取当前进程 thread_info 指针，将其保存在 ebp 中</span></p>
+<p><span style="color: rgb(184, 191, 198);">popl</span> <span style="color: rgb(184, 191, 198);">%eax</span> <span style="color: rgb(218, 146, 74);">// 弹出上面保存的返回值 0</span></p>
+<p><span style="color: rgb(184, 191, 198);">jmp</span> <span style="color: rgb(184, 191, 198);">syscall_exit</span> <span style="color: rgb(218, 146, 74);">// 跳转到该函数退出系统调用</span></p>
+<p><strong>syscall_exit 函数</strong></p>
+<p>该函数用于从系统调用返回，可以看到，这里将上述保存的pt_regs的值弹出到寄存器中，此时完成了对内核线程的创建。源码如下。为了方便，这里将上面设置函数放到这里。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">kernel_thread</span>(<span style="color: rgb(28, 198, 133);">int</span> (<span style="color: rgb(184, 191, 198);">*fn</span>)(<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span>), <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span> <span style="color: rgb(184, 191, 198);">arg</span>, <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">flags</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(141, 141, 240);">regs</span>; <span style="color: rgb(218, 146, 74);">// 保存进程 CPU 上下文中寄存器信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">memset</span>(<span style="color: rgb(184, 191, 198);">&amp;regs</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">regs</span>)); <span style="color: rgb(218, 146, 74);">// 初始化 pt_regs 内存</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">ebx</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span>) <span style="color: rgb(184, 191, 198);">fn</span>; <span style="color: rgb(218, 146, 74);">// 执行函数指针保存到ebx中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">edx</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span>) <span style="color: rgb(184, 191, 198);">arg</span>; <span style="color: rgb(218, 146, 74);">// 参数指针保存在edx中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">xds</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">__USER_DS</span>; <span style="color: rgb(218, 146, 74);">// 用户数据段 选择子 </span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">xes</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">__USER_DS</span>; <span style="color: rgb(218, 146, 74);">// 用户数据段 选择子 </span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">orig_eax</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">eip</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span>) <span style="color: rgb(184, 191, 198);">kernel_thread_helper</span>; <span style="color: rgb(218, 146, 74);">// 内核线程的起始代码为 kernel_thread_helper 函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">xcs</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">__KERNEL_CS</span>; <span style="color: rgb(218, 146, 74);">// 内核代码段 选择子</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">eflags</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0x286</span>; <span style="color: rgb(218, 146, 74);">// 为什么是这样？读者自己打开 intel 手册 一看便知</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 最后调用 do_fork 函数完成 创建（在混沌学堂的道友是不是发现：万物归一）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">do_fork</span>(<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_VM</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">CLONE_UNTRACED</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">&amp;regs</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">NULL</span>, <span style="color: rgb(184, 191, 198);">NULL</span>);</p>
+<p>}</p>
+<p><span style="color: rgb(183, 179, 179);">#define _TIF_ALLWORK_MASK 0x0000FFFF </span><span style="color: rgb(218, 146, 74);">// mask 掩码，混沌学堂学员参考：与运算的作用？</span></p>
+<p><span style="color: rgb(184, 191, 198);">syscall_exit</span>:</p>
+<p><span style="color: rgb(184, 191, 198);">cli</span> <span style="color: rgb(218, 146, 74);">// 关闭中断响应 </span></p>
+<p><span style="color: rgb(184, 191, 198);">movl</span> <span style="color: rgb(141, 141, 240);">TI_FLAGS</span>(<span style="color: rgb(184, 191, 198);">%ebp</span>), <span style="color: rgb(184, 191, 198);">%ecx</span> <span style="color: rgb(218, 146, 74);">// 将thread_info 中的 flags 变量保存到 ecx 中</span></p>
+<p><span style="color: rgb(184, 191, 198);">testw</span> <span style="color: rgb(184, 191, 198);">$_TIF_ALLWORK_MASK</span>, <span style="color: rgb(184, 191, 198);">%cx</span> <span style="color: rgb(218, 146, 74);">// 看看是否有其他未完成的工作（ecx的低16位用于保存需要完成的操作位）</span></p>
+<p><span style="color: rgb(184, 191, 198);">jne</span> <span style="color: rgb(184, 191, 198);">syscall_exit_work</span> <span style="color: rgb(218, 146, 74);">// 若存在未处理的工作，那么跳转到 syscall_exit_work 完成处理（我们这里了解即可，这里面关注到信号、重调度等处理，后面在混沌学堂中分析）</span></p>
+<p><span style="color: rgb(184, 191, 198);">restore_all</span>:</p>
+<p><span style="color: rgb(184, 191, 198);">RESTORE_ALL</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p><span style="color: rgb(218, 146, 74);">// 还原保存的寄存器</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define RESTORE_ALL </span></p>
+<p><span style="color: rgb(184, 191, 198);">RESTORE_REGS</span></p>
+<p><span style="color: rgb(184, 191, 198);">addl</span> <span style="color: rgb(184, 191, 198);">$4</span>, <span style="color: rgb(184, 191, 198);">%esp</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">iret</span>; <span style="color: rgb(218, 146, 74);">// 从中断返回 </span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 还原通用寄存器</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define RESTORE_INT_REGS </span></p>
+<p><span style="color: rgb(184, 191, 198);">popl</span> <span style="color: rgb(184, 191, 198);">%ebx</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">popl</span> <span style="color: rgb(184, 191, 198);">%ecx</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">popl</span> <span style="color: rgb(184, 191, 198);">%edx</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">popl</span> <span style="color: rgb(184, 191, 198);">%esi</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">popl</span> <span style="color: rgb(184, 191, 198);">%edi</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">popl</span> <span style="color: rgb(184, 191, 198);">%ebp</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">popl</span> <span style="color: rgb(184, 191, 198);">%eax</span></p>
+<p>​</p>
+<p><span style="color: rgb(183, 179, 179);">#define RESTORE_REGS </span></p>
+<p><span style="color: rgb(184, 191, 198);">RESTORE_INT_REGS</span>;</p>
+<p><span style="color: rgb(100, 171, 143);">1</span>: <span style="color: rgb(184, 191, 198);">popl</span> <span style="color: rgb(184, 191, 198);">%ds</span>; <span style="color: rgb(218, 146, 74);">// 还原数据段寄存器</span></p>
+<p><span style="color: rgb(100, 171, 143);">2</span>: <span style="color: rgb(184, 191, 198);">popl</span> <span style="color: rgb(184, 191, 198);">%es</span>; <span style="color: rgb(218, 146, 74);">// 还原扩展段寄存器</span></p>
+<p><strong>kernel_thread_helper 函数</strong></p>
+<p>该函数将会把ebx中保存的实际调用函数设置到eip中，完成函数的调用。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">extern</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">kernel_thread_helper</span>(<span style="color: rgb(28, 198, 133);">void</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">__asm__</span>(<span style="color: rgb(210, 107, 107);">".align 4\n"</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"kernel_thread_helper:\n\t"</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"movl %edx,%eax\n\t"</span> <span style="color: rgb(218, 146, 74);">// 将函数参数指针放入到eax中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"pushl %edx\n\t"</span> <span style="color: rgb(218, 146, 74);">// 弹出edx</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"call *%ebx\n\t"</span> <span style="color: rgb(218, 146, 74);">// 调用函数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"pushl %eax\n\t"</span> <span style="color: rgb(218, 146, 74);">// 将函数指针压入栈中，因为在 do_exit 中将会用到该参数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"call do_exit"</span>);</p>
+<p>​</p>
+<p><br></p></p>
+</body>
+</html>

@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理十九 通道处理详细设计要领</h1>
+<p>2022-05-13T08:15:38.539+0800</p>
+<p><p><strong>使用实例</strong></p>
+<p>我们来看一个实例：</p>
+<ol>
+ <li>定义了一个服务端用于处理Http请求的服务端</li>
+ <li>在childHandler(new HttpHelloWorldServerInitializer(sslCtx)) 中配置了用于处理客户端数据的操作</li>
+ <li>在HttpHelloWorldServerHandler中接收配置的通道处理器对客户端的Http请求信息的处理结果，进行业务处理，然后封装Http响应信息写入到通道中</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">HttpHelloWorldServer</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">SSL</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">getProperty</span>(<span style="color: rgb(210, 107, 107);">"ssl"</span>) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">PORT</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(28, 198, 133);">Integer</span>.<span style="color: rgb(184, 191, 198);">parseInt</span>(<span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">getProperty</span>(<span style="color: rgb(210, 107, 107);">"port"</span>, <span style="color: rgb(184, 191, 198);">SSL?</span> <span style="color: rgb(210, 107, 107);">"8443"</span> : <span style="color: rgb(210, 107, 107);">"8080"</span>));</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">main</span>(<span style="color: rgb(28, 198, 133);">String</span>[] <span style="color: rgb(184, 191, 198);">args</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 配置 SSL.</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">SslContext</span> <span style="color: rgb(184, 191, 198);">sslCtx</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">SSL</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SelfSignedCertificate</span> <span style="color: rgb(184, 191, 198);">ssc</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">SelfSignedCertificate</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sslCtx</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SslContextBuilder</span>.<span style="color: rgb(184, 191, 198);">forServer</span>(<span style="color: rgb(184, 191, 198);">ssc</span>.<span style="color: rgb(184, 191, 198);">certificate</span>(), <span style="color: rgb(184, 191, 198);">ssc</span>.<span style="color: rgb(184, 191, 198);">privateKey</span>()).<span style="color: rgb(184, 191, 198);">build</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sslCtx</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 配置服务器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventLoopGroup</span> <span style="color: rgb(184, 191, 198);">bossGroup</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NioEventLoopGroup</span>(<span style="color: rgb(100, 171, 143);">1</span>);&nbsp;<span style="color: rgb(218, 146, 74);">// 主事件循环组（用于接收客户端连接）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventLoopGroup</span> <span style="color: rgb(184, 191, 198);">workerGroup</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NioEventLoopGroup</span>(); <span style="color: rgb(218, 146, 74);">// 工作事件循环组（前面我们看到过默认的数量为：CPU 核心数 * 2）将每个接收到的连接绑定到工作事件循环组中的线程，之后所有的该连接的操作都由该线程来完成，保证了线程安全（参考之前对于事件循环组的原理）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ServerBootstrap</span> <span style="color: rgb(184, 191, 198);">b</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ServerBootstrap</span>(); <span style="color: rgb(218, 146, 74);">// 服务端 启动器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">b</span>.<span style="color: rgb(184, 191, 198);">option</span>(<span style="color: rgb(184, 191, 198);">ChannelOption</span>.<span style="color: rgb(184, 191, 198);">SO_BACKLOG</span>, <span style="color: rgb(100, 171, 143);">1024</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">b</span>.<span style="color: rgb(184, 191, 198);">group</span>(<span style="color: rgb(184, 191, 198);">bossGroup</span>, <span style="color: rgb(184, 191, 198);">workerGroup</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">channel</span>(<span style="color: rgb(184, 191, 198);">NioServerSocketChannel</span>.<span style="color: rgb(200, 143, 208);">class</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">handler</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">LoggingHandler</span>(<span style="color: rgb(184, 191, 198);">LogLevel</span>.<span style="color: rgb(184, 191, 198);">INFO</span>))</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">childHandler</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">HttpHelloWorldServerInitializer</span>(<span style="color: rgb(184, 191, 198);">sslCtx</span>)); <span style="color: rgb(218, 146, 74);">// 看这里（重点）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 绑定接收客户端端口</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">ch</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">b</span>.<span style="color: rgb(184, 191, 198);">bind</span>(<span style="color: rgb(184, 191, 198);">PORT</span>).<span style="color: rgb(184, 191, 198);">sync</span>().<span style="color: rgb(184, 191, 198);">channel</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">err</span>.<span style="color: rgb(184, 191, 198);">println</span>(<span style="color: rgb(210, 107, 107);">"Open your web browser and navigate to "</span> <span style="color: rgb(184, 191, 198);">+</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(<span style="color: rgb(184, 191, 198);">SSL?</span> <span style="color: rgb(210, 107, 107);">"https"</span> : <span style="color: rgb(210, 107, 107);">"http"</span>) <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">"://127.0.0.1:"</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">PORT</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">'/'</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">closeFuture</span>().<span style="color: rgb(184, 191, 198);">sync</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">bossGroup</span>.<span style="color: rgb(184, 191, 198);">shutdownGracefully</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">workerGroup</span>.<span style="color: rgb(184, 191, 198);">shutdownGracefully</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 通道初始化</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">HttpHelloWorldServerInitializer</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ChannelInitializer&lt;SocketChannel&gt;</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">SslContext</span> <span style="color: rgb(184, 191, 198);">sslCtx</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">HttpHelloWorldServerInitializer</span>(<span style="color: rgb(184, 191, 198);">SslContext</span> <span style="color: rgb(184, 191, 198);">sslCtx</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">sslCtx</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sslCtx</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 对接收到的客户端连接的SocketChannel配置通道处理器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">initChannel</span>(<span style="color: rgb(184, 191, 198);">SocketChannel</span> <span style="color: rgb(184, 191, 198);">ch</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ChannelPipeline</span> <span style="color: rgb(184, 191, 198);">p</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">pipeline</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">sslCtx</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(184, 191, 198);">sslCtx</span>.<span style="color: rgb(184, 191, 198);">newHandler</span>(<span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">alloc</span>()));</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">HttpRequestDecoder</span>()); <span style="color: rgb(218, 146, 74);">// Netty 自带解析Http请求的处理</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">HttpResponseEncoder</span>()); <span style="color: rgb(218, 146, 74);">// Netty 自带编码Http信息的处理</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">HttpObjectAggregator</span>(<span style="color: rgb(100, 171, 143);">2000</span>));<span style="color: rgb(218, 146, 74);">// Netty 自带聚合从Http中读取到的数据，提供统一数据（比如：HttpMessage（Http头部）、HttpContent（Http内容））</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">HttpHelloWorldServerHandler</span>()); <span style="color: rgb(218, 146, 74);">// 业务处理器</span></p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 业务处理器</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">HttpHelloWorldServerHandler</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ChannelInboundHandlerAdapter</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">byte</span>[] <span style="color: rgb(184, 191, 198);">CONTENT</span> <span style="color: rgb(184, 191, 198);">=</span> { <span style="color: rgb(210, 107, 107);">'H'</span>, <span style="color: rgb(210, 107, 107);">'e'</span>, <span style="color: rgb(210, 107, 107);">'l'</span>, <span style="color: rgb(210, 107, 107);">'l'</span>, <span style="color: rgb(210, 107, 107);">'o'</span>, <span style="color: rgb(210, 107, 107);">' '</span>, <span style="color: rgb(210, 107, 107);">'W'</span>, <span style="color: rgb(210, 107, 107);">'o'</span>, <span style="color: rgb(210, 107, 107);">'r'</span>, <span style="color: rgb(210, 107, 107);">'l'</span>, <span style="color: rgb(210, 107, 107);">'d'</span> };</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AsciiString</span> <span style="color: rgb(184, 191, 198);">CONTENT_TYPE</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AsciiString</span>(<span style="color: rgb(210, 107, 107);">"Content-Type"</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AsciiString</span> <span style="color: rgb(184, 191, 198);">CONTENT_LENGTH</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AsciiString</span>(<span style="color: rgb(210, 107, 107);">"Content-Length"</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AsciiString</span> <span style="color: rgb(184, 191, 198);">CONNECTION</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AsciiString</span>(<span style="color: rgb(210, 107, 107);">"Connection"</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AsciiString</span> <span style="color: rgb(184, 191, 198);">KEEP_ALIVE</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AsciiString</span>(<span style="color: rgb(210, 107, 107);">"keep-alive"</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 读取完成所有客户端数据后，将响应信息写入客户端</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelReadComplete</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">flush</span>();</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelRead</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>, <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">msg</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">msg</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">HttpRequest</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">HttpRequest</span> <span style="color: rgb(184, 191, 198);">req</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">HttpRequest</span>) <span style="color: rgb(184, 191, 198);">msg</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">HttpUtil</span>.<span style="color: rgb(184, 191, 198);">is100ContinueExpected</span>(<span style="color: rgb(184, 191, 198);">req</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">write</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultFullHttpResponse</span>(<span style="color: rgb(184, 191, 198);">HTTP_1_1</span>, <span style="color: rgb(184, 191, 198);">CONTINUE</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">keepAlive</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">HttpUtil</span>.<span style="color: rgb(184, 191, 198);">isKeepAlive</span>(<span style="color: rgb(184, 191, 198);">req</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 包装 Http 响应体</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">FullHttpResponse</span> <span style="color: rgb(184, 191, 198);">response</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultFullHttpResponse</span>(<span style="color: rgb(184, 191, 198);">HTTP_1_1</span>, <span style="color: rgb(184, 191, 198);">OK</span>, <span style="color: rgb(184, 191, 198);">Unpooled</span>.<span style="color: rgb(184, 191, 198);">wrappedBuffer</span>(<span style="color: rgb(184, 191, 198);">CONTENT</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">response</span>.<span style="color: rgb(184, 191, 198);">headers</span>().<span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(184, 191, 198);">CONTENT_TYPE</span>, <span style="color: rgb(210, 107, 107);">"text/plain"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">response</span>.<span style="color: rgb(184, 191, 198);">headers</span>().<span style="color: rgb(184, 191, 198);">setInt</span>(<span style="color: rgb(184, 191, 198);">CONTENT_LENGTH</span>, <span style="color: rgb(184, 191, 198);">response</span>.<span style="color: rgb(184, 191, 198);">content</span>().<span style="color: rgb(184, 191, 198);">readableBytes</span>());</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!keepAlive</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">write</span>(<span style="color: rgb(184, 191, 198);">response</span>).<span style="color: rgb(184, 191, 198);">addListener</span>(<span style="color: rgb(184, 191, 198);">ChannelFutureListener</span>.<span style="color: rgb(184, 191, 198);">CLOSE</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">response</span>.<span style="color: rgb(184, 191, 198);">headers</span>().<span style="color: rgb(184, 191, 198);">set</span>(<span style="color: rgb(184, 191, 198);">CONNECTION</span>, <span style="color: rgb(184, 191, 198);">KEEP_ALIVE</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">write</span>(<span style="color: rgb(184, 191, 198);">response</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">exceptionCaught</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>, <span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cause</span>.<span style="color: rgb(184, 191, 198);">printStackTrace</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">close</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>设计推理</strong></p>
+<p>我们来对Netty的通道处理器来进行推理，因为混沌学习法的核心---推理+验证：</p>
+<ol>
+ <li>前面我们了解到Boss Group 和 Worker Group 分别用于接收来自客户端的连接 和 处理客户端的连接，为了保证操作Socket 的安全，我们将ServerSocketChannel唯一绑定到 BossGroup中的一个线程，接收到的SocketChannel保存到WorkerGroup中的线程，之后所有操作这些Socket的线程只能是它绑定的那一个事件循环组中的线程，而对于其他线程而言，想要操作这些Channel，那么只能向绑定这些Channel的线程提交Task并放入这些线程的队列中，由这些线程来处理</li>
+ <li>那么我们很容易得出处理流程：BossGroup中的某个线程唯一绑定了我们上述例子的 NioServerSocketChannel 的实例，当接收到客户端连接时，将会从ServerSocketChannel中创建出SocketChannel对象，那么考虑下，我能不能在ServerSocketChannel处理时对该通道做一些处理呢？当SocketChannel对象绑定到Worker Group 中的线程后，我们将可以读取客户端的数据，而我们不可能让用户直接处理这些来自客户端的原始数据（Java SE 的网络模块了解的同学应该知道：从SocketChannel中获取到的数据将是TCP/UDP 运输层的数据，不涉及到任何应用层协议）那么，我们就需要设计一个架构来处理这些数据，同时让使用Netty的开发者在Netty自带的应用层协议的处理下，轻松愉快的专注于业务开发，而不是对这些数据进行编码（响应客户端数据时）和解码（接收客户端数据时）</li>
+ <li>那么问题就很明显了：使用某种已经存在的设计模式，来完成对通道的原始数据（运输层）处理，同时也可以提供高度灵活的插拔模式让用户自定义自己的处理器来完成数据的处理，最关键的就是 ：让使用Netty的业务方脱离出对数据本身协议的处理：HTTP、PROTOBUF等等</li>
+</ol>
+<p>这时，我们很很容易的想到：责任链模式。我们可以将这些通道处理器形成一条流水线，让接收到的客户端数据，如流水般依次流过这些处理器，这样我们就可以让处理器本身与Netty的数据处理完全解耦，并且Netty的应用方，只需要按照顺序定义好流水线即可，Netty也可以实现很多现成的通道处理器提供给业务方使用。比如上述例子的：HttpRequestDecoder（Http协议解码器）、HttpResponseEncoder（Http协议编码器）、HttpObjectAggregator（Http协议聚合器），而对于业务方自身的业务Handler只需要放在编码器和解码器的中间，接收来自上游处理器已经解码的数据即可，处理完成后将数据发送给下游，下游将自动完成Http协议响应数据的封装，这样就完成了我们的需求目标。</p>
+<p><strong>实现架构</strong></p>
+<p>Netty中使用ChannelPipeline接口来定义Handler流水线，使用ChannelHandler接口来定义通道处理器，ChannelPipeline负责组合一系列的ChannelHandler实例，这些ChannelHandler实例共同完成对通道的输入数据处理。这时，我们不难发现有如下问题：</p>
+<ol>
+ <li>通道处理链我们可以使用链表来处理，那么由谁来维护链表呢？</li>
+ <li>是需要ChannelHandler接口的实现类来维护么？</li>
+ <li>调用链表中的下一个ChannelHandler的代码由谁来调用呢？</li>
+</ol>
+<p>自然，我们可以想到，将这些维护链表的方法和属性抽取出来，使用包装模式将ChannelHandler包装到实际处理这些事情的类中，实现两者的解耦，使用Netty的开发人员无需知道Netty的实现细节，只需要实现ChannelHandler接口完成自身的业务处理即可。这时，Netty使用ChannelHandlerContext 接口来描述ChannelPipeline流水线链表的元数据信息，同时在其中实现了传递流水线处理数据的方法。</p>
+<p>而对于ChannelHandler接口而言，我们知道数据的处理流向有两个：输入和输出，同样Netty将这两个不同流向的处理切分为两个子接口：ChannelInboundHandler、ChannelOutboundHandler，业务方可以根据需要处理的流向实现对应的接口完成自身的逻辑。</p>
+<p>Netty 的整体实现如下图所示，inbound输入事件由Inbound Handler 输入处理器按照自底向上的方向处理。 Inbound Handler处理器通常处理上图底部的Netty 事件循环组I/O线程生成的输入数据，输入数据通常通过底层实际IO Socket的输入操作从远程对端读取得到，例如 SocketChannel.read(ByteBuffer) 方法将Socket中的输入数据读取到ByteBuffer缓冲区中，如果输入事件到了责任链顶部的Inbound Handler处理器仍未被处理，则会将其静默丢弃，或者在需要应用程序打开日志时将其记录下来。</p>
+<p>outbound输出事件由Outbound Handler 输出处理器按照自顶向下的方向处理，如图右侧所示。 Outbound Handler处理器通常生成或者转换输出到底层Socket IO的报文，比如：HTTP和其他自定义协议。 如果outbound输出事件流转到了底部Outbound Handler处理器，则由与 Channel 对象关联的Netty 事件循环 I/O线程处理，该I/O线程通常执行实际的输出操作，比如调用：SocketChannel.write(ByteBuffer) 将ByteBuffer中的数据写入到底层SocketChannel中传输给对端。</p>
+<p>例如我们可以定义如下责任链，在下面的例子中，名称以 Inbound 开头的类意味着它是一个Inbound Handler 输入处理器。名称以Outbound开头的类意味着它是一个Outbound Handler 输出处理器。 在给定的示例配置中，当读取数据事件发生时，处理顺序为：1、2、3、4、5。 当数据写出事件发生时，处理顺序为：5、4、 3 、2 、1。 在这个顺序上，ChannelPipeline流水线将会按照以下规则，来跳过对某些不必要的通道处理器来减少调用栈深度:</p>
+<ol>
+ <li>因为通道处理器3和4没有实现ChannelInboundHandler接口，因此一个读取数据事件的实际执行顺序为:1，2，5</li>
+ <li>因为通道处理器1和2没有实现ChannelOutboundHandler接口，因此一个写入数据事件的实际执行顺序为:5，4，3</li>
+ <li>因为通道处理器5同时实现 ChannelInboundHandler 和 ChannelOutboundHandler 接口，所以将会同时处理输入和输出事件</li>
+ <li>所以最终读取数据事件和写入数据事件分别为1、2、5和5、4、3</li>
+</ol>
+<p><span style="color: rgb(184, 191, 198);">ChannelPipeline</span> <span style="color: rgb(184, 191, 198);">p</span> <span style="color: rgb(184, 191, 198);">=</span> ...;</p>
+<p><span style="color: rgb(184, 191, 198);">p</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(210, 107, 107);">"1"</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">InboundHandlerA</span>());</p>
+<p><span style="color: rgb(184, 191, 198);">p</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(210, 107, 107);">"2"</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">InboundHandlerB</span>());</p>
+<p><span style="color: rgb(184, 191, 198);">p</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(210, 107, 107);">"3"</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">OutboundHandlerA</span>());</p>
+<p><span style="color: rgb(184, 191, 198);">p</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(210, 107, 107);">"4"</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">OutboundHandlerB</span>());</p>
+<p><span style="color: rgb(184, 191, 198);">p</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(210, 107, 107);">"5"</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">InboundOutboundHandlerX</span>());</p>
+<p>另外读者可能在图中看到：处理程序必须调用 ChannelHandlerContext 类中定义的事件传播方法（fireIN_EVT和OUT_EVT），将事件转发给它的下一个处理器。</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;I/O 请求，通过Channel对象或者ChannelHandlerContext对象调用</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>+---------------------------------------------------+---------------+</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ChannelPipeline&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\|/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;+---------------------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+-----------+----------+&nbsp;|</p>
+<p>|&nbsp;| Inbound Handler N |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| Outbound Handler 1 |&nbsp;|</p>
+<p>|&nbsp;+----------+----------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+-----------+----------+&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/|\&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\|/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;+----------+----------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+-----------+----------+&nbsp;|</p>
+<p>|&nbsp;| Inbound Handler N-1 |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| Outbound Handler 2 |&nbsp;|</p>
+<p>|&nbsp;+----------+----------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+-----------+----------+&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/|\&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>| ChannelHandlerContext.fireIN_EVT() ChannelHandlerContext.OUT_EVT()|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(153, 153, 119);">[</span>&nbsp;方法调用&nbsp;<span style="color: rgb(153, 153, 119);">]</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(153, 153, 119);">[</span> 方法调用&nbsp;<span style="color: rgb(153, 153, 119);">]</span>&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\|/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;+----------+----------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+-----------+----------+&nbsp;|</p>
+<p>|&nbsp;| Inbound Handler 2 |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| Outbound Handler M-1 |&nbsp;|</p>
+<p>|&nbsp;+----------+----------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+-----------+----------+&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/|\&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\|/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;+----------+----------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+-----------+----------+&nbsp;|</p>
+<p>|&nbsp;| Inbound Handler 1 |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| Outbound Handler M |&nbsp;|</p>
+<p>|&nbsp;+----------+----------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+-----------+----------+&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/|\&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>+---------------+-----------------------------------+---------------+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\|/</p>
+<p>+---------------+-----------------------------------+---------------+</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;<span style="color: rgb(153, 153, 119);">[</span> Socket.read() <span style="color: rgb(153, 153, 119);">]</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(153, 153, 119);">[</span> Socket.write() <span style="color: rgb(153, 153, 119);">]</span>&nbsp;&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>|&nbsp;&nbsp;&nbsp;Netty 事件循环线程完成对这些方法调用&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|</p>
+<p>+-------------------------------------------------------------------+</p>
+<p>这下，整体实现明了了：底层Socket读取到数据后将由ChannelPipeline自动调用用户定义的 ChannelInboundHandler 实例依次完成数据的处理，当数据处理完成时，用户将通过Channel对象或者ChannelHandlerContext对象调用writeX的方法将数据写入到通道中，此时将由ChannelPipeline自动调用用户定义的ChannelOutboundHandler 实例依次完成数据的处理，最后将这些处理好的数据写入到底层Socket中。</p>
+<p>那么按照我们上述描述的实现，那么必然存在一个头部处理器和尾部处理器。为何？读者想想：如果不存在这样的处理器，如何实现描述的定义：如果输入事件到了责任链顶部的Inbound Handler处理器仍未被处理，则会将其静默丢弃？输出事件到达最后需要执行实际的输出操作？这时，在Netty的DefaultChannelPipeline类中，存在如下两个特殊的ChannelHandler：HeadContext（处理输入事件和输出事件，输入事件将传递到链表中的第一个用户自定义的通道处理器，输出事件将调用Unsafe类完成实际通道的IO操作）。</p>
+<p><span style="color: rgb(218, 146, 74);">// 处理器链头部上下文</span></p>
+<p><span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">HeadContext</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractChannelHandlerContext</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">ChannelOutboundHandler</span>, <span style="color: rgb(184, 191, 198);">ChannelInboundHandler</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Unsafe</span> <span style="color: rgb(184, 191, 198);">unsafe</span>; <span style="color: rgb(218, 146, 74);">// 实现socket 底层的IO操作类</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 处理底层通道IO的读写操作</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">read</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unsafe</span>.<span style="color: rgb(184, 191, 198);">beginRead</span>();</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">write</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>, <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">msg</span>, <span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unsafe</span>.<span style="color: rgb(184, 191, 198);">write</span>(<span style="color: rgb(184, 191, 198);">msg</span>, <span style="color: rgb(184, 191, 198);">promise</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 通道的输入事件发生时，自动调用处理器链中的下一个处理器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelActive</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">fireChannelActive</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">readIfIsAutoRead</span>();</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelInactive</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">fireChannelInactive</span>();</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelRead</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>, <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">msg</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">fireChannelRead</span>(<span style="color: rgb(184, 191, 198);">msg</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelReadComplete</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">fireChannelReadComplete</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">readIfIsAutoRead</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 处理器链尾部上下文</span></p>
+<p><span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">TailContext</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractChannelHandlerContext</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">ChannelInboundHandler</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 所有输入事件，均不处理</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelRegistered</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> { }</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelUnregistered</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> { }</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelActive</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> { }</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelInactive</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> { }</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 捕捉到异常，或者输入事件的数据没有处理，那么调用onUnhandledInboundException方法，将资源释放并打印日志</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">exceptionCaught</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>, <span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">onUnhandledInboundException</span>(<span style="color: rgb(184, 191, 198);">cause</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelRead</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>, <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">msg</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">onUnhandledInboundMessage</span>(<span style="color: rgb(184, 191, 198);">msg</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 释放资源msg，并打印debug日志</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">onUnhandledInboundMessage</span>(<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">msg</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">debug</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"Discarded inbound message {} that reached at the tail of the pipeline. "</span> <span style="color: rgb(184, 191, 198);">+</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"Please check your pipeline configuration."</span>, <span style="color: rgb(184, 191, 198);">msg</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ReferenceCountUtil</span>.<span style="color: rgb(184, 191, 198);">release</span>(<span style="color: rgb(184, 191, 198);">msg</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>那么，我们继续思考：Netty 使用 ChannelInboundHandler 表示输入事件处理器，使用 ChannelOutboundHandler 表示输出事件处理器，那么这时我们需要实现一个特殊的处理器：编码和解码处理器，而对于这些处理器而言，它们包含公用的部分逻辑：输入缓冲区和输出缓冲区的操作，那么如何实现？在Netty中使用：ByteToMessageDecoder、MessageToMessageDecoder、MessageToMessageEncoder、MessageToByteEncoder 四个抽象类来表示这些编码和解码器。从字面上的意思很容易理解：ByteToMessageX 用于将字节数据转为对象。MessageToMessageX 用于将一个对象转为另一个对象。MessageToByteX 用于将对象转为字节数据。</p>
+<p><strong>细节分析</strong></p>
+<p>了解了上述的基本架构后，我们回到一开始的例子，来看看Netty内部对于例子中的通道处理器的具体实现。我们先来看handler(new LoggingHandler(LogLevel.INFO))。我们知道该handler将作为NioServerSocketChannel的处理器来完成对输入数据的处理，而LoggingHandler仅仅用于打印输入事件的日志。它将在哪里调用呢？通过源码我们知道，将会在ServerSocketChannel初始化时完成对该流水线的设置，同时我们看到一个特殊的ServerBootstrapAcceptor，它将负责接收来自客户端的连接，同时根据我们配置的HttpHelloWorldServerInitializer来完成流水线中的通道处理器定义。【作者：黄俊，微信：bx_java】</p>
+<p><span style="color: rgb(184, 191, 198);">ServerBootstrap</span> <span style="color: rgb(184, 191, 198);">b</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ServerBootstrap</span>();</p>
+<p><span style="color: rgb(184, 191, 198);">b</span>.<span style="color: rgb(184, 191, 198);">option</span>(<span style="color: rgb(184, 191, 198);">ChannelOption</span>.<span style="color: rgb(184, 191, 198);">SO_BACKLOG</span>, <span style="color: rgb(100, 171, 143);">1024</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">b</span>.<span style="color: rgb(184, 191, 198);">group</span>(<span style="color: rgb(184, 191, 198);">bossGroup</span>, <span style="color: rgb(184, 191, 198);">workerGroup</span>)</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">channel</span>(<span style="color: rgb(184, 191, 198);">NioServerSocketChannel</span>.<span style="color: rgb(200, 143, 208);">class</span>)</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">handler</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">LoggingHandler</span>(<span style="color: rgb(184, 191, 198);">LogLevel</span>.<span style="color: rgb(184, 191, 198);">INFO</span>))</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">childHandler</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">HttpHelloWorldServerInitializer</span>(<span style="color: rgb(184, 191, 198);">sslCtx</span>));</p>
+<p><span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">ch</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">b</span>.<span style="color: rgb(184, 191, 198);">bind</span>(<span style="color: rgb(184, 191, 198);">PORT</span>).<span style="color: rgb(184, 191, 198);">sync</span>().<span style="color: rgb(184, 191, 198);">channel</span>();</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ServerBootstrap</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractBootstrap&lt;ServerBootstrap</span>, <span style="color: rgb(184, 191, 198);">ServerChannel&gt;</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 绑定端口</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">bind</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">inetPort</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">bind</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">InetSocketAddress</span>(<span style="color: rgb(184, 191, 198);">inetPort</span>));</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">bind</span>(<span style="color: rgb(184, 191, 198);">SocketAddress</span> <span style="color: rgb(184, 191, 198);">localAddress</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">validate</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">localAddress</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"localAddress"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">doBind</span>(<span style="color: rgb(184, 191, 198);">localAddress</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">doBind</span>(<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">SocketAddress</span> <span style="color: rgb(184, 191, 198);">localAddress</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">regFuture</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">initAndRegister</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 完成ServerSocketChannel的创建和初始化</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">initAndRegister</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">channel</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">channel</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">channelFactory</span>.<span style="color: rgb(184, 191, 198);">newChannel</span>(); <span style="color: rgb(218, 146, 74);">// 将调用我们设置的NioServerSocketChannel完成对ServerSocketChannel通道的创建</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">init</span>(<span style="color: rgb(184, 191, 198);">channel</span>); <span style="color: rgb(218, 146, 74);">// 初始化通道</span></p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 使用ServerBootstrap对通道处理进行初始化</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">init</span>(<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">channel</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ChannelInitializer&lt;Channel&gt;</span>() { <span style="color: rgb(218, 146, 74);">// 设置ServerSocketChannel的通道处理器流水线</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">initChannel</span>(<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">ch</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelPipeline</span> <span style="color: rgb(184, 191, 198);">pipeline</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">pipeline</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ChannelHandler</span> <span style="color: rgb(184, 191, 198);">handler</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">config</span>.<span style="color: rgb(184, 191, 198);">handler</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">handler</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 将我们通过 .handler(new LoggingHandler(LogLevel.INFO)) 方法放入的日志处理器添加到流水线中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pipeline</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(184, 191, 198);">handler</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">eventLoop</span>().<span style="color: rgb(184, 191, 198);">execute</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Runnable</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pipeline</span>.<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ServerBootstrapAcceptor</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">currentChildGroup</span>, <span style="color: rgb(184, 191, 198);">currentChildHandler</span>, <span style="color: rgb(184, 191, 198);">currentChildOptions</span>, <span style="color: rgb(184, 191, 198);">currentChildAttrs</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}); <span style="color: rgb(218, 146, 74);">// 将ServerBootstrapAcceptor用于接收客户端连接的通道处理器放入流水线中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;});</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>我们接着来看ServerBootstrapAcceptor的实现。可以看到它为一个ChannelInboundHandler的实例，专用于处理输入事件。当客户端连接到来，时将会回调该处理器。通过源码我们看到：当输入事件发生时，也即客户端连接时，将在这里负责配置客户端通道流水线对象，将我们自定义的通道处理器childHandler放入其中。</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ServerBootstrapAcceptor</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ChannelInboundHandlerAdapter</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 客户端连接到来时，msg将表示SocketChannel对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelRead</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>, <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">msg</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">child</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">Channel</span>) <span style="color: rgb(184, 191, 198);">msg</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">child</span>.<span style="color: rgb(184, 191, 198);">pipeline</span>().<span style="color: rgb(184, 191, 198);">addLast</span>(<span style="color: rgb(184, 191, 198);">childHandler</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>那么这时我们来看例子中使用的几个通道处理器的定义。不难看出：HttpRequestDecoder为输入事件处理器、HttpResponseEncoder为输出事件处理器、HttpObjectAggregator用于聚合Http头部和消息体同样属于输入事件处理器。那么ChannelInitializer呢？也是一个输入处理器。但是我们看到其他的编码和解码器定义在HttpHelloWorldServerInitializer的initChannel方法中。那么不难看出，ChannelInitializer将用于初始化SocketChannel的流水线对象。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ChannelInitializer</span><span style="color: rgb(184, 191, 198);">&lt;C</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Channel&gt;</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ChannelInboundHandlerAdapter</span> {}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">HttpRequestDecoder</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">HttpObjectDecoder</span> {}</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">HttpObjectDecoder</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ByteToMessageDecoder</span> {}</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ByteToMessageDecoder</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ChannelInboundHandlerAdapter</span> {}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">HttpResponseEncoder</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">HttpObjectEncoder&lt;HttpResponse&gt;</span> {}</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">HttpObjectEncoder</span><span style="color: rgb(184, 191, 198);">&lt;H</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">HttpMessage&gt;</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">MessageToMessageEncoder&lt;</span><span style="color: rgb(28, 198, 133);">Object</span><span style="color: rgb(184, 191, 198);">&gt;</span> {}</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">MessageToMessageEncoder</span><span style="color: rgb(184, 191, 198);">&lt;I&gt;</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ChannelOutboundHandlerAdapter</span> {}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">HttpObjectAggregator</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">MessageAggregator&lt;HttpObject</span>, <span style="color: rgb(184, 191, 198);">HttpMessage</span>, <span style="color: rgb(184, 191, 198);">HttpContent</span>, <span style="color: rgb(184, 191, 198);">FullHttpMessage&gt;</span> {}</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">MessageAggregator</span><span style="color: rgb(184, 191, 198);">&lt;I</span>, <span style="color: rgb(184, 191, 198);">S</span>, <span style="color: rgb(184, 191, 198);">C</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ByteBufHolder</span>, <span style="color: rgb(184, 191, 198);">O</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ByteBufHolder&gt;</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">MessageToMessageDecoder&lt;I&gt;</span> {}</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">MessageToMessageDecoder</span><span style="color: rgb(184, 191, 198);">&lt;I&gt;</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ChannelInboundHandlerAdapter</span> {}</p>
+<p>那么最后一个问题来了：Netty何时处理ChannelInitializer呢？其实我们从定义都可以猜到了：由于它本身是一个输入事件处理器对象，肯定是某个输入事件触发了ChannelInitializer的initChannel方法。我们来看源码。通过源码很容易看到了：ChannelInitializer接收channelRegistered通道注册事件，在该事件中，将调用initChannel方法完成对通道流水线的初始化，完成后将自身从流水线中移除（功成身退）。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ChannelInitializer</span><span style="color: rgb(184, 191, 198);">&lt;C</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Channel&gt;</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ChannelInboundHandlerAdapter</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">initChannel</span>(<span style="color: rgb(184, 191, 198);">C</span> <span style="color: rgb(184, 191, 198);">ch</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span>; <span style="color: rgb(218, 146, 74);">// 子类实现，完成通道初始化，其实就是流水线的初始化</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelRegistered</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">initChannel</span>((<span style="color: rgb(184, 191, 198);">C</span>) <span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">channel</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">pipeline</span>().<span style="color: rgb(184, 191, 198);">remove</span>(<span style="color: rgb(200, 143, 208);">this</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">pipeline</span>().<span style="color: rgb(184, 191, 198);">fireChannelRegistered</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>那么谁又触发了channelRegistered事件呢？【作者：黄俊，微信：bx_java】通过源码，我们看到，当我们调用Channel ch = b.bind(PORT).sync().channel() 时，将会触发通道注册操作，当通道注册到事件循环组中的某个事件循环线程时，将会在其内部调用操作实际底层IO操作的Unsafe对象，在该对象中完成对DefaultChannelPipeline的fireChannelRegistered方法调用，此时将会由流水线对象完成该输入事件的调用，从而执行ChannelInitializer的channelRegistered方法。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultChannelPipeline</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">ChannelPipeline</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 触发通道注册事件</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelPipeline</span> <span style="color: rgb(184, 191, 198);">fireChannelRegistered</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">AbstractChannelHandlerContext</span>.<span style="color: rgb(184, 191, 198);">invokeChannelRegistered</span>(<span style="color: rgb(184, 191, 198);">head</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 高内聚，HeadContext和TailContext均为内部类</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">HeadContext</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractChannelHandlerContext</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">ChannelOutboundHandler</span>, <span style="color: rgb(184, 191, 198);">ChannelInboundHandler</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">channelRegistered</span>(<span style="color: rgb(184, 191, 198);">ChannelHandlerContext</span> <span style="color: rgb(184, 191, 198);">ctx</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">invokeHandlerAddedIfNeeded</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ctx</span>.<span style="color: rgb(184, 191, 198);">fireChannelRegistered</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">AbstractChannel</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">DefaultAttributeMap</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Channel</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 处理实际底层IO操作</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">AbstractUnsafe</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Unsafe</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">register0</span>(<span style="color: rgb(184, 191, 198);">promise</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">register0</span>(<span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pipeline</span>.<span style="color: rgb(184, 191, 198);">fireChannelRegistered</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">SingleThreadEventLoop</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">SingleThreadEventExecutor</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">EventLoop</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ObjectUtil</span>.<span style="color: rgb(184, 191, 198);">checkNotNull</span>(<span style="color: rgb(184, 191, 198);">promise</span>, <span style="color: rgb(210, 107, 107);">"promise"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">promise</span>.<span style="color: rgb(184, 191, 198);">channel</span>().<span style="color: rgb(184, 191, 198);">unsafe</span>().<span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">promise</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">promise</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">MultithreadEventLoopGroup</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">MultithreadEventExecutorGroup</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">EventLoopGroup</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">next</span>().<span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">promise</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">AbstractBootstrap</span><span style="color: rgb(184, 191, 198);">&lt;B</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractBootstrap&lt;B</span>, <span style="color: rgb(184, 191, 198);">C&gt;</span>, <span style="color: rgb(184, 191, 198);">C</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Channel&gt;</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Cloneable</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">initAndRegister</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">regFuture</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">config</span>().<span style="color: rgb(184, 191, 198);">group</span>().<span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">channel</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

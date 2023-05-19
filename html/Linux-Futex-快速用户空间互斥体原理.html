@@ -1,0 +1,1010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux Futex 快速用户空间互斥体原理</h1>
+<p>2022-11-02T16:31:56.423+0800</p>
+<p><p><br></p>
+<p>在 pthread 编程中，我们通常使用如下代码来完成互斥量和条件变量的使用，那么本文将详细说明 Linux 提供的 futex 与pthread 线程库的搭配使用原理。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">pthread_mutex_t</span> _mutex[<span class="ql-token hljs-number">1</span>];
+ </div>
+ <div class="ql-code-block">
+  pthread_mutex_init (_mutex, <span class="ql-token hljs-literal">NULL</span>); <span class="ql-token hljs-comment">// 初始化互斥体</span>
+ </div>
+ <div class="ql-code-block">
+  pthread_mutex_lock(_mutex); <span class="ql-token hljs-comment">// 互斥体上锁</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// doSomething</span>
+ </div>
+ <div class="ql-code-block">
+  pthread_mutex_unlock(_mutex); <span class="ql-token hljs-comment">// 对互斥体解锁</span>
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">pthread_mutex_init 函数</strong></h2>
+<p><br></p>
+<p>该函数用于初始化 pthread_mutex_t 结构。注意，mutex 可以用于 进程之间共享、Robust 健壮锁（线程或者进程挂掉自动释放）、可重入锁、自适应锁等等，但是我们这里讨论简单的线程互斥锁（不可重入），此时较为简单，因为 线程之间 共享地址和数据，所以这里简单初始化即可，读者不必深入研究。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">const</span> <span class="ql-token hljs-class">struct pthread_mutexattr default_mutexattr =</span> {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 默认互斥体，表示在线程中共享使用，而不是在进程之间使用</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; .mutexkind = PTHREAD_MUTEX_NORMAL
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 互斥体锁类型枚举</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">enum {</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;PTHREAD_MUTEX_TIMED_NP,
+ </div>
+ <div class="ql-code-block">
+  PTHREAD_MUTEX_NORMAL = PTHREAD_MUTEX_TIMED_NP
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> __pthread_mutex_init (mutex, mutexattr)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-type">pthread_mutex_t</span> *mutex;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-type">const</span> <span class="ql-token hljs-type">pthread_mutexattr_t</span> *mutexattr;
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">const</span> <span class="ql-token hljs-class">struct pthread_mutexattr *imutexattr;</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;imutexattr = ((<span class="ql-token hljs-type">const</span> <span class="ql-token hljs-keyword">struct</span> pthread_mutexattr *) mutexattr
+ </div>
+ <div class="ql-code-block">
+  ?: &amp;default_mutexattr); <span class="ql-token hljs-comment">// 如果没有指定 mutexattr，那么取默认值</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">memset</span> (mutex, <span class="ql-token hljs-string">'\0'</span>, __SIZEOF_PTHREAD_MUTEX_T); <span class="ql-token hljs-comment">// 将内部值初始化0</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;mutex-&gt;__data.__kind = imutexattr-&gt;mutexkind &amp; ~PTHREAD_MUTEXATTR_FLAG_BITS; <span class="ql-token hljs-comment">// 设置 mutex 锁类型</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> ((imutexattr-&gt;mutexkind &amp; PTHREAD_MUTEXATTR_FLAG_ROBUST) != <span class="ql-token hljs-number">0</span>)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;mutex-&gt;__data.__kind |= PTHREAD_MUTEX_ROBUST_NORMAL_NP;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">pthread_mutex_lock 函数</strong></h2>
+<p><br></p>
+<p>该函数将会对 pthread_mutex_t 加锁，流程如下：</p>
+<p>1、原子性将 (mutex)-&gt;<strong style="color: rgb(222, 222, 222);">data.</strong>lock 从 0 变为 1，若成功，那么不需要进入系统调用，直接返回</p>
+<p>2、若失败，那么进入 futex 系统调用阻塞当前线程</p>
+<p>我们看到这里就是 futex 快速的意义所在：如果没有用户态的竞争，不会进入系统调用，也即不需要上下文切换。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> __pthread_mutex_lock (mutex)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">pthread_mutex_t</span> *mutex;
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (__builtin_expect (type == PTHREAD_MUTEX_TIMED_NP, <span class="ql-token hljs-number">1</span>)) <span class="ql-token hljs-comment">// 普通线程间共享、互斥不可重入锁</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;LLL_MUTEX_LOCK (mutex); <span class="ql-token hljs-comment">// 使用该函数上锁</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 获取当前线程 ID 保存到 mutex 中，记录当前获取锁的线程</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">pid_t</span> id = THREAD_GETMEM (THREAD_SELF, tid);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;mutex-&gt;__data.__owner = id;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"># define LLL_MUTEX_LOCK(mutex) &nbsp; lll_lock ((mutex)-&gt;__data.__lock, PTHREAD_MUTEX_PSHARED (mutex)) // 第一个参数为 lock 参数，用于 futex 使用，第二个参数 用于判断是否为线程共享锁，显然我们这里是</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"># define __lll_lock_asm_start LOCK_INSTR "cmpxchgl %1, %2\n\t" &nbsp;// 尝试获取锁</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define lll_lock(futex, private) </span>
+ </div>
+ <div class="ql-code-block">
+  (<span class="ql-token hljs-type">void</span>) &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ({ <span class="ql-token hljs-type">int</span> ignore1, ignore2; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-keyword">if</span> (__builtin_constant_p (private) &amp;&amp; (private) == LLL_PRIVATE) &nbsp;<span class="ql-token hljs-comment">// 我们看这里即可 &nbsp; &nbsp;</span>
+ </div>
+ <div class="ql-code-block">
+  __asm __volatile (__lll_lock_asm_start &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"jnz _L_lock_%="</span> <span class="ql-token hljs-comment">// 首先尝试了 cmpxchgl %1, %2，也即 cmpxchgl %1, %futex =&gt; 用 eax 的 0 与 futex 比较，若 futex 是0，那么不需要进入 系统调用，将 1 替换到 futex 中即可</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">".subsection 1"</span> <span class="ql-token hljs-comment">// 将 subsection 和 previous 之间的函数放置另外的 section 1 节中</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">".type _L_lock_%=,@function"</span> <span class="ql-token hljs-comment">// 定义一个函数，名为：_L_lock_%=</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"_L_lock_%=:"</span> &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"1: leal %2, %%ecx"</span> <span class="ql-token hljs-comment">// 获取 futex 的地址放入 ecx &nbsp; &nbsp; &nbsp;</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"2: call __lll_lock_wait_private"</span> <span class="ql-token hljs-comment">// 调用该函数进入系统调用 &nbsp; &nbsp; &nbsp;</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"3: jmp 18f"</span> &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">// 结束后 跳转到 18 标号处 退出</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"4: .size _L_lock_%=, 4b-1b"</span> &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">".previous"</span> &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"18:"</span> &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; : <span class="ql-token hljs-string">"=a"</span> (ignore1), <span class="ql-token hljs-string">"=c"</span> (ignore2), <span class="ql-token hljs-string">"=m"</span> (futex) &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; : <span class="ql-token hljs-string">"0"</span> (<span class="ql-token hljs-number">0</span>), <span class="ql-token hljs-string">"1"</span> (<span class="ql-token hljs-number">1</span>), <span class="ql-token hljs-string">"m"</span> (futex), <span class="ql-token hljs-comment">// 输入时： eax = 1 ecx = 1 （内连汇编语法，详见混沌专题之并发原理） &nbsp; &nbsp; &nbsp;</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-string">"i"</span> (MULTIPLE_THREADS_OFFSET) &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; : <span class="ql-token hljs-string">"memory"</span>); &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-keyword">else</span> &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  { &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ... <span class="ql-token hljs-comment">// 进程间锁</span>
+ </div>
+ <div class="ql-code-block">
+  } &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; })
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 进入系统调用</span>
+ </div>
+ <div class="ql-code-block">
+  __lll_lock_wait_private:
+ </div>
+ <div class="ql-code-block">
+  pushl %edx
+ </div>
+ <div class="ql-code-block">
+  pushl %ebx
+ </div>
+ <div class="ql-code-block">
+  pushl %esi
+ </div>
+ <div class="ql-code-block">
+  movl $<span class="ql-token hljs-number">2</span>, %edx <span class="ql-token hljs-comment">// 将 2 放入 edx</span>
+ </div>
+ <div class="ql-code-block">
+  movl %ecx, %ebx <span class="ql-token hljs-comment">// 将 futex 地址放入 ebx</span>
+ </div>
+ <div class="ql-code-block">
+  xorl %esi, %esi <span class="ql-token hljs-comment">// esi 用于保存超时时间，此时没有，所以清 0</span>
+ </div>
+ <div class="ql-code-block">
+  movl $(FUTEX_WAIT | FUTEX_PRIVATE_FLAG), ecx <span class="ql-token hljs-comment">// 通知内核执行 FUTEX_WAIT 操作</span>
+ </div>
+ <div class="ql-code-block">
+  cmpl %edx, %eax <span class="ql-token hljs-comment">// 看看 无锁状态下的 futex值 是否为 当前需要设置的值，调用该函数前，我们看到 eax 的值为0，此时将会跳转到 标号 2 处执行</span>
+ </div>
+ <div class="ql-code-block">
+  jne <span class="ql-token hljs-number">2f</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-number">1</span>: &nbsp;movl $SYS_futex, %eax <span class="ql-token hljs-comment">// 系统调用号放入 eax</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> $<span class="ql-token hljs-number">0x80</span> <span class="ql-token hljs-comment">// 进入系统调用</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 读者注意：系统调用返回后，仍需要判断 futex 的值是否为 0</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-number">2</span>: movl %edx, %eax &nbsp;<span class="ql-token hljs-comment">// 将 2 放入 eax 中</span>
+ </div>
+ <div class="ql-code-block">
+  xchgl %eax, (%ebx) <span class="ql-token hljs-comment">// 交换 futex 与 eax 的值，此时 futex 设置为 2，eax 中保存原有的 futex 的值</span>
+ </div>
+ <div class="ql-code-block">
+  testl %eax, %eax &nbsp;<span class="ql-token hljs-comment">// 此时若 futex 的值不为 0，那么跳转到 标号 1 处进入系统调用</span>
+ </div>
+ <div class="ql-code-block">
+  jnz <span class="ql-token hljs-number">1b</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 当系统调用返回时，还原之前保存的寄存器值</span>
+ </div>
+ <div class="ql-code-block">
+  popl %esi
+ </div>
+ <div class="ql-code-block">
+  popl %ebx
+ </div>
+ <div class="ql-code-block">
+  popl %edx
+ </div>
+ <div class="ql-code-block">
+  ret
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">pthread_mutex_unlock 原理</strong></h2>
+<p><br></p>
+<p>该函数用于释放 mutex 锁，我们看到原理很简单：原子性将 mutex-&gt;<strong style="color: rgb(222, 222, 222);">data.</strong>lock 减 1 ，若结果为 0 不需要进入系统调用，若不为 0，那么进入系统调用唤醒 其他线程。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> __pthread_mutex_unlock (mutex)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-type">pthread_mutex_t</span> *mutex;
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">return</span> __pthread_mutex_unlock_usercnt (mutex, <span class="ql-token hljs-number">1</span>);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> __pthread_mutex_unlock_usercnt (mutex, decr)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-type">pthread_mutex_t</span> *mutex;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-type">int</span> decr;
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">int</span> type = PTHREAD_MUTEX_TYPE_ELISION (mutex); <span class="ql-token hljs-comment">// 获取锁类型</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (__builtin_expect (type, PTHREAD_MUTEX_TIMED_NP)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;== PTHREAD_MUTEX_TIMED_NP)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; { &nbsp;<span class="ql-token hljs-comment">// 这里我们关注 正常的互斥锁</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;mutex-&gt;__data.__owner = <span class="ql-token hljs-number">0</span>; <span class="ql-token hljs-comment">// 将锁定的持有 线程 id 清除</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (decr)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; --mutex-&gt;__data.__nusers; <span class="ql-token hljs-comment">// 减少锁使用数量</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;lll_unlock (mutex-&gt;__data.__lock, PTHREAD_MUTEX_PSHARED (mutex)); <span class="ql-token hljs-comment">// 执行解锁操作</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 原子性释放锁操作</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta"># define __lll_unlock_asm LOCK_INSTR "subl $1, %0\n\t"</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define lll_unlock(futex, private) </span>
+ </div>
+ <div class="ql-code-block">
+  (<span class="ql-token hljs-type">void</span>) &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ({ <span class="ql-token hljs-type">int</span> ignore; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-keyword">if</span> (__builtin_constant_p (private) &amp;&amp; (private) == LLL_PRIVATE) &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  __asm __volatile (__lll_unlock_asm <span class="ql-token hljs-comment">// 等价于 LOCK_INSTR "subl $1, futex " 对 futex 原子性减 1 </span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"jne _L_unlock_%=\n\t"</span> &nbsp; <span class="ql-token hljs-comment">// 若减 1 值不为 0，那么跳转到 _L_unlock_%= 函数 ，否则退出</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">".subsection 1\n\t"</span> &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">".type _L_unlock_%=,@function\n"</span> <span class="ql-token hljs-comment">// 定义 _L_unlock_%= 函数</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"_L_unlock_%=:\n"</span> &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"1:\tleal %0, %%eax\n"</span> <span class="ql-token hljs-comment">// 取 futex 地址放入 eax 中 &nbsp; &nbsp; </span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"2:\tcall __lll_unlock_wake_private\n"</span> <span class="ql-token hljs-comment">// 调用 __lll_unlock_wake_private 函数 &nbsp; &nbsp;</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"3:\tjmp 18f\n"</span> &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"4:\t.size _L_unlock_%=, 4b-1b\n\t"</span> &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">".previous\n"</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-string">"18:"</span> &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; : <span class="ql-token hljs-string">"=m"</span> (futex), <span class="ql-token hljs-string">"=&amp;a"</span> (ignore) &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; : <span class="ql-token hljs-string">"m"</span> (futex), <span class="ql-token hljs-string">"i"</span> (MULTIPLE_THREADS_OFFSET) &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; : <span class="ql-token hljs-string">"memory"</span>); &nbsp; &nbsp; &nbsp;\
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-keyword">else</span> &nbsp; &nbsp; &nbsp;\
+ </div>
+ <div class="ql-code-block">
+  { &nbsp; &nbsp; &nbsp;\
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ... <span class="ql-token hljs-comment">// 省略进程间共享锁</span>
+ </div>
+ <div class="ql-code-block">
+  } &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; })
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 进入内核唤醒进程</span>
+ </div>
+ <div class="ql-code-block">
+  __lll_unlock_wake_private:
+ </div>
+ <div class="ql-code-block">
+  pushl %ebx
+ </div>
+ <div class="ql-code-block">
+  pushl %ecx
+ </div>
+ <div class="ql-code-block">
+  pushl %edx
+ </div>
+ <div class="ql-code-block">
+  movl %eax, %ebx <span class="ql-token hljs-comment">// 将 futex 的值放入 ebx 中</span>
+ </div>
+ <div class="ql-code-block">
+  movl $<span class="ql-token hljs-number">0</span>, (%eax) <span class="ql-token hljs-comment">// 将 futex 中的值设置为 0 ，表示此时无锁状态（那么考虑下？如果现在用户态的线程调用 lock函数调用锁，此时 是不是可以直接获取，那么内核唤醒后的线程是否能获取锁呢？）</span>
+ </div>
+ <div class="ql-code-block">
+  movl $(FUTEX_WAKE | FUTEX_PRIVATE_FLAG), %ecx <span class="ql-token hljs-comment">// 通知内核执行唤醒操作</span>
+ </div>
+ <div class="ql-code-block">
+  movl $<span class="ql-token hljs-number">1</span>, %edx <span class="ql-token hljs-comment">// 通知内核只唤醒一个线程（互斥锁 没必要唤醒所有线程）</span>
+ </div>
+ <div class="ql-code-block">
+  movl $SYS_futex, %eax <span class="ql-token hljs-comment">// eax 保存 sys_futex 系统调用号</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> $<span class="ql-token hljs-number">0x80</span> <span class="ql-token hljs-comment">// 进入系统调用</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 系统调用返回，其他线程被唤醒，还原保存的寄存器即可</span>
+ </div>
+ <div class="ql-code-block">
+  popl %edx
+ </div>
+ <div class="ql-code-block">
+  popl %ecx
+ </div>
+ <div class="ql-code-block">
+  popl %ebx
+ </div>
+ <div class="ql-code-block">
+  ret &nbsp; &nbsp;
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">sys_futex 原理</strong></h2>
+<p><br></p>
+<p>上面我们看到使用 sys_futex 系统调用完成阻塞和唤醒操作：FUTEX_WAIT（标识阻塞） 、FUTEX_WAKE（唤醒）。现在我们来看看该系统调用的实现过程。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  asmlinkage <span class="ql-token hljs-type">long</span> <span class="ql-token hljs-title">sys_futex(u32 __user *uaddr, int op, u32 val,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> &nbsp;struct timespec __user *utime, u32 __user *uaddr2,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> &nbsp;u32 val3)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct timespec ts;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">ktime_t</span> t, *tp = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  u32 val2 = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> cmd = op &amp; FUTEX_CMD_MASK;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (utime &amp;&amp; (cmd == FUTEX_WAIT || cmd == FUTEX_LOCK_PI)) { <span class="ql-token hljs-comment">// 指定了超时时间的，那么我们拷贝时间并生成 ktime_t 结构，这里忽略</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (copy_from_user(&amp;ts, utime, <span class="ql-token hljs-keyword">sizeof</span>(ts)) != <span class="ql-token hljs-number">0</span>)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EFAULT;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!timespec_valid(&amp;ts))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  t = timespec_to_ktime(ts);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (cmd == FUTEX_WAIT)
+ </div>
+ <div class="ql-code-block">
+  t = ktime_add(ktime_get(), t);
+ </div>
+ <div class="ql-code-block">
+  tp = &amp;t;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 如果使用 FUTEX_REQUEUE 命令 那么转换时间值为 val2</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (cmd == FUTEX_REQUEUE || cmd == FUTEX_CMP_REQUEUE)
+ </div>
+ <div class="ql-code-block">
+  val2 = (u32) (<span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span>) utime;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> do_futex(uaddr, op, val, tp, uaddr2, val2, val3);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 这里我们关注 futex_wait 和 futex_wake 函数即可，可以看到他们与 u32 __user *uaddr2, u32 val2, u32 val3 参数无关，因为它们都是用于 requeue操作的，这里我们没有涉及到该概念，所以我们了解即可</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">long</span> <span class="ql-token hljs-title">do_futex(u32 __user *uaddr, int op, u32 val, ktime_t *timeout,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> u32 __user *uaddr2, u32 val2, u32 val3)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> ret;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> cmd = op &amp; FUTEX_CMD_MASK;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rw_semaphore *fshared =</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(op &amp; FUTEX_PRIVATE_FLAG)) <span class="ql-token hljs-comment">// 若不是线程间futex，那么需要获取 mmap_sem 信号量用于操作时互斥</span>
+ </div>
+ <div class="ql-code-block">
+  fshared = &amp;current-&gt;mm-&gt;mmap_sem;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">switch</span> (cmd) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">case</span> FUTEX_WAIT:
+ </div>
+ <div class="ql-code-block">
+  ret = futex_wait(uaddr, fshared, val, timeout);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">case</span> FUTEX_WAKE:
+ </div>
+ <div class="ql-code-block">
+  ret = futex_wake(uaddr, fshared, val);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  ... <span class="ql-token hljs-comment">// 其他操作我们忽略，这里关注 等待和唤醒</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> ret;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">futex_wait 函数</strong></h3>
+<p><br></p>
+<p>该函数用于在用户态竞争 futex 变量失败时调用，此时将尝试阻塞当前线程，流程如下：</p>
+<p>1、创建表示 futex 元数据的 struct futex_q</p>
+<p>2、根据 struct futex_q q 的元数据 找到它应该放入 的 futex_hash_bucket 结构</p>
+<p>3、获取 用户空间中 当前 futex 的值</p>
+<p>4、若 futex 的值 发生改变，此时退出到用户空间重新尝试获取锁</p>
+<p>5、若 futex 的值 未改变，那么将 struct futex_q q 放入 futex_hash_bucket 结构，同时将进程等待节点放入 struct futex_q q 的等待队列，然后调用 schedule 函数 切换其他进程执行，直到被唤醒或者等待超时</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">futex_wait(u32 __user *uaddr, struct rw_semaphore *fshared,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> &nbsp; &nbsp; &nbsp;u32 val, ktime_t *abs_time)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct task_struct *curr =</span> current;
+ </div>
+ <div class="ql-code-block">
+  DECLARE_WAITQUEUE(wait, curr); <span class="ql-token hljs-comment">// 初始化等待节点 &nbsp; wait_queue_t</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct futex_q q;</span> <span class="ql-token hljs-comment">// 表示当前 futex 的元数据信息</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct futex_hash_bucket *hb;</span> <span class="ql-token hljs-comment">// 每个 futex 元数据 将会放置在全局结构 static struct futex_hash_bucket futex_queues[1&lt;&lt;FUTEX_HASHBITS]; 中</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;u32 uval; <span class="ql-token hljs-comment">// 保存当前用户空间 futex 的值</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  retry:
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (fshared) &nbsp;<span class="ql-token hljs-comment">// 若为进程间共享锁，那么需要获取到保护该进程 mm_struct 的锁</span>
+ </div>
+ <div class="ql-code-block">
+  down_read(fshared);
+ </div>
+ <div class="ql-code-block">
+  ret = get_futex_key(uaddr, fshared, &amp;q.key); <span class="ql-token hljs-comment">// 找到该 futex 所在的 mm 和虚拟内存地址（读者可自己阅读，非常容易懂：进程共享的话 找到 vma 然后检测权限，没问题则赋值给 futex_key ，也即 &amp;q.key，如果是线程间共享，那么非常简单，直接赋值 mm 和 futex 地址到 futex_key 即可）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (unlikely(ret != <span class="ql-token hljs-number">0</span>))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> out_release_sem;
+ </div>
+ <div class="ql-code-block">
+  hb = queue_lock(&amp;q, <span class="ql-token hljs-number">-1</span>, <span class="ql-token hljs-literal">NULL</span>); <span class="ql-token hljs-comment">// 根据当前 futex_q 的元数据信息计算hash值，找到需要将其放入的 struct futex_hash_bucket futex_queues 索引下标出的 struct futex_hash_bucket 指针，同时对 这个 struct futex_hash_bucket 结构 上自旋锁（因为 futex_q 需要放入到该 futex_hash_bucket 结构中，为了避免多线程竞争所以需要自旋锁）</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ret = get_futex_value_locked(&amp;uval, uaddr); <span class="ql-token hljs-comment">// 原子性获取到当前用户空间的 futex 值，放入 uval 中</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (unlikely(ret)) {
+ </div>
+ <div class="ql-code-block">
+  ... <span class="ql-token hljs-comment">// 失败后释放锁重新开始</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ret = -EWOULDBLOCK;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (uval != val) <span class="ql-token hljs-comment">// 当前用户态的 futex 值 与 传入的比较值，失败，那么我们必然不能够 阻塞，需要返回用户态重新尝试获取锁</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> out_unlock_release_sem;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 如果此时用户空间 futex 的值没有发生变化，那么当前线程需要阻塞等待 futex 释放，将 futex_q 放入 futex_hash_bucket 队列，同时释放 futex_hash_bucket 的自旋锁</span>
+ </div>
+ <div class="ql-code-block">
+  __queue_me(&amp;q, hb);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 若为进程间共享锁，那么这里需要释放保护 mm 的信号量，因为进程在睡眠时，不能持有该锁</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (fshared)
+ </div>
+ <div class="ql-code-block">
+  up_read(fshared);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 设置当前进程状态为可中断的阻塞状态，然后将当前进程放入 futex_q 的阻塞列表</span>
+ </div>
+ <div class="ql-code-block">
+  __set_current_state(TASK_INTERRUPTIBLE);
+ </div>
+ <div class="ql-code-block">
+  add_wait_queue(&amp;q.waiters, &amp;wait);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (likely(!plist_node_empty(&amp;q.<span class="ql-token hljs-built_in">list</span>))) { <span class="ql-token hljs-comment">// 若 futex_hash_bucket 队列中不为空（当前进程仍处于队列中等待），那么根据当前线程设置的超时时间来进行阻塞，我们这里没有超时时间，所以直接调用 schedule 函数交出控制权</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!abs_time)
+ </div>
+ <div class="ql-code-block">
+  schedule();
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  ... <span class="ql-token hljs-comment">// 否则进行超时等待</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 被唤醒后，或者当前 futex_hash_bucket 队列中只存在当前 进程，那么将进程状态恢复为 执行状态</span>
+ </div>
+ <div class="ql-code-block">
+  __set_current_state(TASK_RUNNING);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!unqueue_me(&amp;q)) <span class="ql-token hljs-comment">// 将当前进程从 futex_hash_bucket 队列中去除，若成功则返回</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (rem) <span class="ql-token hljs-comment">// 若发生超时那么返回超时错误，在上述 else块中发生，这里了解即可</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ETIMEDOUT;
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(222, 222, 222);">futex_wake 函数</strong></h3>
+<p><br></p>
+<p>该函数用于释放调用 futex_wait 等待的进程，流程如下：</p>
+<p>1、根据 futex 地址 ，找到对应的 futex_key key，根据该 key 找到 所述的 struct futex_hash_bucket *hb</p>
+<p>2、对 futex_hash_bucket 结构上自旋锁</p>
+<p>3、遍历该 futex_hash_bucket 中的所有 futex_key ，找到与需要唤醒的 futex 的进程所匹配的 futex_q，然后唤醒阻塞在上面的线程，nr_wake 用于表示唤醒的进程个数</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">futex_wake(u32 __user *uaddr, struct rw_semaphore *fshared, int nr_wake)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct futex_hash_bucket *hb;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct futex_q *this, *next;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct plist_head *head;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">union futex_key key;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> ret;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (fshared) <span class="ql-token hljs-comment">// 操作进程间共享的 futex 都需要锁定 mm 的锁，保护 mm 和 vma 不会发生改变</span>
+ </div>
+ <div class="ql-code-block">
+  down_read(fshared);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ret = get_futex_key(uaddr, fshared, &amp;key); <span class="ql-token hljs-comment">// 获取该 futex 的元数据 futex_key key</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (unlikely(ret != <span class="ql-token hljs-number">0</span>))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> out;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  hb = hash_futex(&amp;key); <span class="ql-token hljs-comment">// 找到该key 所属的 futex_hash_bucket</span>
+ </div>
+ <div class="ql-code-block">
+  spin_lock(&amp;hb-&gt;lock); <span class="ql-token hljs-comment">// 获取自旋锁，保证原子性</span>
+ </div>
+ <div class="ql-code-block">
+  head = &amp;hb-&gt;chain; <span class="ql-token hljs-comment">// 获取头结点</span>
+ </div>
+ <div class="ql-code-block">
+  plist_for_each_entry_safe(this, next, head, <span class="ql-token hljs-built_in">list</span>) { <span class="ql-token hljs-comment">// 遍历所有节点，找到匹配 当前 futex 的 key，然后唤醒等待在该 futex的进程</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (match_futex (&amp;this-&gt;key, &amp;key)) { <span class="ql-token hljs-comment">// 为何需要匹配？因为 hash 冲突，可能该 futex 已经被别的线程释放了，不是当前 需要的 futex 元数据</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  wake_futex(this); <span class="ql-token hljs-comment">// 唤醒阻塞在 当前 futex 上的线程</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (++ret &gt;= nr_wake) <span class="ql-token hljs-comment">// 唤醒 nr_wake 个 匹配成功的 futex 等待进程</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">wake_futex(struct futex_q *q)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  plist_del(&amp;q-&gt;<span class="ql-token hljs-built_in">list</span>, &amp;q-&gt;<span class="ql-token hljs-built_in">list</span>.plist); <span class="ql-token hljs-comment">// 首先将当前 futex_q 节点 从 futex_hash_bucket 中移出</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (q-&gt;filp) <span class="ql-token hljs-comment">// 若指定了唤醒了通知的 fd，那么发送信号通知，这里我们了解即可</span>
+ </div>
+ <div class="ql-code-block">
+  send_sigio(&amp;q-&gt;filp-&gt;f_owner, q-&gt;fd, POLL_IN);
+ </div>
+ <div class="ql-code-block">
+  wake_up_all(&amp;q-&gt;waiters); <span class="ql-token hljs-comment">// 唤醒所有等待在该 futex_q 上的进程</span>
+ </div>
+ <div class="ql-code-block">
+  smp_wmb(); <span class="ql-token hljs-comment">// 保证在释放 lock_ptr 锁之前，前面的 store 操作全部提交到内存</span>
+ </div>
+ <div class="ql-code-block">
+  q-&gt;lock_ptr = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">总结</strong></h2>
+<p><br></p>
+<p>1、对于 pthread_mutex_lock 而言，需要用户空间的代码作为配合实现 快速互斥体的语义：没有竞争时无需进入内核。在 pthread 线程库中，默认无锁状态 futex 为 0，原子性将其 设置为 1（使用 lock cmpxchg 来完成该操作）若 CAS 成功，那么返回，否则 设置 futex 的值 为 2，并陷入内核等待</p>
+<p>2、对于 pthread_mutex_unlock 而言，pthread 库首先原子性对 futex 值减 1，若结果为0，那么表示没有竞争，此时无需进入内核空间唤醒阻塞线程，若结果不为0， 比如上述的 2 -1 ，那么表示内核态有阻塞线程，那么首先释放锁，然后进入内核唤醒一个等待的线程（每个线程一个 futex_q） ，然后该线程回到用户态尝试获取锁</p>
+<p>3、如果其他线程在线程未陷入内核态之前，但已经释放锁后，那么在内核中没有对当前 futex 的值进行判断，直接就唤醒，所以该线程唤醒后，依然拿不到锁，又得回去阻塞，但这是无解的操作，因为用户态什么时候 cas 到了 futex 内核无法得知，所以需要线程自己回到用户态自己重试</p>
+<p><br></p></p>
+</body>
+</html>

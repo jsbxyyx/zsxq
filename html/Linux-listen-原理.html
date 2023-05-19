@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux listen 原理</h1>
+<p>2022-08-01T09:37:15.264+0800</p>
+<p><p>在绑定操作将绑定数据保存到 inet_sock 中后，我们下一步就是开启服务端 socket 的监听机制，我们可以调用 listen 函数完成该操作，当该函数成功返回后，客户端便可以开启连接，TCP 三次握手后的连接将会放入 backlog 参数指定大小的接收队列中。本节我们将详细描述 listen 函数的执行原理。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">serverFD</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">socket</span>(<span style="color: rgb(184, 191, 198);">AF_INET</span>, <span style="color: rgb(184, 191, 198);">SOCK_STREAM</span>, <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">sockaddr_in</span> <span style="color: rgb(184, 191, 198);">addr</span>; <span style="color: rgb(218, 146, 74);">// 端口绑定信息</span></p>
+<p><span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_family</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">AF_INET</span>; <span style="color: rgb(218, 146, 74);">// 指定协议簇</span></p>
+<p><span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_addr</span>.<span style="color: rgb(184, 191, 198);">s_addr</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_addr</span>(<span style="color: rgb(210, 107, 107);">"127.0.0.1"</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_port</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">htons</span>(<span style="color: rgb(100, 171, 143);">8080</span>); <span style="color: rgb(218, 146, 74);">// 将端口信息转为网络字节序（大端序）</span></p>
+<p><span style="color: rgb(184, 191, 198);">bind</span>(<span style="color: rgb(184, 191, 198);">serverFD</span>, (<span style="color: rgb(184, 191, 198);">sockaddr*</span>)<span style="color: rgb(184, 191, 198);">&amp;addr</span>, <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">addr</span>)); <span style="color: rgb(218, 146, 74);">// 开始绑定</span></p>
+<p><span style="color: rgb(184, 191, 198);">listen</span>(<span style="color: rgb(184, 191, 198);">serverFD</span>,<span style="color: rgb(100, 171, 143);">100</span>); <span style="color: rgb(218, 146, 74);">// 绑定后开启监听，同时指定接收队列长度为 100</span></p>
+<p><strong>sys_listen 函数</strong></p>
+<p><span style="color: rgb(218, 146, 74);">// 最大 backlog 队列大小</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">sysctl_somaxconn</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SOMAXCONN</span>;</p>
+<p><span style="color: rgb(183, 179, 179);">#define SOMAXCONN 128</span></p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">asmlinkage</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">sys_listen</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">backlog</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">sock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sockfd_lookup</span>(<span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(184, 191, 198);">&amp;err</span>)) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span>) { <span style="color: rgb(218, 146, 74);">// 通过 fd 找到 file，然后找到 inode，然后获取 socket_alloc 结构中的 socket </span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(28, 198, 133);">unsigned</span>) <span style="color: rgb(184, 191, 198);">backlog</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">sysctl_somaxconn</span>) <span style="color: rgb(218, 146, 74);">// accept 队列最大 128</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">backlog</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sysctl_somaxconn</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">err=sock-&gt;ops-&gt;listen</span>(<span style="color: rgb(184, 191, 198);">sock</span>, <span style="color: rgb(184, 191, 198);">backlog</span>); <span style="color: rgb(218, 146, 74);">// 调用listen 函数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sockfd_put</span>(<span style="color: rgb(184, 191, 198);">sock</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>}</p>
+<p><strong>inet_listen 函数</strong></p>
+<p>该函数我们之前在 struct proto_ops inet_stream_ops 中看到到过，注册为socket 的 ops 监听函数，可以看到该函数判断TCP状态后，调用 tcp_listen_start 启动TCP 同时修改状态为 TCPF_LISTEN ，然后保存 accept 队列大小。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">inet_listen</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">backlog</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock-&gt;sk</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">old_state</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">lock_sock</span>(<span style="color: rgb(184, 191, 198);">sk</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EINVAL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 检测状态</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">sock-&gt;state</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">SS_UNCONNECTED</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">sock-&gt;type</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">SOCK_STREAM</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">old_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sk-&gt;sk_state</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!</span>((<span style="color: rgb(100, 171, 143);">1</span> <span style="color: rgb(184, 191, 198);">&lt;&lt;</span> <span style="color: rgb(184, 191, 198);">old_state</span>) <span style="color: rgb(184, 191, 198);">&amp;</span> (<span style="color: rgb(184, 191, 198);">TCPF_CLOSE</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">TCPF_LISTEN</span>)))</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">old_state</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">TCP_LISTEN</span>) { <span style="color: rgb(218, 146, 74);">// 由于我们之气那的状态为：TCP_CLOSE ，还未到达 listen状态，那么第哦啊用 tcp_listen_start 函数启动TCP同时修改状态</span></p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tcp_listen_start</span>(<span style="color: rgb(184, 191, 198);">sk</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">err</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 保存 accept 队列大小</span></p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_max_ack_backlog</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">backlog</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">out</span>:</p>
+<p><span style="color: rgb(184, 191, 198);">release_sock</span>(<span style="color: rgb(184, 191, 198);">sk</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>}</p>
+<p><strong>tcp_listen_start 函数</strong></p>
+<p>该函数用于将TCP 状态修改为TCP_LISTEN，前面我们看到 socket 结构将包含在 tcp_sock结构中，其中的 inet_opt结构，我们在绑定端口时已经初始化，而这里的 开始监听 将会初始化 tcp_opt 结构，同时将监听结构 struct tcp_listen_opt 地址保存在 其中，最后再次检测端口是否被占用，若没有，那么直接返回，否则释放内存返回错误码。</p>
+<p><span style="color: rgb(218, 146, 74);">// 表示TCP协议的 sock 元信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">tcp_sock</span> {</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> &nbsp;<span style="color: rgb(141, 141, 240);">sk</span>; <span style="color: rgb(218, 146, 74);">// sock 信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_opt</span> &nbsp;<span style="color: rgb(141, 141, 240);">inet</span>; <span style="color: rgb(218, 146, 74);">// ip 层信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">tcp_opt</span> &nbsp;<span style="color: rgb(141, 141, 240);">tcp</span>; <span style="color: rgb(218, 146, 74);">// tcp 层信息</span></p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">tcp_listen_start</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_opt</span> <span style="color: rgb(184, 191, 198);">*inet</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_sk</span>(<span style="color: rgb(184, 191, 198);">sk</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">tcp_opt</span> <span style="color: rgb(184, 191, 198);">*tp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tcp_sk</span>(<span style="color: rgb(184, 191, 198);">sk</span>); <span style="color: rgb(218, 146, 74);">// 根据sk的地址获取到 tcp_sock 中的 tcp_opt 地址（参考 struct tcp_sock）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">tcp_listen_opt</span> <span style="color: rgb(184, 191, 198);">*lopt</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 初始化 socket 和 tcp_opt 成员变量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk-&gt;sk_max_ack_backlog</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk-&gt;sk_ack_backlog</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tp-&gt;accept_queue</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tp-&gt;accept_queue_tail</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>; <span style="color: rgb(218, 146, 74);">// 接收队列</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tp-&gt;syn_wait_lock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">RW_LOCK_UNLOCKED</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tcp_delack_init</span>(<span style="color: rgb(184, 191, 198);">tp</span>); <span style="color: rgb(218, 146, 74);">// 将 tcp_opt 结构中的 ack 结构 初始化为0（通过 memset）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">lopt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">kmalloc</span>(<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">tcp_listen_opt</span>), <span style="color: rgb(184, 191, 198);">GFP_KERNEL</span>); <span style="color: rgb(218, 146, 74);">// 创建 tcp 监听信息 结构</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!lopt</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-ENOMEM</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">memset</span>(<span style="color: rgb(184, 191, 198);">lopt</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">tcp_listen_opt</span>)); <span style="color: rgb(218, 146, 74);">// 内部内存初始化为0</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tp-&gt;listen_opt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">lopt</span>; <span style="color: rgb(218, 146, 74);">// 监听信息 保存在 tcp_opt 结构中</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk-&gt;sk_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">TCP_LISTEN</span>; <span style="color: rgb(218, 146, 74);">// 将TCP 状态变为 监听状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!sk-&gt;sk_prot-&gt;get_port</span>(<span style="color: rgb(184, 191, 198);">sk</span>, <span style="color: rgb(184, 191, 198);">inet-&gt;num</span>)) { <span style="color: rgb(218, 146, 74);">// 再次检查 当前绑定的端口 是否已经被占用，若没有，那么直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">inet-&gt;sport</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">htons</span>(<span style="color: rgb(184, 191, 198);">inet-&gt;num</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk_dst_reset</span>(<span style="color: rgb(184, 191, 198);">sk</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk-&gt;sk_prot-&gt;hash</span>(<span style="color: rgb(184, 191, 198);">sk</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 否则还原TCP状态，同时释放锁，随后将分配的内存释放，并返回 EADDRINUSE 错误码</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk-&gt;sk_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">TCP_CLOSE</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">write_lock_bh</span>(<span style="color: rgb(184, 191, 198);">&amp;tp-&gt;syn_wait_lock</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tp-&gt;listen_opt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">write_unlock_bh</span>(<span style="color: rgb(184, 191, 198);">&amp;tp-&gt;syn_wait_lock</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">kfree</span>(<span style="color: rgb(184, 191, 198);">lopt</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-EADDRINUSE</span>;</p>
+<p>}</p>
+<p><strong>小结</strong></p>
+<p>C语言服务端网络编程顺序：</p>
+<ol>
+ <li>创建 socket：根据协议簇和协议创建对应的 socket 结构，同时对socket 结构的函数指针赋值</li>
+ <li>绑定端口：检测端口是否被占用，同时初始化 inet_opt 结构信息（保存用户空间传递的信息：绑定地址、绑定端口）</li>
+ <li>开启监听：初始化 tcp_opt 结构信息，同时将 sk_state 修改为 TCP_LISTEN</li>
+ <li>接收链接：下一节分析</li>
+</ol>
+<p><br></p></p>
+</body>
+</html>

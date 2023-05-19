@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>JVM Hotspot GC 如何 STW 原理分析</h1>
+<p>2022-02-13T11:54:40.503+0800</p>
+<p><p><strong>线程安全点介绍</strong></p>
+<p>读者可以考虑两个问题：</p>
+<ol>
+ <li>在JVM垃圾回收时，需要STW，我在什么时候STW？</li>
+ <li>在JVM垃圾回收时，需要初始 GC root 根对象标记，那么我们知道有一个地方是可以作为根对象的：线程栈内存，那么我如何知道栈内存中哪些位置存放着oop对象指针呢？</li>
+</ol>
+<p>这两个问题是可以一起来回答的，我们先来看第二个问题，我们需要在哪些位置保存栈内存的oop指针信息呢？是随便保存，还是有指定位置？那么如果我们不保存呢？我们先考虑如果不保存这些信息，那么在GC时，我就需要将线程栈挨个地址遍历，找到对象指针oop，这是不现实的，因为这会导致性能极度下降。那好吧，我们只能记录这些信息了，而在Hotspot中使用OopMap类来记录这些信息（其实是OopMapSet 类 + OopMap 类，因为一个OopMap 表示一个位置，我打算下次在另一篇文章中详细写关于这两个类的原理，读者这里先大致了解下即可）。那好此时我们可以回答第一个问题了，我们可以让线程在 OopMap 处停止，而这些OopMap 放置的地方称之为线程安全点。当所有线程都处于线程安全点了，那么我们称之为STW。现在我们只需要解决一个问题即可：在哪些地方放置OopMap ，换句话说哪些地方是线程安全点：</p>
+<ol>
+ <li>循环体的结尾</li>
+ <li>方法返回前</li>
+ <li>调用方法的call之后</li>
+ <li>抛出异常的位置</li>
+</ol>
+<p><strong>SafepointSynchronize类原理</strong></p>
+<p>SafepointSynchronize类用于实现线程安全点的所有功能，比如将让所有线程进入线程安全点，或者让所有线程从安全点恢复。</p>
+<p><strong>SafepointSynchronize::begin方法原理</strong></p>
+<p>该方法用于让所有线程进入线程安全点，并且阻塞他们。我们看到，该方法只能由VM_thread来执行（VM_thread是Hotspot中的处理重量级任务的线程，该线程只有一个，而GC操作也是由该线程完成，因为是单线程，所以我们递交到它队列里完成时，是线程安全的）。我们首先停止GC处理线程，随后获取线程锁Threads_lock，此时不允许再往系统中创建和销毁线程，同时保存Java 活动的java线程计数，然后我们开始让整个系统进入线程安全点并暂停线程，我们需要注意的是，此时Java线程可能在以下几种不同的处理状态中，对这些不同的状态我们要对其进行相应的处理：</p>
+<ol>
+ <li>正在解释执行字节码的线程</li>
+ <li>此时不需要进行特殊处理，因为我们会在OopMap的放置处进行线程安全点检测，如果我们设置了线程安全点，那么线程会在解释执行的过程中检测到标志位，那么自行停止即可</li>
+ <li>正在执行JNI Native的线程</li>
+ <li>当线程在执行JNI代码时，此时与Java系统无关，所以我们只需要让JNI的代码在访问Java系统时检测以下线程安全点状态state即可</li>
+ <li>正在执行JIT编译后字节码的线程</li>
+ <li>当字节码被JIT编译后，将会在编译代码中插入检测线程安全点的代码，当其访问该代码时将会进入阻塞状态</li>
+ <li>处于阻塞状态的线程</li>
+ <li>处于阻塞状态的线程本身就是线程安全的，所以我们只需要在唤醒线程之前检测线程安全点即可</li>
+ <li>正在处于VM虚拟机操作或者转变线程状态的线程</li>
+ <li>当线程处于VM操作状态或者转变线程状态时，那么将由线程在转变为新的状态时，检测安全点状态，然后自身进入阻塞状态</li>
+</ol>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">SafepointSynchronize::begin</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread*</span> <span style="color: rgb(184, 191, 198);">myThread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Thread::current</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">assert</span>(<span style="color: rgb(184, 191, 198);">myThread-&gt;is_VM_thread</span>(), <span style="color: rgb(210, 107, 107);">"Only VM thread may execute a safepoint"</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">#if INCLUDE_ALL_GCS</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">UseConcMarkSweepGC</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 使用CMS回收器，那么暂停CMS线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ConcurrentMarkSweepThread::synchronize</span>(<span style="color: rgb(132, 182, 203);">false</span>);</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">UseG1GC</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 使用G1回收器，那么也需要通知暂停GC线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ConcurrentGCThread::safepoint_synchronize</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">#endif </span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取线程锁，此时不允许再创建和销毁线程</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Threads_lock-&gt;lock</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取所有Java 活动的java线程计数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nof_threads</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Threads::number_of_threads</span>();</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取线程安全点锁，注意：这把锁为互斥锁，如果其他线程再次获取，那么需要阻塞，这里很关键</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">MutexLocker</span> <span style="color: rgb(184, 191, 198);">mu</span>(<span style="color: rgb(184, 191, 198);">Safepoint_lock</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 重置JNI活动线程</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_current_jni_active_count</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_waiting_to_block</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nof_threads</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">TryingToBlock</span>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span> ;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">still_running</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nof_threads</span>;</p>
+<p><span style="color: rgb(218, 146, 74);">// state变量用于表示线程安全点状态，我们看到首先将状态修改为 _synchronizing 状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_state</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">_synchronizing</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">OrderAccess::fence</span>(); <span style="color: rgb(218, 146, 74);">// 使用系统屏障保证不会发生重排序，且保证_state状态的修改被其他线程所看见</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!UseMembar</span>) { <span style="color: rgb(218, 146, 74);">// 如果我们不使用全屏障指令，那么我们调用serialize_thread_states方法来序列化线程状态的读写操作，这个我们会在后面详细讲解，这里我们只需要知道是：为了保证线程从JNI方法执行转到执行字节码时，保证VMThread读取到最新的线程状态</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">os::serialize_thread_states</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 通知解释器当前已经进入线程安全点</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Interpreter::notice_safepoints</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将polling page 轮询页 设置为不可访问状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">UseCompilerSafepoints</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">DeferPollingPageLoopCount</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">PageArmed</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span> ;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">os::make_polling_page_unreadable</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取cpu核心数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ncpus</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">os::processor_count</span>() ;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果设置线程安全点超时检测输出debug信息，那么计算超时时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">SafepointTimeout</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">safepoint_limit_time</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">os::javaTimeNanos</span>() <span style="color: rgb(184, 191, 198);">+</span> (<span style="color: rgb(184, 191, 198);">jlong</span>)<span style="color: rgb(184, 191, 198);">SafepointTimeoutDelay</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">MICROUNITS</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 遍历线程链表，等待他们都进入线程安全点</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">iterations</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">steps</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span> ;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(184, 191, 198);">still_running</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">JavaThread</span> <span style="color: rgb(184, 191, 198);">*cur</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Threads::first</span>(); <span style="color: rgb(184, 191, 198);">cur</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span>; <span style="color: rgb(184, 191, 198);">cur</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">cur-&gt;next</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取当前Java线程运行状态</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ThreadSafepointState</span> <span style="color: rgb(184, 191, 198);">*cur_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">cur-&gt;safepoint_state</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cur_state-&gt;is_running</span>()) { <span style="color: rgb(218, 146, 74);">// 如果Java线程处于运行状态，那么调用examine_state_of_thread方法帮助线程滚动到线程安全点</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cur_state-&gt;examine_state_of_thread</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!cur_state-&gt;is_running</span>()) { <span style="color: rgb(218, 146, 74);">// 线程成功停止，那么减少活动线程计数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">still_running--</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;... <span style="color: rgb(218, 146, 74);">// 此处省略掉超时检测和避免CPU空转的优化机制</span></p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">assert</span>(<span style="color: rgb(184, 191, 198);">still_running</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(210, 107, 107);">"sanity check"</span>); <span style="color: rgb(218, 146, 74);">// 此时必须所有Java线程都进入了线程安全点且状态不为_running状态</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果仍然有线程没有进入阻塞状态，那么需要等待他们都进入安全点，我们虽然在上面的循环中改变了线程的状态不为_running，但是，有可能线程只是修改了状态还没有阻塞，此时需要等待</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">_waiting_to_block</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Safepoint_lock-&gt;wait</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">assert</span>(<span style="color: rgb(184, 191, 198);">_waiting_to_block</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(210, 107, 107);">"sanity check"</span>); <span style="color: rgb(218, 146, 74);">// 所有Java线程必须都已经处于线程安全点状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_safepoint_counter</span> <span style="color: rgb(184, 191, 198);">++</span>; <span style="color: rgb(218, 146, 74);">// 线程安全点计数++</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 修改状态为_synchronized表示已经将所有线程进入线程安全点，当前只有VMThread当前线程执行</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">_synchronized</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">OrderAccess::fence</span>(); <span style="color: rgb(218, 146, 74);">// 指令全屏障保证以上修改的可见性</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>线程安全点状态与线程状态原理</strong></p>
+<p>SynchronizeState枚举类用于描述SafepointSynchronize同步类的安全点状态。它分为三个状态。详细描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">enum</span> <span style="color: rgb(141, 141, 240);">SynchronizeState</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_not_synchronized</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 系统没有开启线程安全点同步</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_synchronizing</span>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 系统开启线程安全点同步，但此时还在等待线程进入block状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_synchronized</span>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">2</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 所有线程已经停止执行，只有VMThread在执行，此时表明完全进入安全点状态</span></p>
+<p>};</p>
+<p>suspend_type枚举用于表示线程在处理线程安全点时的状态。同样由三个类型。详细描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">enum</span> <span style="color: rgb(141, 141, 240);">suspend_type</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_running</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(218, 146, 74);">// 线程处于运行状态，并没有进入线程安全点</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_at_safepoint</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(218, 146, 74);">// 线程已经进入线程安全点，比如进入了block状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_call_back</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">2</span>&nbsp;<span style="color: rgb(218, 146, 74);">// 如果线程在解释执行或vm状态中，保持执行并等待回调</span></p>
+<p>};</p>
+<p>JavaThreadState枚举类用于表示线程目前在执行代码的状态。我们看到，为了支持状态的转换期间的操作我们对每一个状态后面都增加了一个过渡状态_trans结尾的状态，表明从上一个状态转变到下一个状态的中间状态。我们主要关心四个重要的状态描述即可。</p>
+<ol>
+ <li>_thread_new : 新建状态，还没有被执行</li>
+ <li>thread_in_native : 正在执行JNI代码</li>
+ <li>_thread_in_vm : 正在VM中执行非用户代码</li>
+ <li>_thread_in_Java : 正在解释执行字节码或者执行JIT编译的本地代码</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">enum</span> <span style="color: rgb(141, 141, 240);">JavaThreadState</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_uninitialized</span>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(218, 146, 74);">// 枚举类的初始值，不可能检测到该变量，除非代码出现了bug</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_new</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">2</span>,</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_new_trans</span>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">3</span>,</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_in_native</span>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">4</span>,</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_in_native_trans</span>&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">5</span>,</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_in_vm</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">6</span>,</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_in_vm_trans</span>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">7</span>,</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_in_Java</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">8</span>,</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_in_Java_trans</span>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">9</span>,</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_blocked</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">10</span>, <span style="color: rgb(218, 146, 74);">// 阻塞状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_blocked_trans</span>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">11</span>,</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_thread_max_state</span>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">12</span>&nbsp;<span style="color: rgb(218, 146, 74);">// 最大状态，由于统计分析使用</span></p>
+<p>};</p>
+<p><strong>serialize_thread_states方法原理</strong></p>
+<p>该方法用于序列化线程状态的修改和访问，用于实现fence全屏障的优化。如果直接讲该方法的话可能有点唐突，毕竟我们知道该方法是针对线程状态变化的，那么我们先来看JNI方法返回后需要对线程状态进行修改且为了避免越过线程安全点继续执行java代码，导致系统出现问题，那么需要对这些状态访问进行序列化。我们来看transition_from_native方法，该方法当线程从执行JNI代码中返回时调用。</p>
+<p>我们看到该方法首先将状态变为_thread_in_native_trans，然后根据UseMembar变量来选择使用fence屏障指令或者serialize_thread_states方法来完成线程状态修改对VMthread线程的可见性还有禁止指令重排序，而我们通常不使用UseMembar，那么这时使用serialize_memory来取代fence全屏障的操作，当该方法调用完成后，那么线程状态将会对VMThread可见，最后我们在设置线程最终状态时，检测当前系统是否处于线程安全点，如果在该状态，那么需要阻塞线程。详细实现如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">inline</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">transition_from_native</span>(<span style="color: rgb(184, 191, 198);">JavaThread</span> <span style="color: rgb(184, 191, 198);">*thread</span>, <span style="color: rgb(184, 191, 198);">JavaThreadState</span> <span style="color: rgb(184, 191, 198);">to</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 转变线程状态为_thread_in_native_trans，表明正从JNI返回执行Java代码</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;set_thread_state</span>(<span style="color: rgb(184, 191, 198);">_thread_in_native_trans</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果是多处理，那么根据UseMembar变量来选择使用fence屏障指令或者serialize_thread_states方法来完成线程状态修改对VMthread线程的可见性还有禁止指令重排序</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">os::is_MP</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">UseMembar</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">OrderAccess::fence</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 由于Windows不同于Linux，所以需要调用该接口方法，不过我们都是研究Linux，所以该方法直接调用write_memory_serialize_page方法</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// static inline void serialize_memory(JavaThread *thread) {</span></p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">//&nbsp;&nbsp;&nbsp;os::write_memory_serialize_page(thread);</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// }</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">InterfaceSupport::serialize_memory</span>(<span style="color: rgb(184, 191, 198);">thread</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 检测当前系统处于线程安全点，如果处于该状态，那么调用check_safepoint_and_suspend_for_native_trans阻塞当前线程</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">SafepointSynchronize::do_call_back</span>() <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">thread-&gt;is_suspend_after_native</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">JavaThread::check_safepoint_and_suspend_for_native_trans</span>(<span style="color: rgb(184, 191, 198);">thread</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 一切正常，那么设置线程状态为想要修改的状态，通常该状态为_thread_in_Java</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;set_thread_state</span>(<span style="color: rgb(184, 191, 198);">to</span>);</p>
+<p>}</p>
+<p>接下来我们来看os::write_memory_serialize_page方法的实现。我们看到首先根据JavaThread地址计算出_mem_serialize_page中的偏移量，然后向该偏移量处写入1。那么可能读者会问两个问题：</p>
+<ol>
+ <li>为啥要计算偏移量？</li>
+ <li>我们知道缓存行大小通常为64byte，而4kb=4096byte，我们为了避免多个线程之间写入这个值导致缓存行共享问题，导致性能下降所以进行偏移量计算让不同线程尽量写不同缓存行</li>
+ <li>为何写1，写其他值行不行，这么做是为何？</li>
+ <li>写1写0写其他值都不重要，这里是为了搭配serialize_thread_states方法使用的，我们记住这里有一个写入操作即可。</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">inline</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">write_memory_serialize_page</span>(<span style="color: rgb(184, 191, 198);">JavaThread</span> <span style="color: rgb(184, 191, 198);">*thread</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">uintptr_t</span> <span style="color: rgb(184, 191, 198);">page_offset</span> <span style="color: rgb(184, 191, 198);">=</span> ((<span style="color: rgb(184, 191, 198);">uintptr_t</span>)<span style="color: rgb(184, 191, 198);">thread</span> <span style="color: rgb(184, 191, 198);">&gt;&gt;</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">get_serialize_page_shift_count</span>()) <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">get_serialize_page_mask</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">*</span>(<span style="color: rgb(200, 143, 208);">volatile</span> <span style="color: rgb(184, 191, 198);">int32_t</span> <span style="color: rgb(184, 191, 198);">*</span>)((<span style="color: rgb(184, 191, 198);">uintptr_t</span>)<span style="color: rgb(184, 191, 198);">_mem_serialize_page+page_offset</span>) <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>}</p>
+<p>接下来我们来看SafepointSynchronize::do_call_back() 方法和JavaThread::check_safepoint_and_suspend_for_native_trans(thread)方法的实现原理。我们看到do_call_back其实就是检测当前系统是否进入了线程安全点，如果判断处于安全点，那么就需要阻塞当前线程对象。详细实现如下。</p>
+<p><span style="color: rgb(218, 146, 74);">// 查看安全点状态是否为_not_synchronized状态，如果不是，那么表明当前系统已经开始STW</span></p>
+<p><span style="color: rgb(200, 143, 208);">inline</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(141, 141, 240);">do_call_back</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> (<span style="color: rgb(184, 191, 198);">_state</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">_not_synchronized</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 如果系统处于线程安全点状态，那么我们需要阻塞当前线程</span></p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">JavaThread::check_safepoint_and_suspend_for_native_trans</span>(<span style="color: rgb(184, 191, 198);">JavaThread</span> <span style="color: rgb(184, 191, 198);">*thread</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">JavaThread</span> <span style="color: rgb(184, 191, 198);">*curJT</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">JavaThread::current</span>(); <span style="color: rgb(218, 146, 74);">// 获取当前执行改代码的JavaThread对象指针</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">SafepointSynchronize::do_call_back</span>()) { <span style="color: rgb(218, 146, 74);">// 再次检测线程安全点状态</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果处于线程安全点，那么阻塞当前线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SafepointSynchronize::block</span>(<span style="color: rgb(184, 191, 198);">curJT</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>我们继续跟进SafepointSynchronize::block(curJT)方法。我们看到该方法根据线程状态来选择不同的执行过程，我们看到如果线程正在执行字节码或者从vm状态转换期间调用了该方法，那么我们需要减少waiting_to_block计数，同时负责唤醒在begin方法中等待所有方法阻塞的VMThread线程，此时表明所有线程均阻塞（STW），随后将自己设置为阻塞状态，然后通过获取Threads_lock锁来让自己阻塞，因为我们知道VMThread已经获取到了该锁，所以当前线程获取锁必定会阻塞。而对于从JNI方法中返回的线程而言，只需要改变状态为thread_blocked然后阻塞即可。详细实现如下。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">SafepointSynchronize::block</span>(<span style="color: rgb(184, 191, 198);">JavaThread</span> <span style="color: rgb(184, 191, 198);">*thread</span>) {</p>
+<p>...</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">switch</span>(<span style="color: rgb(184, 191, 198);">state</span>) { <span style="color: rgb(218, 146, 74);">// 根据当前线程状态来选择如何阻塞</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">_thread_in_vm_trans</span>:</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">_thread_in_Java</span>:&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 当前线程状态为vm转换状态或者执行字节码状态</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;set_thread_state</span>(<span style="color: rgb(184, 191, 198);">_thread_in_vm</span>); <span style="color: rgb(218, 146, 74);">// 首先将状态转为_thread_in_vm</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">is_synchronizing</span>()) { <span style="color: rgb(218, 146, 74);">// 如果当前VMThread正处于等待所有线程进入线程安全点状态，那么增加TryingToBlock计数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Atomic::inc</span> (<span style="color: rgb(184, 191, 198);">&amp;TryingToBlock</span>) ;</p>
+<p>&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Safepoint_lock-&gt;lock_without_safepoint_check</span>(); <span style="color: rgb(218, 146, 74);">// 获取安全点锁</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 再次判断是否在等待线程阻塞，如果是，那么减少等待计数，同时将线程线程安全点状态为回调执行设置为true，这里用于调试我们忽略它的作用即可。接着如果线程正在执行关键的JNI代码，那么此时增加JNI活动计数，最后如果thread为最后一个需要等待阻塞的线程，那么唤醒阻塞在Safepoint_lock等待所有线程阻塞的VMThread线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">is_synchronizing</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_waiting_to_block--</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;safepoint_state</span>()<span style="color: rgb(184, 191, 198);">-&gt;set_has_called_back</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">thread-&gt;in_critical</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">increment_jni_active_count</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">_waiting_to_block</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Safepoint_lock-&gt;notify_all</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置thread状态为_thread_blocked，同时释放Safepoint_lock锁</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;set_thread_state</span>(<span style="color: rgb(184, 191, 198);">_thread_blocked</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Safepoint_lock-&gt;unlock</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 此时如果VMThread获取了Safepoint_lock并开始执行STW的操作，那么由于VMthread线程获取到了线程锁Threads_lock，所以此时当前Thread会被阻塞</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Threads_lock-&gt;lock_without_safepoint_check</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;set_thread_state</span>(<span style="color: rgb(184, 191, 198);">state</span>); <span style="color: rgb(218, 146, 74);">// 当从阻塞中唤醒后，说明此时已经过了线程安全点，那么将线程状态恢复</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Threads_lock-&gt;unlock</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 线程处于以下三个状态，那么直接设置状态为_thread_blocked，同时获取Threads_lock阻塞，直到VMThread释放该锁</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">_thread_in_native_trans</span>:</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">_thread_blocked_trans</span>:</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">_thread_new_trans</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;set_thread_state</span>(<span style="color: rgb(184, 191, 198);">_thread_blocked</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Threads_lock-&gt;lock_without_safepoint_check</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">thread-&gt;set_thread_state</span>(<span style="color: rgb(184, 191, 198);">state</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Threads_lock-&gt;unlock</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">default</span>:</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fatal</span>(<span style="color: rgb(184, 191, 198);">err_msg</span>(<span style="color: rgb(210, 107, 107);">"Illegal threadstate encountered: %d"</span>, <span style="color: rgb(184, 191, 198);">state</span>));</p>
+<p>}</p>
+<p>...</p>
+<p>}</p>
+<p>那么此时我们是不是就可以来看看serialize_thread_states方法为什么要这么做了。在write_memory_serialize_page方法中我们知道让线程往这个memory_serialize_page页写入了1，而这里却对该页首先设置为MEM_PROT_READ，表明该页只读，然后再次修改为MEM_PROT_RW表示可读写，这是为何？我们知道在Linux中如果一个页被设置为了只读，如果你往其中写入数据，那么将会发生SIGSEGV信号，而该信号将会被JVM进程所设置的signal handler处理，同时必须要注意的是：当页面权限被修改后将会强制CPU的store buffer进行刷新，从而导致其中写入的变量被其他CPU可见，这很重要，利用了该特性完成了类似fence全屏障的操作。那么这里就差最后一个问题没有解决了：为啥要获取SerializePageLock页面锁？我们看block_on_serialize_page_trap方法，该方法作为SIGSEGV信号的处理方法，我们看到在其中获取到了SerializePageLock，考虑下如果VMThread在对memory_serialize_page页进行访问权限操作期间，由于刚设置了MEM_PROT_READ，而其他线程对该页进行了写1操作，此时就会发生SIGSEGV信号给当前线程来处理该信号，而此时便让线程等待VMThread将权限修改为MEM_PROT_RW即可。而我们可不可以不用该锁了，貌似没有什么实际意义？是这样的，在Linux有些平台上修改页权限，由于进程调度器的问题将会导致修改的权限可能延迟一段时间才能被其他线程可见，而为了避免这段时间导致其他线程一直接收到SIGSEGV调用block_on_serialize_page_trap方法，那么此时我们通过锁机制来完成该操作。详细实现如下。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">os::block_on_serialize_page_trap</span>() {</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">Thread::muxAcquire</span>(<span style="color: rgb(184, 191, 198);">&amp;SerializePageLock</span>, <span style="color: rgb(210, 107, 107);">"set_memory_serialize_page"</span>);</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">Thread::muxRelease</span>(<span style="color: rgb(184, 191, 198);">&amp;SerializePageLock</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">os::serialize_thread_states</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread::muxAcquire</span>(<span style="color: rgb(184, 191, 198);">&amp;SerializePageLock</span>, <span style="color: rgb(210, 107, 107);">"serialize_thread_states"</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">os::protect_memory</span>((<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span>)<span style="color: rgb(184, 191, 198);">os::get_memory_serialize_page</span>(),</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">os::vm_page_size</span>(), <span style="color: rgb(184, 191, 198);">MEM_PROT_READ</span>); <span style="color: rgb(218, 146, 74);">// 修改页只读</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">os::protect_memory</span>((<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span>)<span style="color: rgb(184, 191, 198);">os::get_memory_serialize_page</span>(),</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">os::vm_page_size</span>(), <span style="color: rgb(184, 191, 198);">MEM_PROT_RW</span>); <span style="color: rgb(218, 146, 74);">// 修改页可读写</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread::muxRelease</span>(<span style="color: rgb(184, 191, 198);">&amp;SerializePageLock</span>);</p>
+<p>}</p>
+<p><strong>examine_state_of_thread方法原理</strong></p>
+<p>接下来我们来看examine_state_of_thread方法，我们知道该方法将会决定线程以什么样的方式进入阻塞状态。首先我们看看当前线程是否已经被外部线程挂起，如果是，那么调用roll_forward将线程推动到线程安全点，</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">ThreadSafepointState::examine_state_of_thread</span>() {</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">JavaThreadState</span> <span style="color: rgb(184, 191, 198);">state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">_thread-&gt;thread_state</span>();</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">_orig_thread_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">state</span>;</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">// 当线程恢复是需要持有线程锁，由于该锁已经被VMTHREAD获取，所以这里没有任何问题</span></p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(184, 191, 198);">is_suspended</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">_thread-&gt;is_ext_suspended</span>();</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">is_suspended</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">roll_forward</span>(<span style="color: rgb(184, 191, 198);">_at_safepoint</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>}</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">// 如果线程此时已经处于线程安全点也即：_thread_in_native或者_thread_blocked，那么将其也滚动到线程安全点</span></p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">SafepointSynchronize::safepoint_safe</span>(<span style="color: rgb(184, 191, 198);">_thread</span>, <span style="color: rgb(184, 191, 198);">state</span>)) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SafepointSynchronize::check_for_lazy_critical_native</span>(<span style="color: rgb(184, 191, 198);">_thread</span>, <span style="color: rgb(184, 191, 198);">state</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">roll_forward</span>(<span style="color: rgb(184, 191, 198);">_at_safepoint</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>}</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">// 处于thread_in_vm状态，那么滚动状态为_call_back</span></p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">state</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">_thread_in_vm</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">roll_forward</span>(<span style="color: rgb(184, 191, 198);">_call_back</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>}</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">// 如果是其他状态的线程，那么让他们自己进入_thread_blocked状态，在下一次循环进入该方法时将会在SafepointSynchronize::safepoint_safe(_thread, state)判断处理</span></p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">assert</span>(<span style="color: rgb(184, 191, 198);">is_running</span>(), <span style="color: rgb(210, 107, 107);">"examine_state_of_thread on non-running thread"</span>);</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>}</p>
+<p>接下来我们来看roll_forward方法的原理，该方法用于将线程滚动到线程安全点。我们看到该方法其实就是对waiting_to_block计数进行操作，在signal_thread_at_safepoint方法中仅仅只是将waiting_to_block--。详细实现如下。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">ThreadSafepointState::roll_forward</span>(<span style="color: rgb(184, 191, 198);">suspend_type</span> <span style="color: rgb(184, 191, 198);">type</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">_type</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">type</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">switch</span>(<span style="color: rgb(184, 191, 198);">_type</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 首先调用signal_thread_at_safepoint减少_waiting_to_block计数，然后看看JNIcritical增加计数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">_at_safepoint</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SafepointSynchronize::signal_thread_at_safepoint</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">_thread-&gt;in_critical</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SafepointSynchronize::increment_jni_active_count</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 直接设置called_back为false，这里用于debug测试，不需要了解</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">_call_back</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">set_has_called_back</span>(<span style="color: rgb(132, 182, 203);">false</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">_running</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">default</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ShouldNotReachHere</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span>&nbsp;<span style="color: rgb(141, 141, 240);">signal_thread_at_safepoint</span>()&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{ <span style="color: rgb(184, 191, 198);">_waiting_to_block--</span>; }</p>
+<p><strong>make_polling_page_unreadable方法原理</strong></p>
+<p>make_polling_page_unreadable方法用于将处于JIT编译优化后代码轮询检测线程安全点的polling_page进行操作。我们看到该方法其实就是调用Linux的系统调用mprotect，将数据页_polling_page设置为PROT_NONE，此时表示该页不允许被访问，那么当我们的线程访问该页时将会触发一个SIGSEGV信号，此时将会阻塞当前线程。详细原理如下。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">os::make_polling_page_unreadable</span>(<span style="color: rgb(28, 198, 133);">void</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>( <span style="color: rgb(184, 191, 198);">!guard_memory</span>((<span style="color: rgb(28, 198, 133);">char*</span>)<span style="color: rgb(184, 191, 198);">_polling_page</span>, <span style="color: rgb(184, 191, 198);">Linux::page_size</span>()) )</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fatal</span>(<span style="color: rgb(210, 107, 107);">"Could not disable polling page"</span>);</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(141, 141, 240);">os::guard_memory</span>(<span style="color: rgb(28, 198, 133);">char*</span> <span style="color: rgb(184, 191, 198);">addr</span>, <span style="color: rgb(28, 198, 133);">size_t</span> <span style="color: rgb(184, 191, 198);">size</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">linux_mprotect</span>(<span style="color: rgb(184, 191, 198);">addr</span>, <span style="color: rgb(184, 191, 198);">size</span>, <span style="color: rgb(184, 191, 198);">PROT_NONE</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(141, 141, 240);">linux_mprotect</span>(<span style="color: rgb(28, 198, 133);">char*</span> <span style="color: rgb(184, 191, 198);">addr</span>, <span style="color: rgb(28, 198, 133);">size_t</span> <span style="color: rgb(184, 191, 198);">size</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">prot</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">char*</span> <span style="color: rgb(184, 191, 198);">bottom</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">char*</span>)<span style="color: rgb(184, 191, 198);">align_size_down</span>((<span style="color: rgb(184, 191, 198);">intptr_t</span>)<span style="color: rgb(184, 191, 198);">addr</span>, <span style="color: rgb(184, 191, 198);">os::Linux::page_size</span>());</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">align_size_up</span>(<span style="color: rgb(184, 191, 198);">pointer_delta</span>(<span style="color: rgb(184, 191, 198);">addr</span>, <span style="color: rgb(184, 191, 198);">bottom</span>, <span style="color: rgb(100, 171, 143);">1</span>) <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">size</span>, <span style="color: rgb(184, 191, 198);">os::Linux::page_size</span>());</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> ::<span style="color: rgb(184, 191, 198);">mprotect</span>(<span style="color: rgb(184, 191, 198);">bottom</span>, <span style="color: rgb(184, 191, 198);">size</span>, <span style="color: rgb(184, 191, 198);">prot</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>}</p>
+<p>那么问题来了？有没有代码可以验证我们处理了这个SIGSEGV信号呢？我们继续看以下代码。当我们在信号处理函数中处理SIGSEGV信号时，将会对发生该信号的地址进行判断，如果判断为_polling_page页中的地址，那么将会调用get_poll_stub获取到检测安全点的代码执行。详细实现如下。</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">sig</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">SIGSEGV</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">os::is_poll_address</span>((<span style="color: rgb(184, 191, 198);">address</span>)<span style="color: rgb(184, 191, 198);">info-&gt;si_addr</span>)) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">stub</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SharedRuntime::get_poll_stub</span>(<span style="color: rgb(184, 191, 198);">pc</span>);</p>
+<p>}</p>
+<p><strong>os::make_polling_page_readable方法原理</strong></p>
+<p>该方法为make_polling_page_unreadable方法的逆向操作，将在解除线程安全点时调用。我们看到就是调用mprotect系统调用将页面修改为PROT_READ可读状态即可。详细原理如下。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">os::make_polling_page_readable</span>(<span style="color: rgb(28, 198, 133);">void</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>( <span style="color: rgb(184, 191, 198);">!linux_mprotect</span>((<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span>)<span style="color: rgb(184, 191, 198);">_polling_page</span>, <span style="color: rgb(184, 191, 198);">Linux::page_size</span>(), <span style="color: rgb(184, 191, 198);">PROT_READ</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fatal</span>(<span style="color: rgb(210, 107, 107);">"Could not enable polling page"</span>);</p>
+<p>&nbsp;}</p>
+<p>};</p>
+<p><strong>SafepointSynchronize::end方法原理</strong></p>
+<p>该方法用与解除线程安全点，恢复所有线程执行。</p>
+<pre class="ql-syntax">void SafepointSynchronize::end() {
+    // 修改poling page为可访问状态
+    if (PageArmed) {
+        os::make_polling_page_readable();
+        PageArmed = 0 ;
+    }
+    // 通知解释器移除对线程安全点的检测
+    Interpreter::ignore_safepoints();
+    {
+        MutexLocker mu(Safepoint_lock);
+        _state = _not_synchronized; // 修改线程安全点状态为未同步状态表明退出线程安全点
+        OrderAccess::fence(); // 使用全屏障使该修改对所有线程可见
+        // 遍历所有线程，将所有线程的线程安全点状态修改为_running状态
+        for(JavaThread *current = Threads::first(); current; current = current-&gt;next()) {
+            ThreadSafepointState* cur_state = current-&gt;safepoint_state();
+            cur_state-&gt;restart(); // 修改线程状态为_running
+        }
+        Threads_lock-&gt;unlock(); // 修改完状态后释放线程锁，此时所有线程将会被唤醒
+    }
+    #if INCLUDE_ALL_GCS
+    // 通知GC线程已经退出线程安全点
+    if (UseConcMarkSweepGC) {
+        ConcurrentMarkSweepThread::desynchronize(false);
+    } else if (UseG1GC) {
+        ConcurrentGCThread::safepoint_desynchronize();
+    }
+    #endif // INCLUDE_ALL_GCS
+}
+</pre>
+<p><strong>总结</strong></p>
+<p>我们通过原理描述得到以下信息：</p>
+<ol>
+ <li>SafepointSynchronize::begin方法用于让所有线程进入线程安全点</li>
+ <li>SafepointSynchronize::end方法用于唤醒所有处于安全点的线程</li>
+ <li>我们通过Thread_Lock来让线程处于阻塞状态（VMThread在系统线程安全点时一直持有该锁，其他线程通过该锁来等待）</li>
+ <li>JIT编译的代码由于需要高效执行，我们通过设置不可访问页通过信号来处理线程安全点的检测和阻塞</li>
+ <li>我们可以通过serialize_thread_states来替代fence全屏障完成对线程状态修改的可见性，我们看到该方法也即利用Linux的页权限修改刷新CPU Store Buffer和TLB的修改来保证数据可见性，同时为了避免调度延迟的原因导致CPU空转一直执行SIGSEGV处理函数，那么采用了SerializePageLock来优化</li>
+</ol>
+<p><br></p></p>
+</body>
+</html>

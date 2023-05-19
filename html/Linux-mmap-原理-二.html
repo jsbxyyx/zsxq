@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux mmap 原理 二</h1>
+<p>2022-12-01T07:45:17.994+0800</p>
+<p><p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">do_munmap 函数</strong></h2>
+<p><br></p>
+<p>该函数将用于在指定固定映射时（必须从 addr 地址处映射），返回的 vma 中覆盖 addr + length 长度的虚拟内存域解除之前的映射。该函数较为简单：若找到需要映射的 vma，那么将其中包含 addr -&gt; addr+length 的区间切割，然后解除映射，将这段虚拟地址交给外部函数使用。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">do_munmap(struct mm_struct *mm, unsigned long start, size_t len)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> end;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct *mpnt, *prev, *last;</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((start &amp; ~PAGE_MASK) || start &gt; TASK_SIZE || len &gt; TASK_SIZE-start) <span class="ql-token hljs-comment">// 映射起始地址必须页对齐，映射起始地址和映射长度不能超过用户态虚拟地址空间</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((len = PAGE_ALIGN(len)) == <span class="ql-token hljs-number">0</span>) <span class="ql-token hljs-comment">// 映射长度为0</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 找到第一个与起始地址重叠的 vma 结构（该函数返回时，若存在 addr 的映射地址被其他 vma 占据，那么 该 addr 将可能在 ：prev -&gt; end 与 mpnt-&gt; end 的映射区间之间）</span>
+ </div>
+ <div class="ql-code-block">
+  mpnt = find_vma_prev(mm, start, &amp;prev);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!mpnt) &nbsp;<span class="ql-token hljs-comment">// 若不存在重叠 vma，那么返回</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 此时 start &lt; mpnt-&gt;vm_end ，也即找到可能包含需要映射地址的 vma 结构（因为 vma 的结束地址地址）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (is_vm_hugetlb_page(mpnt)) { <span class="ql-token hljs-comment">// 若使用 hugetlbfs 文件系统映射，那么检测对齐 range，这里了解即可</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> ret = is_aligned_hugepage_range(start, len);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (ret)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> ret;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 获取映射后的虚拟地址末尾，若当前找到的 vma 的起始地址大于映射后的结束地址，那么表名 需要映射的 start -&gt; end 这一段虚拟地址没有 vma 占有，那么直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  end = start + len;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (mpnt-&gt;vm_start &gt;= end)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 此时：mpnt-&gt;vm_start &lt; end，表明当前映射的地址区间 已经被之前的 vma 占有，那么此时需要解除映射</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (mpnt-&gt;vm_file &amp;&amp; (mpnt-&gt;vm_flags &amp; VM_EXEC)) <span class="ql-token hljs-comment">// 通知 exec_unmap_notifier 链（了解即可），当前马上要解除映射</span>
+ </div>
+ <div class="ql-code-block">
+  profile_exec_unmap(mm);
+ </div>
+ <div class="ql-code-block">
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 需要映射的起始地址包含在当前 vma 区间中，那么尝试对该 vma 切割</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (start &gt; mpnt-&gt;vm_start) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (split_vma(mm, mpnt, start, <span class="ql-token hljs-number">0</span>))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  prev = mpnt; <span class="ql-token hljs-comment">// 由于上面设置的 new_below 参数为 0，此时 mpnt 将表示 切割后的低地址部分：mpnt-&gt;vm_start -&gt; addr ，新切割的 vma 表示：addr -&gt; mpnt-&gt;vm_end</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 切割后看看是否需要映射的 start -&gt; end 区间是否已经切割完成，若没有，那么继续切割（这是为了避免出现：找到的 vma (start 1 -&gt; end 1) ，需要映射的地址区间：start 2 -&gt; end 2 , end 2 &gt; end 1 情况）</span>
+ </div>
+ <div class="ql-code-block">
+  last = find_vma(mm, end);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (last &amp;&amp; end &gt; last-&gt;vm_start) { <span class="ql-token hljs-comment">// 当前需要映射区间结束地址 仍然 大于 找到的后面的 vma区间，那么继续切割</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (split_vma(mm, last, end, <span class="ql-token hljs-number">1</span>))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  mpnt = prev? prev-&gt;vm_next: mm-&gt;mmap; <span class="ql-token hljs-comment">// 获取当前需要操作的 vma 结构，若存在 包含映射地址的 vma，那么取该 vma即可，否则 操作对象 为 全局 mmap 对象，因为需要解除映射的地址 并没有其他 vma 占有</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 当前进程页表自旋锁，将找到的 vma 区间解除映射</span>
+ </div>
+ <div class="ql-code-block">
+  spin_lock(&amp;mm-&gt;page_table_lock);
+ </div>
+ <div class="ql-code-block">
+  detach_vmas_to_be_unmapped(mm, mpnt, prev, end); <span class="ql-token hljs-comment">// 将需要解除映射的vma从当前进程的vma 链表中移出</span>
+ </div>
+ <div class="ql-code-block">
+  unmap_region(mm, mpnt, prev, start, end); <span class="ql-token hljs-comment">// 删除需要解除映射的页表信息，同时刷新 tlb（因为 这些地址已经解除映射，其中缓存的 物理地址 不再需要，所以必须刷新 MMU 的 TLB）</span>
+ </div>
+ <div class="ql-code-block">
+  spin_unlock(&amp;mm-&gt;page_table_lock);
+ </div>
+ <div class="ql-code-block">
+  unmap_vma_list(mm, mpnt); <span class="ql-token hljs-comment">// 对当前解除映射的 vma 变量修正</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">find_vma_prev 函数</strong></h2>
+<p><br></p>
+<p>该函数功能 与 find_vma 相同，但会在设置 *pprev 时，返回一个指向上一个 VMA 的指针。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">struct</span> vm_area_struct * <span class="ql-token hljs-title">find_vma_prev(struct mm_struct *mm, unsigned long addr,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> struct vm_area_struct **pprev)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct *vma =</span> <span class="ql-token hljs-literal">NULL</span>, *prev = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rb_node * rb_node;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!mm)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> out;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 防止 addr 地址低于第一个 VMA</span>
+ </div>
+ <div class="ql-code-block">
+  vma = mm-&gt;mmap;
+ </div>
+ <div class="ql-code-block">
+  rb_node = mm-&gt;mm_rb.rb_node;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">while</span> (rb_node) { <span class="ql-token hljs-comment">// 遍历红黑树找到第一个可能包含 addr 的 vma</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct *vma_tmp;</span>
+ </div>
+ <div class="ql-code-block">
+  vma_tmp = rb_entry(rb_node, <span class="ql-token hljs-keyword">struct</span> vm_area_struct, vm_rb);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (addr &lt; vma_tmp-&gt;vm_end) {
+ </div>
+ <div class="ql-code-block">
+  rb_node = rb_node-&gt;rb_left;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  prev = vma_tmp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!prev-&gt;vm_next || (addr &lt; prev-&gt;vm_next-&gt;vm_end)) <span class="ql-token hljs-comment">// 上一个 vma 是最后一个 vma 或者 当前 addr 包含在下一个 vma 与 当前 vma 之间（注意看上面的 addr &lt; vma_tmp-&gt;vm_end 判断 如果为 false，那么说明需要查找的 addr 的 在当前 vma 映射区间的上面，同时这里 addr &lt; prev-&gt;vm_next-&gt;vm_end，表名在后面一个 vma 的下面，所以可以判定该 地址 包含在这两个 vma 映射区域之间）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  rb_node = rb_node-&gt;rb_right;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  out:
+ </div>
+ <div class="ql-code-block">
+  *pprev = prev; <span class="ql-token hljs-comment">// 保存找到的前一个 vma ，也即：addr &gt; vma_tmp-&gt;vm_end 的第一个 vma</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> prev ? prev-&gt;vm_next : vma; <span class="ql-token hljs-comment">// 若 prev 存在，那么又由于上述循环的 break 的定义，所以我们返回 prev-&gt;vm_next 即可，否则 返回 全局 vma，也即整个 虚拟地址空间</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">split_vma 函数</strong></h2>
+<p><br></p>
+<p>该函数将在地址 addr 处将 vma 拆分为两部分，一个新的 vma 将被分配给第一部分或插入第一部分的后面。可以从源码中看到：根据 new_below 来决定 新的 vma 和旧的 vma 分别用于管理哪一段地址，新创建的 vma 需要插入到链表和红黑树中。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 当我们调用该函数时的判断：start &gt; mpnt-&gt;vm_start ，然后 split_vma(mm, mpnt, start, 0) ，可以看到我们此时需要将 vma，切割为： mpnt-&gt;vm_start -&gt; start ，start -&gt; mpnt-&gt;vm_end 两部分</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">split_vma(struct mm_struct * mm, struct vm_area_struct * vma,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> &nbsp; &nbsp; &nbsp;unsigned long addr, int new_below)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct *new;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct address_space *mapping =</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (mm-&gt;map_count &gt;= MAX_MAP_COUNT) <span class="ql-token hljs-comment">// 由于需要切分，会生成新的 vma 映射，所以这里需要再次检测是否超过 映射数量限制</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  new = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL); <span class="ql-token hljs-comment">// 新创建一个新的 vma 结构</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!new)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 由于分割的两段 vma 大部分属性都是一样的，所以这里直接全部复制，然后修正</span>
+ </div>
+ <div class="ql-code-block">
+  *new = *vma;
+ </div>
+ <div class="ql-code-block">
+  INIT_LIST_HEAD(&amp;new-&gt;shared); &nbsp;<span class="ql-token hljs-comment">// 对于共享链表节点，需要单独初始化</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 根据设置来决定新的 vma 代表切割的两部分的哪一段，new_below 为 1 表明：新的 vma 为低地址那一段，否则为高地址那一段</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (new_below) <span class="ql-token hljs-comment">// 若指定设置新 vma 的结束地址为 addr，此时 新的 vma 的虚拟地址 范围 为 旧的vma start -&gt; addr </span>
+ </div>
+ <div class="ql-code-block">
+  new-&gt;vm_end = addr;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 否则我们正常将区间起始地址设置为 addr ，此时新的 vma 的虚拟地址 范围 为：addr -&gt; 旧的vma end</span>
+ </div>
+ <div class="ql-code-block">
+  new-&gt;vm_start = addr;
+ </div>
+ <div class="ql-code-block">
+  new-&gt;vm_pgoff += ((addr - vma-&gt;vm_start) &gt;&gt; PAGE_SHIFT); <span class="ql-token hljs-comment">// 用于处理文件映射，也即当前文件映射的这段区间映射到了 新的 vma 中</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (new-&gt;vm_file) &nbsp;<span class="ql-token hljs-comment">// 存在 文件映射，那么增加文件引用计数</span>
+ </div>
+ <div class="ql-code-block">
+  get_file(new-&gt;vm_file);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (new-&gt;vm_ops &amp;&amp; new-&gt;vm_ops-&gt;open) <span class="ql-token hljs-comment">// 存在 open 函数，那么回调</span>
+ </div>
+ <div class="ql-code-block">
+  new-&gt;vm_ops-&gt;open(new);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma-&gt;vm_file) <span class="ql-token hljs-comment">// open函数回调后，我们保存对文件的 page cache（address_space）的引用</span>
+ </div>
+ <div class="ql-code-block">
+  mapping = vma-&gt;vm_file-&gt;f_dentry-&gt;d_inode-&gt;i_mapping;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (mapping) <span class="ql-token hljs-comment">// 对 page cache 上锁</span>
+ </div>
+ <div class="ql-code-block">
+  down(&amp;mapping-&gt;i_shared_sem);
+ </div>
+ <div class="ql-code-block">
+  spin_lock(&amp;mm-&gt;page_table_lock); <span class="ql-token hljs-comment">// 对当前进程的页表上锁</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 修正 旧vma 的起始地址或结束地址，让新的 vma 和 旧的 vma 分别指向自己的那一段</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (new_below) {
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_start = addr;
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_pgoff += ((addr - new-&gt;vm_start) &gt;&gt; PAGE_SHIFT);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span>
+ </div>
+ <div class="ql-code-block">
+  vma-&gt;vm_end = addr;
+ </div>
+ <div class="ql-code-block">
+  __insert_vm_struct(mm, new); <span class="ql-token hljs-comment">// 将新的 vma 插入到 vm链表和红黑树中</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 释放锁并返回</span>
+ </div>
+ <div class="ql-code-block">
+  spin_unlock(&amp;mm-&gt;page_table_lock);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (mapping)
+ </div>
+ <div class="ql-code-block">
+  up(&amp;mapping-&gt;i_shared_sem);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">find_vma 函数</strong></h2>
+<p><br></p>
+<p>该函数用于从红黑树中找到包含 addr 的 vma 返回，同时 linux 为了加速访问，将最近查找使用的 vma 缓存在 mm-&gt;mmap_cache，下一次使用时将避免查找过程。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">struct</span> vm_area_struct * <span class="ql-token hljs-title">find_vma(struct mm_struct * mm, unsigned long addr)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct *vma =</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (mm) {
+ </div>
+ <div class="ql-code-block">
+  vma = mm-&gt;mmap_cache;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(vma &amp;&amp; vma-&gt;vm_end &gt; addr &amp;&amp; vma-&gt;vm_start &lt;= addr)) { <span class="ql-token hljs-comment">// 需要查找的地址没有被缓存命中，那么从红黑树中查找（为了加快访问速度，linux 将最近访问的 vma 缓存到 mmap_cache变量中）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rb_node * rb_node;</span>
+ </div>
+ <div class="ql-code-block">
+  rb_node = mm-&gt;mm_rb.rb_node;
+ </div>
+ <div class="ql-code-block">
+  vma = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">while</span> (rb_node) { &nbsp;<span class="ql-token hljs-comment">// 遍历红黑树</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct * vma_tmp;</span>
+ </div>
+ <div class="ql-code-block">
+  vma_tmp = rb_entry(rb_node,
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">struct</span> vm_area_struct, vm_rb);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma_tmp-&gt;vm_end &gt; addr) { <span class="ql-token hljs-comment">// 若需要查找的 addr 地址大于当前 vma 的结束地址，那么从左子树继续查找</span>
+ </div>
+ <div class="ql-code-block">
+  vma = vma_tmp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma_tmp-&gt;vm_start &lt;= addr) <span class="ql-token hljs-comment">// 若当前 addr 正好包含在该 vma 中，那么结束循环</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  rb_node = rb_node-&gt;rb_left;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-comment">// 否则从右子树查找</span>
+ </div>
+ <div class="ql-code-block">
+  rb_node = rb_node-&gt;rb_right;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma) <span class="ql-token hljs-comment">// 缓存当前使用的 vma，下一次使用时不需要查表</span>
+ </div>
+ <div class="ql-code-block">
+  mm-&gt;mmap_cache = vma;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> vma;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">detach_vmas_to_be_unmapped 函数</strong></h2>
+<p><br></p>
+<p>该函数用于将 struct vm_area_struct *vma 到 end 区间的 vma 从 红黑树中移出，同时修正 vma 链表。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">detach_vmas_to_be_unmapped(struct mm_struct *mm, struct vm_area_struct *vma,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> struct vm_area_struct *prev, unsigned long end)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct **insertion_point;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct *tail_vma =</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  insertion_point = (prev ? &amp;prev-&gt;vm_next : &amp;mm-&gt;mmap); <span class="ql-token hljs-comment">// 将 vma 从链表中移出，那么需要修正 prev vma</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">do</span> {
+ </div>
+ <div class="ql-code-block">
+  rb_erase(&amp;vma-&gt;vm_rb, &amp;mm-&gt;mm_rb); <span class="ql-token hljs-comment">// 从红黑树中移出当前 vma</span>
+ </div>
+ <div class="ql-code-block">
+  mm-&gt;map_count--;
+ </div>
+ <div class="ql-code-block">
+  tail_vma = vma;
+ </div>
+ <div class="ql-code-block">
+  vma = vma-&gt;vm_next; <span class="ql-token hljs-comment">// 由于 链表按地址高低排序，所以这里我们直接遍历下一个 vma 即可</span>
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">while</span> (vma &amp;&amp; vma-&gt;vm_start &lt; end); <span class="ql-token hljs-comment">// 循环将 vma-&gt;start -&gt; end 地址的 vma 从 红黑树中移出</span>
+ </div>
+ <div class="ql-code-block">
+  *insertion_point = vma; <span class="ql-token hljs-comment">// 修改链表的next 引用</span>
+ </div>
+ <div class="ql-code-block">
+  tail_vma-&gt;vm_next = <span class="ql-token hljs-literal">NULL</span>; <span class="ql-token hljs-comment">// 释放下一个节点的引用</span>
+ </div>
+ <div class="ql-code-block">
+  mm-&gt;mmap_cache = <span class="ql-token hljs-literal">NULL</span>; <span class="ql-token hljs-comment">// 清理 vma 缓存</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">vma_merge 函数</strong></h2>
+<p><br></p>
+<p>该函数用于：给定一个新的映射请求（addr,end,vm_flags,file,pgoff），确定它是否可以与它的前一个虚拟地址空间或后一个虚拟地址空间的 vma 合并，用于减少内存空洞（memory hole）也即减少外碎片。我们看到这里可以合并的标准为：</p>
+<p>1、前驱 vma 的 prev-&gt;vm_end == addr ，也即 与 前驱 vma 地址相邻</p>
+<p>2、后继 vma 的 prev-&gt;vm_end == next-&gt;vm_start ，也即 前驱 vma 与 后继 vma 地址相邻</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">vma_merge(struct mm_struct *mm, struct vm_area_struct *prev,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> struct rb_node *rb_parent, unsigned long addr, </span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> unsigned long end, unsigned long vm_flags,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> struct file *file, unsigned long pgoff)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">spinlock_t</span> *lock = &amp;mm-&gt;page_table_lock;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct inode *inode =</span> file ? file-&gt;f_dentry-&gt;d_inode : <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct semaphore *i_shared_sem;</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vm_flags &amp; VM_SPECIAL) <span class="ql-token hljs-comment">// 若当前 VMA 的类型为特殊类型，那么不支持 合并（#define VM_SPECIAL (VM_IO | VM_DONTCOPY | VM_DONTEXPAND | VM_RESERVED)，比如 vma 为 IO 操作虚拟地址空间等等）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  i_shared_sem = file ? &amp;inode-&gt;i_mapping-&gt;i_shared_sem : <span class="ql-token hljs-literal">NULL</span>; <span class="ql-token hljs-comment">// 若为 文件映射，那么获取文件inode 的共享锁，保证操作该 vma 所映射的文件时的线程安全</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!prev) { <span class="ql-token hljs-comment">// 若当前需要合并的vma 前面不存在已经分配的虚拟地址空间，那么将红黑树的父节点作为 前驱节点，同时跳转到 合并 后继的 vma 虚拟地址空间</span>
+ </div>
+ <div class="ql-code-block">
+  prev = rb_entry(rb_parent, <span class="ql-token hljs-keyword">struct</span> vm_area_struct, vm_rb);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> merge_next;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 此时前驱 vma 存在，那么尝试进行合并。合并条件：</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (prev-&gt;vm_end == addr &amp;&amp; <span class="ql-token hljs-comment">// 前驱 vma 与 当前待分配的地址相邻</span>
+ </div>
+ <div class="ql-code-block">
+  is_mergeable_vma(prev, file, vm_flags) &amp;&amp; <span class="ql-token hljs-comment">// 前驱 vma 类型满足合并条件</span>
+ </div>
+ <div class="ql-code-block">
+  can_vma_merge_after(prev, vm_flags, file, pgoff)) { <span class="ql-token hljs-comment">// 看看前驱 vma 的文件映射是否可以合并后续的地址空间（主要用于检测 文件映射，看后续描述）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct vm_area_struct *next;</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  prev-&gt;vm_end = end; <span class="ql-token hljs-comment">// 此时确定可以合并，那么很简单，直接将 prev 的 结束地址修改为需要分配的地址空间的 end 地址即可，此时相当于对 prev 进行扩容</span>
+ </div>
+ <div class="ql-code-block">
+  next = prev-&gt;vm_next; <span class="ql-token hljs-comment">// 获取 prev 后继的 vma 并检测 是否支持对后继的 vma 进行合并，合并条件：</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (next &amp;&amp; prev-&gt;vm_end == next-&gt;vm_start &amp;&amp; <span class="ql-token hljs-comment">// 后继 vma 存在 且 与 prev vma 相邻</span>
+ </div>
+ <div class="ql-code-block">
+  can_vma_merge_before(next, vm_flags, file,
+ </div>
+ <div class="ql-code-block">
+  pgoff, (end - addr) &gt;&gt; PAGE_SHIFT)) { <span class="ql-token hljs-comment">// 文件映射确定可以合并</span>
+ </div>
+ <div class="ql-code-block">
+  prev-&gt;vm_end = next-&gt;vm_end; <span class="ql-token hljs-comment">// 那么继续将 prev vma 的结束地址设置为 next-&gt;vm_end 此时继续对 prev vma 扩容</span>
+ </div>
+ <div class="ql-code-block">
+  __vma_unlink(mm, next, prev); <span class="ql-token hljs-comment">// 然后将 后继 vma 从链表和红黑树中移出</span>
+ </div>
+ <div class="ql-code-block">
+  __remove_shared_vm_struct(next, inode); &nbsp;<span class="ql-token hljs-comment">// 移出 后继 vma 对文件的引用</span>
+ </div>
+ <div class="ql-code-block">
+  ... <span class="ql-token hljs-comment">// 释放资源并退出</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ... <span class="ql-token hljs-comment">// 释放资源并退出</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 此时不存在 前驱 vma，那么直接尝试与 后继 vma 进行合并，流程如上，这里不做过多赘述</span>
+ </div>
+ <div class="ql-code-block">
+  prev = prev-&gt;vm_next;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (prev) {
+ </div>
+ <div class="ql-code-block">
+  merge_next:
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!can_vma_merge_before(prev, vm_flags, file,
+ </div>
+ <div class="ql-code-block">
+  pgoff, (end - addr) &gt;&gt; PAGE_SHIFT))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (end == prev-&gt;vm_start) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (file)
+ </div>
+ <div class="ql-code-block">
+  down(i_shared_sem);
+ </div>
+ <div class="ql-code-block">
+  spin_lock(lock);
+ </div>
+ <div class="ql-code-block">
+  prev-&gt;vm_start = addr;
+ </div>
+ <div class="ql-code-block">
+  prev-&gt;vm_pgoff -= (end - addr) &gt;&gt; PAGE_SHIFT;
+ </div>
+ <div class="ql-code-block">
+  spin_unlock(lock);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (file)
+ </div>
+ <div class="ql-code-block">
+  up(i_shared_sem);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 检测 vma 是否可以合并</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">is_mergeable_vma(struct vm_area_struct *vma,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> struct file *file, unsigned long vm_flags)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma-&gt;vm_ops &amp;&amp; vma-&gt;vm_ops-&gt;close) <span class="ql-token hljs-comment">// 存在 close 操作不能合并（思考下为何？部分影响整体？）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma-&gt;vm_file != file) <span class="ql-token hljs-comment">// 两个 vma 映射的 文件与当前 file 不相同，不能合并</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma-&gt;vm_flags != vm_flags) <span class="ql-token hljs-comment">// 两个 vma 的标志位不相同，不能合并</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma-&gt;vm_private_data) <span class="ql-token hljs-comment">// vma 存在私有数据，不能合并</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 检测 vma 是否可以合并后继的地址空间</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">can_vma_merge_after(struct vm_area_struct *vma, unsigned long vm_flags,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> struct file *file, unsigned long vm_pgoff)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (is_mergeable_vma(vma, file, vm_flags)) { <span class="ql-token hljs-comment">// 必要条件为：当前 vma 必须支持 合并操作</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> vma_size;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!file) <span class="ql-token hljs-comment">// 随后检测 是否为 匿名映射，因为这里只检测 文件映射</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  vma_size = (vma-&gt;vm_end - vma-&gt;vm_start) &gt;&gt; PAGE_SHIFT; <span class="ql-token hljs-comment">// 获取当前 vma 的大小</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (vma-&gt;vm_pgoff + vma_size == vm_pgoff) <span class="ql-token hljs-comment">// 若当前 vma 映射的 文件偏移正好 等于 扩容偏移量，那么返回 1（为了避免 vma 映射的文件偏移 小于 扩容后的大小，那么访问那不属于文件映射偏移的部分 将会导致错误）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p></p>
+</body>
+</html>

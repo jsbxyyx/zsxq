@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理十六 ChannelPromise 原理</h1>
+<p>2022-03-28T07:56:34.987+0800</p>
+<p><p><strong>ChannelPromise 原理</strong></p>
+<p>该接口用于扩展ChannelFuture和Promise接口，提供了对ChannelFuture变量的写操作。我们看到该接口主要提供了对Channel的处理设置成功的空参数操作，同时支持返回一个新的ChannelPromise对象。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">ChannelPromise</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span>, <span style="color: rgb(184, 191, 198);">Promise&lt;</span><span style="color: rgb(28, 198, 133);">Void</span><span style="color: rgb(184, 191, 198);">&gt;</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置通道执行成功，此时不需要提供参数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">setSuccess</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">trySuccess</span>();</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果接口的实例isVoid方法返回true，那么返回一个新的ChannelPromise，否则返回该接口本身</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">unvoid</span>();</p>
+<p>}</p>
+<p><strong>DefaultChannelPromise 原理</strong></p>
+<p>该类实现了ChannelPromise接口，但是我们看到它继承自DefaultPromise类，所以大部分工作都在DefaultPromise父类中实现，该类主要提供对ChannelFuture接口和ChannelPromise接口的新增方法进行实现，我们主要看看这几个方法和变量即可。通过源码我们可以得知如下信息：</p>
+<ol>
+ <li>DefaultChannelPromise实现了FlushCheckpoint接口，该接口用于刷新还原点，后面我们将会详细介绍该接口和其所属类</li>
+ <li>定义了所属通道对象和还原点变量</li>
+ <li>setSuccess()设置空结果完成，最终通过调用父类DefaultPromise的setSuccess(null)完成设置</li>
+ <li>用于isVoid总是返回false，所以unvoid()方法将总是返回当前DefaultChannelPromise对象</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultChannelPromise</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">DefaultPromise&lt;</span><span style="color: rgb(28, 198, 133);">Void</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">ChannelPromise</span>, <span style="color: rgb(184, 191, 198);">FlushCheckpoint</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">channel</span>; <span style="color: rgb(218, 146, 74);">// 所属通道对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">checkpoint</span>; <span style="color: rgb(218, 146, 74);">// 当前还原点</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器。通过通道对象创建</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">DefaultChannelPromise</span>(<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">channel</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">channel</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">channel</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器。通过通道对象和执行器创建</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">DefaultChannelPromise</span>(<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">channel</span>, <span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">executor</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">executor</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">channel</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">channel</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置空结果返回</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">setSuccess</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">setSuccess</span>(<span style="color: rgb(132, 182, 203);">null</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">setSuccess</span>(<span style="color: rgb(28, 198, 133);">Void</span> <span style="color: rgb(184, 191, 198);">result</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>.<span style="color: rgb(184, 191, 198);">setSuccess</span>(<span style="color: rgb(184, 191, 198);">result</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">trySuccess</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">trySuccess</span>(<span style="color: rgb(132, 182, 203);">null</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// unvoid总是返回当前ChannelPromise</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">unvoid</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// isVoid总是返回false</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isVoid</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 刷新和设置当前还原点</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">flushCheckpoint</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">checkpoint</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">flushCheckpoint</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">checkpoint</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">checkpoint</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">checkpoint</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>接下来我们来看看ChannelFlushPromiseNotifier类，因为FlushCheckpoint属于该类的内部接口。ChannelFlushPromiseNotifier类允许向其中注册ChannelFuture实例，一旦写入了一定数量的数据并到达检查点，ChannelFuture就会被通知。 该类在Netty中不用，了解下即可。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ChannelFlushPromiseNotifier</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">writeCounter</span>; <span style="color: rgb(218, 146, 74);">// 数据写入量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Queue&lt;FlushCheckpoint&gt;</span> <span style="color: rgb(184, 191, 198);">flushCheckpoints</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ArrayDeque&lt;FlushCheckpoint&gt;</span>(); <span style="color: rgb(218, 146, 74);">// 保存注册的ChannelFuture实例</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">tryNotify</span>; <span style="color: rgb(218, 146, 74);">// 用于控制通知方式。true：调用ChannelFuture的tryFailure或者trySuccess false：调用ChannelFuture的setFailure或者setSuccess</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器。用于设置tryNotify变量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFlushPromiseNotifier</span>(<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">tryNotify</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">tryNotify</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tryNotify</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 向当前ChannelFlushPromiseNotifier中添加ChannelPromise实例，它将在指定的pendingDataSize到达后被通知</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFlushPromiseNotifier</span> <span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">pendingDataSize</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">promise</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"promise"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">pendingDataSize</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(<span style="color: rgb(210, 107, 107);">"pendingDataSize must be &gt;= 0 but was "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">pendingDataSize</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">checkpoint</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">writeCounter</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">pendingDataSize</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">promise</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">FlushCheckpoint</span>) { <span style="color: rgb(218, 146, 74);">// 若已经实现了FlushCheckpoint接口，设置新的checkpoint同时将其添加到队列中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">FlushCheckpoint</span> <span style="color: rgb(184, 191, 198);">cp</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">FlushCheckpoint</span>) <span style="color: rgb(184, 191, 198);">promise</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">flushCheckpoint</span>(<span style="color: rgb(184, 191, 198);">checkpoint</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">flushCheckpoints</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">cp</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 否则包装到默认的FlushCheckpoint接口实现类，然后将其添加到队列中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">flushCheckpoints</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultFlushCheckpoint</span>(<span style="color: rgb(184, 191, 198);">checkpoint</span>, <span style="color: rgb(184, 191, 198);">promise</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 通知注册的ChannelPromise实例</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFlushPromiseNotifier</span> <span style="color: rgb(184, 191, 198);">notifyPromises</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notifyPromises0</span>(<span style="color: rgb(132, 182, 203);">null</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 实际通知操作</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">notifyPromises0</span>(<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">flushCheckpoints</span>.<span style="color: rgb(184, 191, 198);">isEmpty</span>()) { <span style="color: rgb(218, 146, 74);">// 没有需要通知的实例，那么直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">writeCounter</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">writeCounter</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">writeCounter</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) { <span style="color: rgb(218, 146, 74);">// 遍历处理注册的ChannelPromise实例</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">FlushCheckpoint</span> <span style="color: rgb(184, 191, 198);">cp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">flushCheckpoints</span>.<span style="color: rgb(184, 191, 198);">peek</span>(); <span style="color: rgb(218, 146, 74);">// 获取队列头部的ChannelPromise实例</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cp</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 如果通知列表中没有任何内容，则重置计数器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">writeCounter</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">flushCheckpoint</span>() <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">writeCounter</span>) { <span style="color: rgb(218, 146, 74);">// ChannelPromise实例的还原点大于writeCounter</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">writeCounter</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">flushCheckpoints</span>.<span style="color: rgb(184, 191, 198);">size</span>() <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">1</span>) { <span style="color: rgb(218, 146, 74);">// 队列中只有一个ChannelPromise实例</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">writeCounter</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(218, 146, 74);">// 还原写入数量</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">flushCheckpoint</span>(<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">flushCheckpoint</span>() <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">writeCounter</span>); <span style="color: rgb(218, 146, 74);">// 重新设置Checkpoint</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>; <span style="color: rgb(218, 146, 74);">// 由于我们是FIFO的队列，所以头部的还原点未达到pendingDataSize，结束循环</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 从队列中移除一个ChannelPromise实例实例，同时根据tryNotify变量来调用不同方法完成通知</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">flushCheckpoints</span>.<span style="color: rgb(184, 191, 198);">remove</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">promise</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cause</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 异常为空，那么调用空成功方法</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">tryNotify</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">promise</span>.<span style="color: rgb(184, 191, 198);">trySuccess</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">promise</span>.<span style="color: rgb(184, 191, 198);">setSuccess</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">tryNotify</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">promise</span>.<span style="color: rgb(184, 191, 198);">tryFailure</span>(<span style="color: rgb(184, 191, 198);">cause</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">promise</span>.<span style="color: rgb(184, 191, 198);">setFailure</span>(<span style="color: rgb(184, 191, 198);">cause</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 避免写入数量发生溢出</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">newWriteCounter</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">writeCounter</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">newWriteCounter</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(100, 171, 143);">0x8000000000L</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 只有当计数器变得非常大时才重置计数器&nbsp;</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">writeCounter</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">FlushCheckpoint</span> <span style="color: rgb(184, 191, 198);">cp</span>: <span style="color: rgb(184, 191, 198);">flushCheckpoints</span>) {&nbsp;<span style="color: rgb(218, 146, 74);">// 遍历列表修正Checkpoint</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">flushCheckpoint</span>(<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">flushCheckpoint</span>() <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">newWriteCounter</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 内部接口，用于操作Checkpoint</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">FlushCheckpoint</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">flushCheckpoint</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">flushCheckpoint</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">checkpoint</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>();</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 默认FlushCheckpoint包装类，当传入的ChannelPromise没有实现FlushCheckpoint接口时，包装到其中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultFlushCheckpoint</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">FlushCheckpoint</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">checkpoint</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">future</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">DefaultFlushCheckpoint</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">checkpoint</span>, <span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">future</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">checkpoint</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">checkpoint</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">future</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">future</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">flushCheckpoint</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">checkpoint</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">flushCheckpoint</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">checkpoint</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">checkpoint</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">checkpoint</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">future</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>DefaultChannelGroupFuture 原理</strong></p>
+<p>该类用于实现ChannelGroupFuture接口。前面我们知道ChannelGroupFuture接口代表了一组Channel的异步的IO操作。现在我们来看看默认的实现如何对这些操作进行管理。通过源码我们得知：</p>
+<ol>
+ <li>该类继承自DefaultPromise，所以大部分操作均在DefaultPromise类中完成</li>
+ <li>successCount变量记录了成功数量</li>
+ <li>failureCount变量记录了失败数量</li>
+ <li>Map&lt;Channel, ChannelFuture&gt; futures保存了管理的通道的异步IO操作集合</li>
+ <li>当我们在构建DefaultChannelGroupFuture实例时，将向管理的所有ChannelFuture中添加childListener监听器，这时当异步操作完成后将会回调其中的operationComplete方法，在该方法中我们完成如下操作：</li>
+ <li class="ql-indent-1">记录成功和失败的IO异步任务个数</li>
+ <li class="ql-indent-1">当所有异步IO操作均完成时（callSetDone为true），那么根据管理的IO异步任务是否存在失败来选择调用setFailure0或者setSuccess0</li>
+ <li class="ql-indent-1">当我们调用setFailure0时，将遍历所有ChannelFuture，找到失败的ChannelFuture，然后将其和Channel封装为DefaultEntry元组数组，作为参数调用setFailure0方法</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultChannelGroupFuture</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">DefaultPromise&lt;</span><span style="color: rgb(28, 198, 133);">Void</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">ChannelGroupFuture</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelGroup</span> <span style="color: rgb(184, 191, 198);">group</span>; <span style="color: rgb(218, 146, 74);">// 所属通道组</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Map&lt;Channel</span>, <span style="color: rgb(184, 191, 198);">ChannelFuture&gt;</span> <span style="color: rgb(184, 191, 198);">futures</span>; <span style="color: rgb(218, 146, 74);">// 通道的异步IO操作集合</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">successCount</span>; <span style="color: rgb(218, 146, 74);">// 成功数量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">failureCount</span>; <span style="color: rgb(218, 146, 74);">// 失败数量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelFutureListener</span> <span style="color: rgb(184, 191, 198);">childListener</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ChannelFutureListener</span>() { <span style="color: rgb(218, 146, 74);">// 用于向管理的ChannelFuture添加的监听器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">operationComplete</span>(<span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">future</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">success</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">future</span>.<span style="color: rgb(184, 191, 198);">isSuccess</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">callSetDone</span>; <span style="color: rgb(218, 146, 74);">// 表示所有异步IO操作均完成</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">synchronized</span> (<span style="color: rgb(184, 191, 198);">DefaultChannelGroupFuture</span>.<span style="color: rgb(200, 143, 208);">this</span>) { <span style="color: rgb(218, 146, 74);">// 记录成功和失败个数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">success</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">successCount</span> <span style="color: rgb(184, 191, 198);">++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">failureCount</span> <span style="color: rgb(184, 191, 198);">++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">callSetDone</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">successCount</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">failureCount</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">size</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">assert</span> <span style="color: rgb(184, 191, 198);">successCount</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">failureCount</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">size</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">callSetDone</span>) { <span style="color: rgb(218, 146, 74);">// 所有异步操作完成后，根据结果来调用setFailure0或者setSuccess0</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">failureCount</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 有执行失败的通道IO任务</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">List&lt;Map</span>.<span style="color: rgb(184, 191, 198);">Entry&lt;Channel</span>, <span style="color: rgb(184, 191, 198);">Throwable&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">failed</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ArrayList&lt;Map</span>.<span style="color: rgb(184, 191, 198);">Entry&lt;Channel</span>, <span style="color: rgb(184, 191, 198);">Throwable&gt;&gt;</span>(<span style="color: rgb(184, 191, 198);">failureCount</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">f</span>: <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">values</span>()) { <span style="color: rgb(218, 146, 74);">// 遍历添加失败的ChannelFuture到failed列表中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!f</span>.<span style="color: rgb(184, 191, 198);">isSuccess</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">failed</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultEntry&lt;Channel</span>, <span style="color: rgb(184, 191, 198);">Throwable&gt;</span>(<span style="color: rgb(184, 191, 198);">f</span>.<span style="color: rgb(184, 191, 198);">channel</span>(), <span style="color: rgb(184, 191, 198);">f</span>.<span style="color: rgb(184, 191, 198);">cause</span>())); <span style="color: rgb(218, 146, 74);">// 包装通道和所属异常信息到DefaultEntry</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">setFailure0</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ChannelGroupException</span>(<span style="color: rgb(184, 191, 198);">failed</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">setSuccess0</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;};</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器，用于初始化成员变量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">DefaultChannelGroupFuture</span>(<span style="color: rgb(184, 191, 198);">ChannelGroup</span> <span style="color: rgb(184, 191, 198);">group</span>, <span style="color: rgb(184, 191, 198);">Map&lt;Channel</span>, <span style="color: rgb(184, 191, 198);">ChannelFuture&gt;</span> <span style="color: rgb(184, 191, 198);">futures</span>, <span style="color: rgb(184, 191, 198);">EventExecutor</span> <span style="color: rgb(184, 191, 198);">executor</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">executor</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">group</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">group</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">futures</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Collections</span>.<span style="color: rgb(184, 191, 198);">unmodifiableMap</span>(<span style="color: rgb(184, 191, 198);">futures</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">f</span>: <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">values</span>()) {&nbsp;<span style="color: rgb(218, 146, 74);">// 遍历ChannelFuture，向其中添加监听器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">f</span>.<span style="color: rgb(184, 191, 198);">addListener</span>(<span style="color: rgb(184, 191, 198);">childListener</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">isEmpty</span>()) {&nbsp;<span style="color: rgb(218, 146, 74);">// Future为空，那么直接设置成功</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">setSuccess0</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 可以看到以下两个方法的判断次序：成功个数先判断还是失败个数先判断</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">synchronized</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isPartialSuccess</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">successCount</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">successCount</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">size</span>();</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">synchronized</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isPartialFailure</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">failureCount</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">failureCount</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">size</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 内部类用于封装通道和异常对象的元组</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DefaultEntry</span><span style="color: rgb(184, 191, 198);">&lt;K</span>, <span style="color: rgb(184, 191, 198);">V&gt;</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Map</span>.<span style="color: rgb(184, 191, 198);">Entry&lt;K</span>, <span style="color: rgb(184, 191, 198);">V&gt;</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">K</span> <span style="color: rgb(184, 191, 198);">key</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">value</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">DefaultEntry</span>(<span style="color: rgb(184, 191, 198);">K</span> <span style="color: rgb(184, 191, 198);">key</span>, <span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">value</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">key</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">key</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">value</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">value</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

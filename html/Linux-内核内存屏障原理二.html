@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux 内核内存屏障原理二</h1>
+<p>2022-09-22T01:10:32.238+0800</p>
+<p><p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">对于内存屏障而言不能保证的语义</strong></h2>
+<p><br></p>
+<p>Linux内核内存屏障不能保证如下情况：</p>
+<p>1、不能保证在内存屏障之前的任何内存访问，都将在内存屏障指令完成时被执行完成，内存屏障只可以被理解为：在执行该屏障的 CPU 的内存访问 指令流 中画了一条线，适当类型的访问不能跨越这条线</p>
+<p>2、屏障仅对正在执行的该屏障的CPU指令流生效，不保证该屏障会对其他CPU或者系统中的其他硬件产生任何直接影响。而对于该屏障导致对其他CPU和硬件的间接影响，可以理解为：其他CPU 或者 系统中的其他硬件 将会看到执行该屏障的CPU 操作内存发生的顺序（如何理解？前面说过：所有内存操作都可以理解为向内存提交的一系列操作，而屏障只对执行该屏障的CPU 保证这一系列提交的顺序，间接影响便是 其他 CPU 将会看到该顺序产生的内存影响）。但这种间接影响有个前提：看第三点！</p>
+<p>3、不能保证其他CPU能正确看到 执行了某个屏障的 CPU 操作内存的顺序，即使其他 CPU 使用了内存屏障。除非，两者都使用了配对的屏障。比如：CPU - 1 执行了写屏障保证了写入顺序，但，如果 CPU - 2 没有使用读屏障，那么将可能不会按照 CPU -1 执行写屏障看到的顺序。反过来，如果 CPU - 2 使用读屏障，但 CPU -1 没有使用写屏障，同样也不能保证顺序，除非 CPU -1 使用了写屏障，同时 CPU - 2 使用了读屏障（后面会详细介绍 SMP 对称多处理器 使用的内存屏障对~别着急）</p>
+<p>4、不能保证 CPU 之外的其他硬件机制（比如：CPU 高速缓存）对内存访问顺序的影响，从而导致重排序的现象。CPU的缓存一致性机制应该在CPU之间处理内存屏障的间接影响，但可能不会按照操作内存的顺序进行。</p>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">Linux 内核数据依赖屏障详情</strong></h2>
+<p><br></p>
+<p>Linux 内核中对于数据依赖屏障的需求有点微妙，并且有时候根本不需要这种屏障。来看下面的描述。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 &nbsp; CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============== ===============
+ </div>
+ <div class="ql-code-block">
+  { A == 1, B == 2, C = 3, P == &amp;A, Q == &amp;C } // 初始时，各个变量的值
+ </div>
+ <div class="ql-code-block">
+  B = 4;
+ </div>
+ <div class="ql-code-block">
+  &lt;write barrier&gt;
+ </div>
+ <div class="ql-code-block">
+  P = &amp;B
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; Q = P;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; D = *Q;
+ </div>
+</div>
+<p>这里可以看到 CPU 2 指令的指令流有着 非常明显的数据依赖关系（前面我们说过 抽象 CPU 模型保证了数据依赖不会重排序，所以，这里肯定是先将 P 赋值给 Q，再读取 Q 处内存的值），在执行结束后，看起来结果应该是：Q的值只能是 &amp;A 或 &amp;B 的值，并且：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  (Q == &amp;A) implies (D == 1) // CPU 2 先执行完毕 ，CPU 1 后执行
+ </div>
+ <div class="ql-code-block">
+  (Q == &amp;B) implies (D == 4) // CPU 1 先执行完毕， CPU 2 后执行
+ </div>
+</div>
+<p>但是！！！CPU 2 对 CPU 1 写入的 P 的新值能够看到，也即看到了 P 为 B 的地址，但，居然没有看到 CPU 2 写入的 B 的新值 4，而是读取了旧值。因此可能导致以下情况：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  (Q == &amp;B) and (D == 2) // WTF？居然读取到了 B 的旧值
+ </div>
+</div>
+<p>虽然这看起来像是：CPU对于编码的因果关系维护的失败（看似破坏了 抽象 CPU 模型保证的 数据依赖性），但事实并非如此，这种行为可以在某些 实际的 CPU 上观察到，比如：DEC Alpha CPU)。读者肯定会问：咋会出现这种现象？详情看 混沌专题之并发原理 视频描述！我在这里 三言两语 也说不清。</p>
+<p>为了解决这个问题，必须在上述的 地址加载 和 数据加载 之间插入一个数据依赖屏障 或者 其他更好的屏障：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 &nbsp; CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============== ===============
+ </div>
+ <div class="ql-code-block">
+  { A == 1, B == 2, C = 3, P == &amp;A, Q == &amp;C }
+ </div>
+ <div class="ql-code-block">
+  B = 4;
+ </div>
+ <div class="ql-code-block">
+  &lt;write barrier&gt;
+ </div>
+ <div class="ql-code-block">
+  P = &amp;B
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; Q = P;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &lt;data dependency barrier&gt;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; D = *Q;
+ </div>
+</div>
+<p>这时，数据依赖屏障就强制了上面按照数据依赖性的语义，必然发生如下两种顺序，并且抑制了看似破坏了编程因果关系的现象发生。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  (Q == &amp;A) implies (D == 1) // CPU 2 先执行完毕 ，CPU 1 后执行
+ </div>
+ <div class="ql-code-block">
+  (Q == &amp;B) implies (D == 4) // CPU 1 先执行完毕， CPU 2 后执行
+ </div>
+</div>
+<p>注意：这种非常违反直觉的情况最容易出现在具有多个分割缓存行（使用多个 cache bank 来缓存数据，解决虚拟地址和物理地址 映射到缓存行）的机器上，例如，一个 cache bank 负责处理偶数号缓存行，而另一个 cache bank 处理奇数号缓存行。此时，指针 P 可能存储在奇数缓存行中，而变量 B 可能存储在偶数缓存行中，然后，如果 CPU 2 控制偶数缓存行的 cache bank 非常忙（导致了 变量 B的新值没有写入到其中），而控制奇数缓存行的 cache bank 空闲（立即写入），此时可以看到指针 P 的新值，但变量B 的旧值，这时 对于 CPU 1来说，写屏障确实按照这个顺序写入了内存，但是，由于不同的缓存行控制器的写入速度，导致了上述现象的发生。</p>
+<p>来，再看一个使用数据依赖的例子。初始时值：M[]={1,2,3} ，P 为 0 ，Q 为 3 ， CPU - 1 通过写屏障保证 数组 1 下标 和 P 变量的写入顺序，CPU 2 为何需要数据依赖屏障？考虑下上面描述的情况，由于 缓存机制（其中一个原因：cache bank）导致 P 的值 被 CPU 2 看到了，此时 CPU 2 看到的 P 为 1，但由于 CPU 2 缓存中的 M [1] 仍旧为 2，所以将看不到写入的 4，于是产生了重排序的现象。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 &nbsp; CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============== ===============
+ </div>
+ <div class="ql-code-block">
+  { M[0] == 1, M[1] == 2, M[3] = 3, P == 0, Q == 3 } // 初始：M[]={1,2,3} ，P 为 0 ，Q 为 3
+ </div>
+ <div class="ql-code-block">
+  M[1] = 4;
+ </div>
+ <div class="ql-code-block">
+  &lt;write barrier&gt;
+ </div>
+ <div class="ql-code-block">
+  P = 1
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; Q = P;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &lt;data dependency barrier&gt; // 数据依赖屏障 保证 Q 和 P 的最新值 按照 CPU 1 写屏障的写入顺序 被 CPU 观察到！
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; D = M[Q];
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">控制依赖</strong></h2>
+<p><br></p>
+<p>控制依赖关系需要一个完整的读内存屏障，而非只使用一个数据依赖屏障，才能使其正确工作。考虑下面这段代码:</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  q = &amp;a;
+ </div>
+ <div class="ql-code-block">
+  if (p)
+ </div>
+ <div class="ql-code-block">
+  q = &amp;b;
+ </div>
+ <div class="ql-code-block">
+  &lt;data dependency barrier&gt;
+ </div>
+ <div class="ql-code-block">
+  x = *q;
+ </div>
+</div>
+<p>我们想要使用数据依赖屏障保证 q 的值 确实读到了 其他 CPU 修改后的 a 的地址 或者 b的地址 最新值，这时可以读到正确的 a 地址 或者 b地址 指向的内存中的值，但，如果这里使用数据依赖屏障将不会产生预期的结果，因为这里不是一个数据依赖，而是一个控制依赖，CPU可能会因为尝试进行分支预测从而导致我们读取不到最新值。在这种情况下，实际需要做的是：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  q = &amp;a;
+ </div>
+ <div class="ql-code-block">
+  if (p)
+ </div>
+ <div class="ql-code-block">
+  q = &amp;b;
+ </div>
+ <div class="ql-code-block">
+  &lt;read barrier&gt; // 使用读屏障
+ </div>
+ <div class="ql-code-block">
+  x = *q;
+ </div>
+</div>
+<p>换言之，记住：数据依赖屏障只对屏障前后的两个读取指令产生作用即可。</p>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">SMP 对称多处理器屏障对</strong></h2>
+<p><br></p>
+<p>什么是对称多处理器？多个 CPU 共享同一个内存。在处理SMP 架构的 CPU与CPU交互行为时，我们应该总是成对使用某些类型的内存屏障，因为如果没有使用这些屏障对，将可能在某些特定 CPU 上产生错误，就如同我们之前描述的：只使用写屏障保证了写入顺序，但由于 cache bank 的存在导致了重排序现象发生。</p>
+<p>一个写屏障，通常总是与一个数据依赖屏障或者读屏障成对使用，当然由于全屏障同时包含所有屏障的语义，所以与之配合使用也没有问题。同样，一个读屏障或者数据依赖屏障都应该与一个写屏障或者全屏障配对使用。例如：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  CPU 1 &nbsp; CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============== ===============
+ </div>
+ <div class="ql-code-block">
+  a = 1;
+ </div>
+ <div class="ql-code-block">
+  &lt;write barrier&gt;
+ </div>
+ <div class="ql-code-block">
+  b = 2; &nbsp; x = b;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &lt;read barrier&gt;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; y = a;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  CPU 1 &nbsp; CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============== ===============================
+ </div>
+ <div class="ql-code-block">
+  a = 1;
+ </div>
+ <div class="ql-code-block">
+  &lt;write barrier&gt;
+ </div>
+ <div class="ql-code-block">
+  b = &amp;a; &nbsp; x = b;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &lt;data dependency barrier&gt;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; y = *x;
+ </div>
+</div>
+<p>通过上述的这些屏障对我们可以这么理解：CPU 1 通过写屏障保证了内存写入的顺序，CPU 2 通过数据依赖屏障或者读屏障保证了读入顺序，此时完美~。</p>
+<p>注意：写屏障之前的内存写入操作通常会匹配 读屏障 或 数据依赖屏障 之后的加载操作，反之亦然：</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  &nbsp; &nbsp; CPU 1 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; CPU 2
+ </div>
+ <div class="ql-code-block">
+  =============== &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; ===============
+ </div>
+ <div class="ql-code-block">
+  a = 1; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }---- &nbsp; ---&gt;{ v = c
+ </div>
+ <div class="ql-code-block">
+  b = 2; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; \ / &nbsp; { w = d
+ </div>
+ <div class="ql-code-block">
+  &lt;write barrier&gt; &nbsp; &nbsp; &nbsp; \ &nbsp; &nbsp; &nbsp; &lt;read barrier&gt; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  c = 3; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; / \ &nbsp; { x = a;
+ </div>
+ <div class="ql-code-block">
+  d = 4; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }---- &nbsp; ---&gt;{ y = b;
+ </div>
+</div>
+<p>此时，CPU 1的写屏障 保证了 a，b 和 c ，d 的写入顺序，那么当 CPU 2 执行完 读屏障后，c 和 d 如果为 3 和 4，那么必然 a == 1 ，b == 2 肯定被 CPU 2 可见，因为读取到了最新值。</p>
+<p><br></p></p>
+</body>
+</html>

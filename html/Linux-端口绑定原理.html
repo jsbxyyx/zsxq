@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux 端口绑定原理</h1>
+<p>2022-07-29T09:32:04.628+0800</p>
+<p><p>我们在创建了socket fd后，需要绑定监听地址，代码如下，本节将详细介绍绑定过程，请读者务必弄懂socket创建原理后再观看，因为绑定时调用的函数将会在创建时设置。本节较为简单，没有过多的操作，仅仅只是将用户层传递的数据保存到对应结构而已。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">serverFD</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">socket</span>(<span style="color: rgb(184, 191, 198);">AF_INET</span>, <span style="color: rgb(184, 191, 198);">SOCK_STREAM</span>, <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">sockaddr_in</span> <span style="color: rgb(184, 191, 198);">addr</span>; <span style="color: rgb(218, 146, 74);">// 端口绑定信息</span></p>
+<p><span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_family</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">AF_INET</span>; <span style="color: rgb(218, 146, 74);">// 指定协议簇</span></p>
+<p><span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_addr</span>.<span style="color: rgb(184, 191, 198);">s_addr</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_addr</span>(<span style="color: rgb(210, 107, 107);">"127.0.0.1"</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">addr</span>.<span style="color: rgb(184, 191, 198);">sin_port</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">htons</span>(<span style="color: rgb(100, 171, 143);">8080</span>); <span style="color: rgb(218, 146, 74);">// 将端口信息转为网络字节序（大端序）</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">bind</span>(<span style="color: rgb(184, 191, 198);">serverFD</span>, (<span style="color: rgb(184, 191, 198);">sockaddr*</span>)<span style="color: rgb(184, 191, 198);">&amp;addr</span>, <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">addr</span>)); <span style="color: rgb(218, 146, 74);">// 开始绑定</span></p>
+<p><strong>sys_bind 函数</strong></p>
+<p>该函数用于根据fd找到socket，然后调用socket的bind操作完成绑定。源码如下。</p>
+<p><span style="color: rgb(184, 191, 198);">asmlinkage</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">sys_bind</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> <span style="color: rgb(141, 141, 240);">__user</span> <span style="color: rgb(184, 191, 198);">*umyaddr</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">addrlen</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">address</span>[<span style="color: rgb(184, 191, 198);">MAX_SOCK_ADDR</span>];<span style="color: rgb(218, 146, 74);">// 保存用户空间传递的绑定地址信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>((<span style="color: rgb(184, 191, 198);">sock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sockfd_lookup</span>(<span style="color: rgb(184, 191, 198);">fd</span>,<span style="color: rgb(184, 191, 198);">&amp;err</span>))<span style="color: rgb(184, 191, 198);">!=NULL</span>) <span style="color: rgb(218, 146, 74);">// 根据fd描述符找到socket</span></p>
+<p>&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span>((<span style="color: rgb(184, 191, 198);">err=move_addr_to_kernel</span>(<span style="color: rgb(184, 191, 198);">umyaddr</span>,<span style="color: rgb(184, 191, 198);">addrlen</span>,<span style="color: rgb(184, 191, 198);">address</span>))<span style="color: rgb(184, 191, 198);">&gt;=</span><span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 将用户层传递的 sockaddr 信息复制到 char address[MAX_SOCK_ADDR] 中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock-&gt;ops-&gt;bind</span>(<span style="color: rgb(184, 191, 198);">sock</span>, (<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> <span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">address</span>, <span style="color: rgb(184, 191, 198);">addrlen</span>); <span style="color: rgb(218, 146, 74);">// 执行 bind 操作</span></p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 根据fd描述符找到socket</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">sockfd_lookup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">err</span>){</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*file</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*inode</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">file</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fget</span>(<span style="color: rgb(184, 191, 198);">fd</span>))) <span style="color: rgb(218, 146, 74);">// 获取fd下标处的file结构</span></p>
+<p>{</p>
+<p><span style="color: rgb(184, 191, 198);">*err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EBADF</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>}</p>
+<p><span style="color: rgb(184, 191, 198);">inode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">file-&gt;f_dentry-&gt;d_inode</span>; <span style="color: rgb(218, 146, 74);">// 从file结构中获取inode信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!inode-&gt;i_sock</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">sock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SOCKET_I</span>(<span style="color: rgb(184, 191, 198);">inode</span>))) <span style="color: rgb(218, 146, 74);">// 前面我们说到socket 和 inode 放在一起（struct socket_alloc结构）所以我们只需要inode地址 就可以根据偏移量获取 socket的地址</span></p>
+<p>{</p>
+<p><span style="color: rgb(184, 191, 198);">*err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-ENOTSOCK</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">fput</span>(<span style="color: rgb(184, 191, 198);">file</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>}</p>
+<p>...</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">sock</span>;</p>
+<p>}</p>
+<p><strong>inet_bind 函数</strong></p>
+<p>在创建 tcp 协议时，将会把该函数作为 bind 函数指针的实现，所以我们跟进该函数即可。我们看到，在该函数中将会通过 socket 获取到 sock 结构，然后将该结构强转为 inet_sock 结构 ，随后将用户态传递的绑定 IP 和 端口 信息保存在 inet_sock 的 inet_opt 信息 中。源码如下。</p>
+<p><span style="color: rgb(218, 146, 74);">// 描述 IP socket 地址结构。注意：该结构为内核绑定时使用</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define __SOCK_SIZE__ 16 </span><span style="color: rgb(218, 146, 74);">/* sizeof(struct sockaddr) */</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_in</span> {</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">sa_family_t</span> <span style="color: rgb(184, 191, 198);">sin_family</span>; <span style="color: rgb(218, 146, 74);">/* Address family */</span></p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">short</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">sin_port</span>; <span style="color: rgb(218, 146, 74);">/* Port number */</span></p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">in_addr</span> <span style="color: rgb(141, 141, 240);">sin_addr</span>; <span style="color: rgb(218, 146, 74);">/* Internet address */</span></p>
+<p>​</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">/* Pad to size of `struct sockaddr'. */</span></p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">__pad</span>[<span style="color: rgb(184, 191, 198);">__SOCK_SIZE__</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(28, 198, 133);">short</span> <span style="color: rgb(28, 198, 133);">int</span>) <span style="color: rgb(184, 191, 198);">-</span></p>
+<p><span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">short</span> <span style="color: rgb(28, 198, 133);">int</span>) <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">in_addr</span>)];</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 描述 inet sock 的信息（在sock 结构基础上增加 inet_opt，用于表示socket套接字的元数据）</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_sock</span> {</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> &nbsp;<span style="color: rgb(141, 141, 240);">sk</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_opt</span>&nbsp;<span style="color: rgb(141, 141, 240);">inet</span>;</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 宏定义，用于从sock结构中获取到inet_sock结构指针</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define inet_sk(__sk) (&amp;((struct inet_sock *)__sk)-&gt;inet)</span></p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">inet_bind</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> <span style="color: rgb(184, 191, 198);">*uaddr</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">addr_len</span>){</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_in</span> <span style="color: rgb(184, 191, 198);">*addr</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_in</span> <span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">uaddr</span>; <span style="color: rgb(218, 146, 74);">// 指针强转，还记得混沌学堂说的么？对内存不同的解释</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock-&gt;sk</span>; <span style="color: rgb(218, 146, 74);">// 从socket 中获取 底层网络操作 sock </span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_opt</span> <span style="color: rgb(184, 191, 198);">*inet</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_sk</span>(<span style="color: rgb(184, 191, 198);">sk</span>); <span style="color: rgb(218, 146, 74);">// 从socket中获取 inet_opt socket 描述结构</span></p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">short</span> <span style="color: rgb(184, 191, 198);">snum</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">chk_addr_ret</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p><span style="color: rgb(218, 146, 74);">// 对于RAW格式而言，存在自己的绑定操作，那么执行它自己的</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">sk-&gt;sk_prot-&gt;bind</span>) {</p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sk-&gt;sk_prot-&gt;bind</span>(<span style="color: rgb(184, 191, 198);">sk</span>, <span style="color: rgb(184, 191, 198);">uaddr</span>, <span style="color: rgb(184, 191, 198);">addr_len</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>}</p>
+<p>...</p>
+<p>snum = ntohs(addr-&gt;sin_port); // 端口号设置为 用户空间传递的 portNum</p>
+<p>...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 否则执行通用绑定操作</span></p>
+<p><span style="color: rgb(218, 146, 74);"> </span>if (sk-&gt;sk_prot-&gt;get_port(sk, snum)) { // 若端口信息存在，那么绑定失败</p>
+<p>inet-&gt;saddr = inet-&gt;rcv_saddr = 0;</p>
+<p>err = -EADDRINUSE;</p>
+<p>goto out_release_sock;</p>
+<p>}</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">inet-&gt;rcv_saddr</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet-&gt;saddr</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">addr-&gt;sin_addr</span>.<span style="color: rgb(184, 191, 198);">s_addr</span>; <span style="color: rgb(218, 146, 74);">// 保存监听IP地址</span></p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">inet-&gt;sport</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">htons</span>(<span style="color: rgb(184, 191, 198);">inet-&gt;num</span>); <span style="color: rgb(218, 146, 74);">// 保存端口信息（source port 源端口，也即输入端口，这里为server 的监听端口）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 服务端不需要连接，所以没有目的IP和目的端口，也即对端信息</span></p>
+<p><span style="color: rgb(184, 191, 198);">inet-&gt;daddr</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">inet-&gt;dport</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>...</p>
+<p>}</p>
+<p><strong>sock 与 inet_sock 内存转换原理</strong></p>
+<p>读者可能会好奇：为啥 sock 可以直接强转为 inet_sock 。我们来看以下代码。可以看到其实开辟的 sock 内存后面已经包含了 ip 和 tcp 层的信息空间，所以我们可以随意强转，这时，是不是更能体现：C语言中指针的强转变化，仅仅只是对内存空间的数据不同解释罢了。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">inet_create</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">protocol</span>){ <span style="color: rgb(218, 146, 74);">// 前面描述sys_socket时讲过</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sk_alloc</span>(<span style="color: rgb(184, 191, 198);">PF_INET</span>, <span style="color: rgb(184, 191, 198);">GFP_KERNEL</span>, <span style="color: rgb(184, 191, 198);">inet_sk_size</span>(<span style="color: rgb(184, 191, 198);">protocol</span>),</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">inet_sk_slab</span>(<span style="color: rgb(184, 191, 198);">protocol</span>));</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 表示TCP协议的 sock 元信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">tcp_sock</span> {</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> &nbsp;<span style="color: rgb(141, 141, 240);">sk</span>; <span style="color: rgb(218, 146, 74);">// sock 信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_opt</span> &nbsp;<span style="color: rgb(141, 141, 240);">inet</span>; <span style="color: rgb(218, 146, 74);">// ip 层信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">tcp_opt</span> &nbsp;<span style="color: rgb(141, 141, 240);">tcp</span>; <span style="color: rgb(218, 146, 74);">// tcp 层信息</span></p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">__inline__</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">inet_sk_size</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">protocol</span>) <span style="color: rgb(218, 146, 74);">// 通常我们指定为0，至于UDP和原始sock类型，读者自行查看</span></p>
+<p>{</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">rc</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">tcp_sock</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">protocol</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">IPPROTO_UDP</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">rc</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">udp_sock</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">protocol</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">IPPROTO_RAW</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">rc</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">raw_sock</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">rc</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><br></p></p>
+</body>
+</html>

@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理七 SingleThreadEventExecutor 原理二</h1>
+<p>2022-03-01T12:51:55.980+0800</p>
+<p><p><br></p>
+<p><strong>核心方法confirmShutdown实现原理</strong></p>
+<p>该方法用于确保事件处理器处于关闭状态。流程如下：</p>
+<ol>
+ <li>检测state状态是否处于 ST_SHUTTING_DOWN 正在关闭状态</li>
+ <li>检测当前调用该方法的线程不是正在执行该事件执行器的线程</li>
+ <li>取消所有周期性调度任务</li>
+ <li>更新gracefulShutdownStartTime关闭开始时间</li>
+ <li>执行所有任务队列中的任务成功或者执行钩子函数成功，那么检测当前状态是否已经处于关闭状态，如果处于关闭状态，那么直接返回true，因为此时执行器已经关闭，并且没有任何新任务需要执行。否则调用wakeup函数，唤醒线程并返回false</li>
+ <li>获取当前时间并检测状态state是否处于ST_SHUTTING_DOWN关闭状态，如果已经关闭，那么直接返回true。否则看看当前shutdown关闭的时间是否已经超过关闭超时时间，如果是，那么返回true</li>
+ <li>检测最后一次执行任务的时间小于设置的关闭静默期时间，那么这时调用wakeup唤醒线程继续执行任务，这里睡眠100ms，表示在静默期内每100ms检测是否有任务放入队列执行</li>
+ <li>如果在静默期内，没有任务放入队列执行，那么可以返回true，安全shutdown</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">confirmShutdown</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!isShuttingDown</span>()) { <span style="color: rgb(218, 146, 74);">// 检测状态是否处于正在关闭状态：STATE_UPDATER.get(this) &gt;= ST_SHUTTING_DOWN</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!inEventLoop</span>()) { <span style="color: rgb(218, 146, 74);">// 当前调用该方法的线程不是正在执行该事件执行器的线程，那么抛出异常</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalStateException</span>(<span style="color: rgb(210, 107, 107);">"must be invoked from an event loop"</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cancelScheduledTasks</span>(); <span style="color: rgb(218, 146, 74);">// 取消所有周期性调度任务</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">gracefulShutdownStartTime</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 更新关闭开始时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">gracefulShutdownStartTime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ScheduledFutureTask</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">runAllTasks</span>() <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">runShutdownHooks</span>()) { <span style="color: rgb(218, 146, 74);">// 执行所有任务队列中的任务成功或者执行钩子函数成功，那么检测当前状态是否已经处于关闭状态，如果处于关闭状态，那么直接返回true，因为此时执行器已经关闭，并且没有任何新任务需要执行</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isShutdown</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 当然，如果队列中仍有任务，那么等待一段时间，直到在静默期时间段内没有任务放入队列 </span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wakeup</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">nanoTime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ScheduledFutureTask</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>(); <span style="color: rgb(218, 146, 74);">// 获取当前时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isShutdown</span>() <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">nanoTime</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">gracefulShutdownStartTime</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">gracefulShutdownTimeout</span>) { <span style="color: rgb(218, 146, 74);">// 检测状态如果已经关闭，那么直接返回true，否则看看当前shutdown关闭的时间是否已经超过关闭超时时间，如果是，那么返回true</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">nanoTime</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">lastExecutionTime</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(184, 191, 198);">gracefulShutdownQuietPeriod</span>) {&nbsp;<span style="color: rgb(218, 146, 74);">// 最后一次执行任务的时间小于设置的关闭静默期时间，那么这时调用wakeup唤醒线程继续执行任务，这里睡眠100ms，表示在静默期内每100ms检测是否有任务放入队列执行</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wakeup</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Thread</span>.<span style="color: rgb(184, 191, 198);">sleep</span>(<span style="color: rgb(100, 171, 143);">100</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">InterruptedException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// Ignore</span></p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 在静默期内没有任务放入队列，那么直接返回true，安全shutdown关闭</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 取消所有周期性调度任务</span></p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">cancelScheduledTasks</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">assert</span> <span style="color: rgb(184, 191, 198);">inEventLoop</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取周期性任务队列，如果队列为空，那么直接返回</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Queue&lt;ScheduledFutureTask&lt;?&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">scheduledTaskQueue</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">scheduledTaskQueue</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isNullOrEmpty</span>(<span style="color: rgb(184, 191, 198);">scheduledTaskQueue</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将周期性任务队列中的任务转为数组，并遍历该数组将其取消执行</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ScheduledFutureTask&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">scheduledTasks</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">scheduledTaskQueue</span>.<span style="color: rgb(184, 191, 198);">toArray</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ScheduledFutureTask&lt;?&gt;</span>[<span style="color: rgb(184, 191, 198);">scheduledTaskQueue</span>.<span style="color: rgb(184, 191, 198);">size</span>()]);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">ScheduledFutureTask&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">task</span>: <span style="color: rgb(184, 191, 198);">scheduledTasks</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">task</span>.<span style="color: rgb(184, 191, 198);">cancelWithoutRemove</span>(<span style="color: rgb(132, 182, 203);">false</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">scheduledTaskQueue</span>.<span style="color: rgb(184, 191, 198);">clear</span>(); <span style="color: rgb(218, 146, 74);">// 将周期性任务队列清空</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 唤醒线程函数，我们看到这里判断执行器状态后向队列放入唤醒线程的空任务，因为此时线程可能处于阻塞队列获取任务状态，通过向其中放入空任务，可以将线程唤醒</span></p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">wakeup</span>(<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">inEventLoop</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!inEventLoop</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">STATE_UPDATER</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(200, 143, 208);">this</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">ST_SHUTTING_DOWN</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">taskQueue</span>.<span style="color: rgb(184, 191, 198);">offer</span>(<span style="color: rgb(184, 191, 198);">WAKEUP_TASK</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法runAllTasks实现原理</strong></p>
+<p>该方法用于执行普通任务队列中的所有任务。流程如下：</p>
+<ol>
+ <li>将当前需要执行的周期性任务队列中的任务放入普通任务队列taskQueue</li>
+ <li>执行taskQueue中的所有任务，知道周期性任务队列和taskQueue为空</li>
+ <li>更新最终执行时间</li>
+ <li>调用子类实现的钩子函数afterRunningAllTasks</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">runAllTasks</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">assert</span> <span style="color: rgb(184, 191, 198);">inEventLoop</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">fetchedAll</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">ranAtLeastOne</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">do</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fetchedAll</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fetchFromScheduledTaskQueue</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">runAllTasksFrom</span>(<span style="color: rgb(184, 191, 198);">taskQueue</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ranAtLeastOne</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">!fetchedAll</span>); <span style="color: rgb(218, 146, 74);">// 继续处理，直到我们获取所有的计划任务</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ranAtLeastOne</span>) { <span style="color: rgb(218, 146, 74);">// 更新最终执行时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">lastExecutionTime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ScheduledFutureTask</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">afterRunningAllTasks</span>(); <span style="color: rgb(218, 146, 74);">// 调用子类实现的钩子函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ranAtLeastOne</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 将当前需要执行的周期性任务调度任务从周期性任务队列中移动到普通任务队列taskQueue</span></p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">fetchFromScheduledTaskQueue</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">nanoTime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">AbstractScheduledEventExecutor</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">scheduledTask</span>&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">pollScheduledTask</span>(<span style="color: rgb(184, 191, 198);">nanoTime</span>); <span style="color: rgb(218, 146, 74);">// 获取当前已经到期的周期性任务</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">scheduledTask</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!taskQueue</span>.<span style="color: rgb(184, 191, 198);">offer</span>(<span style="color: rgb(184, 191, 198);">scheduledTask</span>)) { <span style="color: rgb(218, 146, 74);">// 将其放入普通任务队列</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果任务队列中没有剩余空间，将它放回scheduledTaskQueue，这样我们就可以等待普通任务队列有空间后再次提取它</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">scheduledTaskQueue</span>().<span style="color: rgb(184, 191, 198);">add</span>((<span style="color: rgb(184, 191, 198);">ScheduledFutureTask&lt;?&gt;</span>) <span style="color: rgb(184, 191, 198);">scheduledTask</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">scheduledTask</span>&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">pollScheduledTask</span>(<span style="color: rgb(184, 191, 198);">nanoTime</span>); <span style="color: rgb(218, 146, 74);">// 获取下一个周期性任务</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 执行taskQueue中的所有任务</span></p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">runAllTasksFrom</span>(<span style="color: rgb(184, 191, 198);">Queue&lt;Runnable&gt;</span> <span style="color: rgb(184, 191, 198);">taskQueue</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">pollTaskFrom</span>(<span style="color: rgb(184, 191, 198);">taskQueue</span>); <span style="color: rgb(218, 146, 74);">// 从队列中提取任务</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">safeExecute</span>(<span style="color: rgb(184, 191, 198);">task</span>); <span style="color: rgb(218, 146, 74);">// 执行任务</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">pollTaskFrom</span>(<span style="color: rgb(184, 191, 198);">taskQueue</span>); <span style="color: rgb(218, 146, 74);">// 提取下一个任务</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 使用try catch来预防发生异常导致线程退出</span></p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">safeExecute</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">task</span>.<span style="color: rgb(184, 191, 198);">run</span>();</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(<span style="color: rgb(210, 107, 107);">"A task raised an exception. Task: {}"</span>, <span style="color: rgb(184, 191, 198);">task</span>, <span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法runShutdownHooks实现原理</strong></p>
+<p>该方法用于执行所有注册的执行器关闭时执行的钩子函数。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">runShutdownHooks</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">ran</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">!shutdownHooks</span>.<span style="color: rgb(184, 191, 198);">isEmpty</span>()) { <span style="color: rgb(218, 146, 74);">// 执行所有钩子直到队列为空</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">List&lt;Runnable&gt;</span> <span style="color: rgb(184, 191, 198);">copy</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ArrayList&lt;Runnable&gt;</span>(<span style="color: rgb(184, 191, 198);">shutdownHooks</span>); <span style="color: rgb(218, 146, 74);">// 将当前所有钩子复制快照到当前copy引用，避免在执行中新增加hook</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">shutdownHooks</span>.<span style="color: rgb(184, 191, 198);">clear</span>(); <span style="color: rgb(218, 146, 74);">// 清空队列</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span>: <span style="color: rgb(184, 191, 198);">copy</span>) { <span style="color: rgb(218, 146, 74);">// 遍历钩子队列中任务执行</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">task</span>.<span style="color: rgb(184, 191, 198);">run</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">logger</span>.<span style="color: rgb(184, 191, 198);">warn</span>(<span style="color: rgb(210, 107, 107);">"Shutdown hook raised an exception."</span>, <span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ran</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ran</span>) { <span style="color: rgb(218, 146, 74);">// 执行成功更新执行器最后一次执行任务的时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">lastExecutionTime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ScheduledFutureTask</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ran</span>;</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux E 100 网卡 与 TCP 层原理 二</h1>
+<p>2022-11-07T09:36:13.606+0800</p>
+<p><p>前面我们看到数据包放入了 input_pkt_queue 队列，并标识了 NET_RX_SOFTIRQ 软中断标志位，那么当内核执行软中断时，将会处理该中断标志位对应的处理代码 net_rx_action。对于软中断的原理，我们在下一篇中进行讲解</p>
+<h2><strong style="color: rgb(38, 38, 38);">NET_RX_SOFTIRQ 软中断的处理</strong></h2>
+<p><br></p>
+<p>net_dev_init 函数将随着linux 内核的启动而调用，这里使用 宏定义 subsys_initcall 将其注册为子系统初始化函数，将内核执行子系统初始化时，将会顺序调用注册进入的函数，这里的 net_dev_init 函数便是用于初始化网络设备。</p>
+<p>在其中注册的 process_backlog 函数，将会有软中断执行时回调，在其中将处理 input_pkt_queue 队列中的数据。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  subsys_initcall(net_dev_init);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> __init <span class="ql-token hljs-title">net_dev_init(void)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 初始化 per cpu 结构，也即每个CPU一个，此时每个 CPU 自己访问自己的 网络描述符 softnet_data，不需要上锁</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">for</span> (i = <span class="ql-token hljs-number">0</span>; i &lt; NR_CPUS; i++) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct softnet_data *queue;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">queue</span> = &amp;per_cpu(softnet_data, i);
+ </div>
+ <div class="ql-code-block">
+  skb_queue_head_init(&amp;<span class="ql-token hljs-built_in">queue</span>-&gt;input_pkt_queue);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">queue</span>-&gt;throttle = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">queue</span>-&gt;cng_level = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">queue</span>-&gt;avg_blog = <span class="ql-token hljs-number">10</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">queue</span>-&gt;completion_queue = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  INIT_LIST_HEAD(&amp;<span class="ql-token hljs-built_in">queue</span>-&gt;poll_list);
+ </div>
+ <div class="ql-code-block">
+  set_bit(__LINK_STATE_START, &amp;<span class="ql-token hljs-built_in">queue</span>-&gt;backlog_dev.state);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">queue</span>-&gt;backlog_dev.weight = weight_p; <span class="ql-token hljs-comment">// int weight_p = 64 权重 默认 64</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">queue</span>-&gt;backlog_dev.poll = process_backlog; <span class="ql-token hljs-comment">// 兼容旧 API 放置数据包的队列的回调函数，将有软中断来调用</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">atomic_set</span>(&amp;<span class="ql-token hljs-built_in">queue</span>-&gt;backlog_dev.refcnt, <span class="ql-token hljs-number">1</span>);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  open_softirq(NET_RX_SOFTIRQ, net_rx_action, <span class="ql-token hljs-literal">NULL</span>); <span class="ql-token hljs-comment">// 设置处理接受数据的软中断函数</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 处理设备接收到的数据包</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">process_backlog(struct net_device *backlog_dev, int *budget)</span>{
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> work = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> quota = min(backlog_dev-&gt;quota, *budget);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct softnet_data *queue =</span> &amp;__get_cpu_var(softnet_data); <span class="ql-token hljs-comment">// 获取当前CPU的 struct softnet_data 结构</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> start_time = jiffies;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">for</span> (;;) { <span class="ql-token hljs-comment">// 循环处理所有放入 input_pkt_queue 队列的数据包</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct sk_buff *skb;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct net_device *dev;</span>
+ </div>
+ <div class="ql-code-block">
+  local_irq_disable(); <span class="ql-token hljs-comment">// 关闭当前 CPU 硬中断，保证操作 input_pkt_queue 队列的原子性</span>
+ </div>
+ <div class="ql-code-block">
+  skb = __skb_dequeue(&amp;<span class="ql-token hljs-built_in">queue</span>-&gt;input_pkt_queue); <span class="ql-token hljs-comment">// 从 input_pkt_queue 列表中移出一个 skb</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!skb) <span class="ql-token hljs-comment">// 已经处理完所有的 skb</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> job_done;
+ </div>
+ <div class="ql-code-block">
+  local_irq_enable(); <span class="ql-token hljs-comment">// 开启硬中断，在后面处理当前移出的 skb 时，允许 e100 中断执行，再次向 input_pkt_queue 队列中放入数据包</span>
+ </div>
+ <div class="ql-code-block">
+  dev = skb-&gt;dev;
+ </div>
+ <div class="ql-code-block">
+  netif_receive_skb(skb); <span class="ql-token hljs-comment">// 将数据包递交到上层协议栈处理</span>
+ </div>
+ <div class="ql-code-block">
+  dev_put(dev);
+ </div>
+ <div class="ql-code-block">
+  work++; <span class="ql-token hljs-comment">// 记录当前处理数据包的个数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (work &gt;= quota || jiffies - start_time &gt; <span class="ql-token hljs-number">1</span>) <span class="ql-token hljs-comment">// 当超过处理配额，或者处理时间超过一个时钟中断周期 默认为100 hz ， 也即 10ms，那么退出循环，让出 CPU 执行进程代码，而不是一直执行软中断 </span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 减少处理配额</span>
+ </div>
+ <div class="ql-code-block">
+  backlog_dev-&gt;quota -= work;
+ </div>
+ <div class="ql-code-block">
+  *budget -= work;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">-1</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  job_done: <span class="ql-token hljs-comment">// 处理完所有数据包，正常结束</span>
+ </div>
+ <div class="ql-code-block">
+  backlog_dev-&gt;quota -= work;
+ </div>
+ <div class="ql-code-block">
+  *budget -= work;
+ </div>
+ <div class="ql-code-block">
+  list_del(&amp;backlog_dev-&gt;poll_list); <span class="ql-token hljs-comment">// 将当前设备从poll列表中移除，因为所有数据包都处理完毕，下一次无需处理</span>
+ </div>
+ <div class="ql-code-block">
+  smp_mb__before_clear_bit(); <span class="ql-token hljs-comment">// 屏障保证 netif_poll_enable 函数写数据位不会发生重排序</span>
+ </div>
+ <div class="ql-code-block">
+  netif_poll_enable(backlog_dev); <span class="ql-token hljs-comment">// 设置可以继续轮训处理数据包</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (<span class="ql-token hljs-built_in">queue</span>-&gt;throttle) { <span class="ql-token hljs-comment">// 关闭 throttle 以允许继续向队列中添加数据包，前面描述过</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">queue</span>-&gt;throttle = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  local_irq_enable(); <span class="ql-token hljs-comment">// 开启硬中断</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">net_rx_action 函数</strong></h2>
+<p><br></p>
+<p>该函数将在内核检测软中断时，发现设置了 NET_RX_SOFTIRQ 软中断标志位，从而回调该函数处理接收到的数据包。我们关注到这里使用 budget 配额 和 jiffies - start_time 软中断执行时间来约束 CPU 的资源分配，避免 CPU 长时间执行软中断导致进程代码得不到执行。其中核心代码为：dev-&gt;poll(dev, &amp;budget)，该函数将回调poll list 上设备处理数据包的回调函数，这里对应于 上述的 process_backlog 函数。源码如下。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">net_rx_action(struct softirq_action *h)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct softnet_data *queue =</span> &amp;__get_cpu_var(softnet_data);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> start_time = jiffies;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> budget = netdev_max_backlog; <span class="ql-token hljs-comment">// 最大执行配额 int netdev_max_backlog = 300;</span>
+ </div>
+ <div class="ql-code-block">
+  preempt_disable(); <span class="ql-token hljs-comment">// 关闭内核任务抢占 </span>
+ </div>
+ <div class="ql-code-block">
+  local_irq_disable(); <span class="ql-token hljs-comment">// 关闭CPU硬中断</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">while</span> (!list_empty(&amp;<span class="ql-token hljs-built_in">queue</span>-&gt;poll_list)) { <span class="ql-token hljs-comment">// 遍历设备列表，调用设备的 poll 函数处理其中的数据包</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct net_device *dev;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (budget &lt;= <span class="ql-token hljs-number">0</span> || jiffies - start_time &gt; <span class="ql-token hljs-number">1</span>) <span class="ql-token hljs-comment">// 执行超过 10ms （以100hz算，每过 100hz jiffies + 1），那么退出</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> softnet_break;
+ </div>
+ <div class="ql-code-block">
+  local_irq_enable(); <span class="ql-token hljs-comment">// 开启 CPU 硬中断</span>
+ </div>
+ <div class="ql-code-block">
+  dev = list_entry(<span class="ql-token hljs-built_in">queue</span>-&gt;poll_list.next,
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">struct</span> net_device, poll_list);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (dev-&gt;quota &lt;= <span class="ql-token hljs-number">0</span> || dev-&gt;poll(dev, &amp;budget)) { <span class="ql-token hljs-comment">// 若设备中存在配额可以执行数据包，那么回调设备回调函数 poll 处理盗来的数据包，否则 关闭中断，将当前设备从 poll 列表中移动到列表末尾并重新分配配额，等待下一次调度执行。注意：这里传入了 budget配额的地址，所以内部使用的配额也会算在每次循环中</span>
+ </div>
+ <div class="ql-code-block">
+  local_irq_disable();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">// 移动到 poll list 末尾，并重新分配 配额 </span>
+ </div>
+ <div class="ql-code-block">
+  list_del(&amp;dev-&gt;poll_list);
+ </div>
+ <div class="ql-code-block">
+  list_add_tail(&amp;dev-&gt;poll_list, &amp;<span class="ql-token hljs-built_in">queue</span>-&gt;poll_list);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (dev-&gt;quota &lt; <span class="ql-token hljs-number">0</span>)
+ </div>
+ <div class="ql-code-block">
+  dev-&gt;quota += dev-&gt;weight;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">else</span>
+ </div>
+ <div class="ql-code-block">
+  dev-&gt;quota = dev-&gt;weight;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 设备配额仍然存在，代表可以继续执行，那么继续循环处理poll list中的其他设备的数据包</span>
+ </div>
+ <div class="ql-code-block">
+  dev_put(dev);
+ </div>
+ <div class="ql-code-block">
+  local_irq_disable();
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  out:
+ </div>
+ <div class="ql-code-block">
+  local_irq_enable(); <span class="ql-token hljs-comment">// 开启CPU硬中断</span>
+ </div>
+ <div class="ql-code-block">
+  preempt_enable(); <span class="ql-token hljs-comment">// 开启内核抢占</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  softnet_break: <span class="ql-token hljs-comment">// 超过执行配额，那么代表仍有数据还未处理，所以继续设置 NET_RX_SOFTIRQ 标志位，下一次软中断时继续处理</span>
+ </div>
+ <div class="ql-code-block">
+  __get_cpu_var(netdev_rx_stat).time_squeeze++;
+ </div>
+ <div class="ql-code-block">
+  __raise_softirq_irqoff(NET_RX_SOFTIRQ);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> out;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">netif_receive_skb 函数</strong></h2>
+<p><br></p>
+<p>该函数由 process_backlog 函数调用，当 process_backlog 函数从 input_pkt_queue 队列中取出一个 sk_buff 后，将通过 netif_receive_skb 函数将数据包传递给上层协议栈。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">netif_receive_skb(struct sk_buff *skb)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct packet_type *ptype, *pt_prev;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> ret = NET_RX_DROP;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">short</span> type = skb-&gt;protocol; <span class="ql-token hljs-comment">// 数据帧协议类型</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!skb-&gt;stamp.tv_sec) <span class="ql-token hljs-comment">// 初始化接收到包的时间</span>
+ </div>
+ <div class="ql-code-block">
+  do_gettimeofday(&amp;skb-&gt;stamp);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  skb_bond(skb); <span class="ql-token hljs-comment">// 绑定 skb 的设备信息（PCI 的主设备与从设备）</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  __get_cpu_var(netdev_rx_stat).total++; <span class="ql-token hljs-comment">// 递增当前cpu接受数据包数量</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  skb-&gt;h.raw = skb-&gt;nh.raw = skb-&gt;data; <span class="ql-token hljs-comment">// 将数据指针分别设置到 网络层 ip （skb-&gt;nh） 和 运输层 tcp/udp （skb-&gt;h） 结构中，以供对应层使用其中的数据</span>
+ </div>
+ <div class="ql-code-block">
+  pt_prev = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  rcu_read_lock();
+ </div>
+ <div class="ql-code-block">
+  list_for_each_entry_rcu(ptype, &amp;ptype_all, <span class="ql-token hljs-built_in">list</span>) { <span class="ql-token hljs-comment">// 遍历所有上层协议栈，找到可以处理当前设备类型的Tap 设备（static struct list_head ptype_all 结构中用于存放 tap设备，我们知道 tun 虚拟设备用于处理 IP层数据，tap 虚拟设备用于处理 数据链路层协议）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!ptype-&gt;dev || ptype-&gt;dev == skb-&gt;dev) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (pt_prev) &nbsp;<span class="ql-token hljs-comment">// 找到合适的 TAP 设备后，回调其设置的函数（这里了解即可，我们后续文章会结合 OPENVPN 来描述 TAP 与 TUN 设备原理）</span>
+ </div>
+ <div class="ql-code-block">
+  ret = deliver_skb(skb, pt_prev, <span class="ql-token hljs-number">0</span>);
+ </div>
+ <div class="ql-code-block">
+  pt_prev = ptype;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  handle_diverter(skb); <span class="ql-token hljs-comment">// 处理 divert 机制（将数据包转向到本机），这里忽略，不支持时，为空操作</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (__handle_bridge(skb, &amp;pt_prev, &amp;ret)) <span class="ql-token hljs-comment">// 调用网桥模块处理该协议，也即：该内核配置了网桥模块，拥有了网桥的数据包冲突域解决能力，这里忽略即可，感兴趣的读者可以自行研究，功能等同于 计算机网络中的网桥功能：根据 mac 地址转发 port 端口。当然，如果没有在编译内核时引入该模块，那么为空操作</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> out;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 找到合适的上层协议来处理该数据包 ，注意：此时是根据数据帧类型 hash 运算找到 ptype_base数组 对应的 hash slot，然后变量其冲突链表找到合适的协议 </span>
+ </div>
+ <div class="ql-code-block">
+  list_for_each_entry_rcu(ptype, &amp;ptype_base[ntohs(type)&amp;<span class="ql-token hljs-number">15</span>], <span class="ql-token hljs-built_in">list</span>) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (ptype-&gt;type == type &amp;&amp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; (!ptype-&gt;dev || ptype-&gt;dev == skb-&gt;dev)) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (pt_prev)
+ </div>
+ <div class="ql-code-block">
+  ret = deliver_skb(skb, pt_prev, <span class="ql-token hljs-number">0</span>);
+ </div>
+ <div class="ql-code-block">
+  pt_prev = ptype;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (pt_prev) { <span class="ql-token hljs-comment">// 前面循环：当找到第二个时，回调第一个，所以这里将第二个进行回调</span>
+ </div>
+ <div class="ql-code-block">
+  ret = pt_prev-&gt;func(skb, skb-&gt;dev, pt_prev);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 没有上层协议可以处理该数据包，直接丢弃</span>
+ </div>
+ <div class="ql-code-block">
+  kfree_skb(skb);
+ </div>
+ <div class="ql-code-block">
+  ret = NET_RX_DROP;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  out:
+ </div>
+ <div class="ql-code-block">
+  rcu_read_unlock();
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> ret;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 回调 packet_type 的 func 处理数据包</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> __inline__ <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">deliver_skb(struct sk_buff *skb,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> &nbsp;struct packet_type *pt_prev, int last)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">atomic_inc</span>(&amp;skb-&gt;users);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> pt_prev-&gt;func(skb, skb-&gt;dev, pt_prev);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">ptype_base 初始化</strong></h2>
+<p><br></p>
+<p>前面我们看到将会通过 ptype_base[ntohs(type)&amp;15] 找到处理数据帧的协议，那么我们来看看合适初始化了该数组，对应 IP 协议来说，初始化了什么。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-class">struct list_head ptype_base[16];</span> <span class="ql-token hljs-comment">// 16 个 slot 的 hash 表</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">dev_add_pack(struct packet_type *pt)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> hash;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  spin_lock_bh(&amp;ptype_lock);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (pt-&gt;type == htons(ETH_P_ALL)) { <span class="ql-token hljs-comment">// 添加 TAP 设备处理所有 以太网帧</span>
+ </div>
+ <div class="ql-code-block">
+  netdev_nit++;
+ </div>
+ <div class="ql-code-block">
+  list_add_rcu(&amp;pt-&gt;<span class="ql-token hljs-built_in">list</span>, &amp;ptype_all);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 添加其他特定以太网帧协议处理</span>
+ </div>
+ <div class="ql-code-block">
+  hash = ntohs(pt-&gt;type) &amp; <span class="ql-token hljs-number">15</span>;
+ </div>
+ <div class="ql-code-block">
+  list_add_rcu(&amp;pt-&gt;<span class="ql-token hljs-built_in">list</span>, &amp;ptype_base[hash]);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  spin_unlock_bh(&amp;ptype_lock);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// IP协议层初始化时注册</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> __init <span class="ql-token hljs-title">ip_init(void)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  dev_add_pack(&amp;ip_packet_type);
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 设置只处理 IP 数据包，处理函数为 ip_rcv，至此，当调用该函数时，数据包正式进入 IP 层</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-class">struct packet_type ip_packet_type =</span> {
+ </div>
+ <div class="ql-code-block">
+  .type = __constant_htons(ETH_P_IP),
+ </div>
+ <div class="ql-code-block">
+  .func = ip_rcv,
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+</div>
+<p><br></p></p>
+</body>
+</html>

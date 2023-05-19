@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>并发编程前序二</h1>
+<p>2022-01-18T08:03:00.489+0800</p>
+<p><p>在《并发编程前序一》中，我们推理出了进程和线程的区别，也即：进程拥有独立的内存数据、线程是共享了内存数据的进程（也即轻量级进程）。那么本文将进行推理介绍以下内容：</p>
+<ol>
+ <li>Linux中如何进行进程的切换（由于线程的表现形式也为进程，只不过共享了数据，所以我们研究进程即可，线程也是如此）</li>
+ <li>协程的引入</li>
+</ol>
+<p><strong>Linux中进程切换方式</strong></p>
+<p>我们先来推理一下：</p>
+<ol>
+ <li>进程为运行中的程序</li>
+ <li>程序的二进制数据：数据、运行代码（指令信息）存在于硬盘</li>
+ <li>CPU控制硬盘将程序的这些信息装载到内存中，然后建立一个PCB（进程控制块）来表示该程序在运行中的信息（进程信息：内存分布、PID、打开文件等等）</li>
+ <li>那么必然会有一个队列放置这些需要执行的进程，而我们只需要将PCB放入其中即可。这时我们称该队列为CPU的运行队列（runqueue）</li>
+ <li>在运行中的进程不可能无限期占用CPU，比如现在有两个进程A、B，如果CPU一直执行A，那么B将永远无法执行。就像你在听音乐，然后CPU被音乐进程占用了，那么你将无法再继续其他工作</li>
+ <li>这时，我们可以用《并发编程前序一》中介绍的：并行、并发，来解决该问题。我们可以引入多个CPU来并行执行A和B进程。当然我们也可以用一个CPU来完成对A和B的并发调用（分时复用CPU，只要分时间隔足够小，用户几乎无法感知切换，那么这就成功啦）</li>
+</ol>
+<p>那么，现在使用混沌学习法，我们找到了GC Root：如何切换？来看推理：</p>
+<ol>
+ <li>CPU正在执行A进程，那么有一种乐观的条件：A进程说：我累了，换B吧。这时主动将CPU的执行权交给B进程。很乐观对吧？但是考虑一下：如果A进程来了个死循环，这会怎样？答案是B进程饿死</li>
+ <li>那么就需要一种被动切换的功能，该功能就是各位了解的中断。也即通过一种方式，周期性的将正在执行进程指令的CPU打断，让它去执行某一段代码，在该代码中，去切换到进程B。于是，我们就可以根据该中断，来让A、B进程分时复用CPU资源</li>
+</ol>
+<p>我们看到核心就是：中断。那么如何中断呢？这就涉及到其他硬件设备了，我们可以引入一个时钟硬件，让它每隔一段时间就中断CPU，让CPU执行中断代码。在以前Intel中该设备为：8259A中断控制芯片（感兴趣可以研究下，不过不了解问题也不大，无外乎就是个硬件设备连接到CPU上，周期性产生信号，让CPU中断），通常该中断的周期性频率为：100HZ，也即10ms（1/100HZ * 1000ms），也即每隔10ms，CPU就会从执行任务代码的状态，切换到执行中断代码状态，这时就可以在其中执行中断代码了。当然有没有可能更小：1000HZ，也即1ms。读者可以试想一下：频率的高低影响什么？来推理：</p>
+<ol>
+ <li>频率越高，代表了执行中断代码的次数就越多，这就导致了CPU会花费大量时间来执行与任务无关的代码，导致进程性能下降。但随之可以带来好处：切换的时间越准确，因为检测的时间足够小。</li>
+ <li>频率越低，代表了执行中断代码的次数就越少，这就导致了CPU会花费大量时间来执行任务代码，导致进程性能提高。但随之可以带来弊端：切换的时间相对不太准确，因为检测时间周期变大了。</li>
+</ol>
+<p><strong>主动切换进程</strong></p>
+<p>我们来看一个系统调用（还记得什么是系统调用吧？内核提供的Controller接口，由用户来按照约定（协议）调用）nanosleep，该系统调用为C语言中直接调用sleep睡眠函数调用。我们知道，一个进程要去睡眠，那么代表了一个阻塞状态，此时将为主动切换进程。我们看到流程如下：</p>
+<ol>
+ <li>设置进程状态为可中断阻塞状态</li>
+ <li>调用schedule_timeout函数完成阻塞，然后切换进程</li>
+ <li>在schedule_timeout函数中，初始化并设置了定时器timer，然后将该定时器放入定时器链表，然后调用schedule()函数完成进程的切换</li>
+ <li>在schedule()函数中，获取到runqueue，进程就绪队列，从中获取到进程，然后调用context_switch切换执行，这时CPU就会转而去执行其他进程的代码</li>
+</ol>
+<p>好的，我们可以稍微推理一下：</p>
+<ol>
+ <li>CPU只知道执行指令</li>
+ <li>当进程需要将CPU的资源释放时，将会进入schedule()函数，该函数同样也是一堆代码</li>
+ <li>CPU在执行该代码时，执行了context_switch函数，该函数将会把CPU的状态信息：EIP（用于指示CPU执行哪一段指令）等等修改为其他进程的代码地址，这时CPU将会跳转执行其他进程的EIP所指示的代码。这时便完成了进程的切换</li>
+</ol>
+<p>小结：主动释放时，需要进程A主动调用调度函数schedule()，切换CPU状态信息到B进程即可。</p>
+<p><span style="color: rgb(184, 191, 198);">asmlinkage</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">sys_nanosleep</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">timespec</span> <span style="color: rgb(184, 191, 198);">*rqtp</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">timespec</span> <span style="color: rgb(184, 191, 198);">*rmtp</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">current-&gt;state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">TASK_INTERRUPTIBLE</span>; <span style="color: rgb(218, 146, 74);">// 设置进程状态为可中断阻塞状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">expire</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">schedule_timeout</span>(<span style="color: rgb(184, 191, 198);">expire</span>); <span style="color: rgb(218, 146, 74);">// 调用schedule_timeout函数完成阻塞，然后切换进程</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">signed</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">schedule_timeout</span>(<span style="color: rgb(28, 198, 133);">signed</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">timer_list</span> <span style="color: rgb(141, 141, 240);">timer</span>; <span style="color: rgb(218, 146, 74);">// 定时结构（就是个链表）</span></p>
+<p>...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置定时器属性</span></p>
+<p><span style="color: rgb(184, 191, 198);">expire</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">timeout</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">jiffies</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">init_timer</span>(<span style="color: rgb(184, 191, 198);">&amp;timer</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">timer</span>.<span style="color: rgb(184, 191, 198);">expires</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">expire</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">timer</span>.<span style="color: rgb(184, 191, 198);">data</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span>) <span style="color: rgb(184, 191, 198);">current</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">timer</span>.<span style="color: rgb(184, 191, 198);">function</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">process_timeout</span>;</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">add_timer</span>(<span style="color: rgb(184, 191, 198);">&amp;timer</span>); <span style="color: rgb(218, 146, 74);">// 将定时器放入列表中</span></p>
+<p><span style="color: rgb(184, 191, 198);">schedule</span>();&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 切换进程</span></p>
+<p><span style="color: rgb(184, 191, 198);">del_timer_sync</span>(<span style="color: rgb(184, 191, 198);">&amp;timer</span>);&nbsp;<span style="color: rgb(218, 146, 74);">// 当进程再次被执行时，将会从这里开始执行，删除定时器</span></p>
+<p><span style="color: rgb(184, 191, 198);">timeout</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">expire</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">jiffies</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">out</span>:</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">timeout</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(100, 171, 143);">0</span> : <span style="color: rgb(184, 191, 198);">timeout</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">asmlinkage</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">schedule</span>(<span style="color: rgb(28, 198, 133);">void</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p><span style="color: rgb(184, 191, 198);">rq</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">this_rq</span>(); <span style="color: rgb(218, 146, 74);">// 获取到当前CPU的运行队列</span></p>
+<p>&nbsp;...</p>
+<p><span style="color: rgb(184, 191, 198);">array</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">rq-&gt;active</span>; <span style="color: rgb(218, 146, 74);">// 获取进程就绪队列</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取就绪队列中的进程执行</span></p>
+<p><span style="color: rgb(184, 191, 198);">idx</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sched_find_first_bit</span>(<span style="color: rgb(184, 191, 198);">array-&gt;bitmap</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">queue</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">array-&gt;queue</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">idx</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">next</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">list_entry</span>(<span style="color: rgb(184, 191, 198);">queue-&gt;next</span>, <span style="color: rgb(184, 191, 198);">task_t</span>, <span style="color: rgb(184, 191, 198);">run_list</span>);</p>
+<p>&nbsp;...</p>
+<p><span style="color: rgb(184, 191, 198);">prev</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">context_switch</span>(<span style="color: rgb(184, 191, 198);">rq</span>, <span style="color: rgb(184, 191, 198);">prev</span>, <span style="color: rgb(184, 191, 198);">next</span>); <span style="color: rgb(218, 146, 74);">// 切换进程上下文（也即PCB中进程的信息切换）</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>被动切换进程</strong></p>
+<p>以下源码我们可以看到：</p>
+<ol>
+ <li>timer_interrupt为时钟中断时调用的中断处理代码</li>
+ <li>最终我们看到调用了update_process_times函数</li>
+ <li>在update_process_times中调用了调度函数：scheduler_tick</li>
+ <li>在该函数中如果发现进程的时间片已经用完（如果不了解时间片，可以这么想：把一段时间分割为不同区间，A、B进程互相分时使用CPU资源），那么将会调用set_tsk_need_resched函数设置重调度标记位</li>
+</ol>
+<p>我们可以看到，所谓的被动切换，其实是对进程设置一个标记位TIF_NEED_RESCHED，由进程自己检测该标记为来切换进程。所以，实质上被动切换也是主动切换的一个表现形式。</p>
+<p><span style="color: rgb(184, 191, 198);">irqreturn_t</span> <span style="color: rgb(141, 141, 240);">timer_interrupt</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">irq</span>, <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">dev_id</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(184, 191, 198);">*regs</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">do_timer_interrupt</span>(<span style="color: rgb(184, 191, 198);">irq</span>, <span style="color: rgb(184, 191, 198);">NULL</span>, <span style="color: rgb(184, 191, 198);">regs</span>);</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">IRQ_HANDLED</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">inline</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">do_timer_interrupt</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">irq</span>, <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">dev_id</span>,</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(184, 191, 198);">*regs</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p><span style="color: rgb(184, 191, 198);">do_timer_interrupt_hook</span>(<span style="color: rgb(184, 191, 198);">regs</span>);</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">inline</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">do_timer_interrupt_hook</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(184, 191, 198);">*regs</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p><span style="color: rgb(184, 191, 198);">do_timer</span>(<span style="color: rgb(184, 191, 198);">regs</span>);</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">do_timer</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(184, 191, 198);">*regs</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p><span style="color: rgb(184, 191, 198);">update_process_times</span>(<span style="color: rgb(184, 191, 198);">user_mode</span>(<span style="color: rgb(184, 191, 198);">regs</span>));</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">update_process_times</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">user_tick</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*p</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">current</span>; <span style="color: rgb(218, 146, 74);">// 当前执行进程的PCB</span></p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">scheduler_tick</span>(<span style="color: rgb(184, 191, 198);">user_tick</span>, <span style="color: rgb(184, 191, 198);">system</span>); <span style="color: rgb(218, 146, 74);">// 根据条件决定是否切换其他进程</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">scheduler_tick</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">user_ticks</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">sys_ticks</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">runqueue_t</span> <span style="color: rgb(184, 191, 198);">*rq</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">this_rq</span>(); <span style="color: rgb(218, 146, 74);">// 当前CPU运行队列</span></p>
+<p><span style="color: rgb(184, 191, 198);">task_t</span> <span style="color: rgb(184, 191, 198);">*p</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">current</span>; <span style="color: rgb(218, 146, 74);">// 当前进程的PCB</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!--p-&gt;time_slice</span>) {&nbsp;<span style="color: rgb(218, 146, 74);">// 进程时间片用完，切换进程</span></p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">set_tsk_need_resched</span>(<span style="color: rgb(184, 191, 198);">p</span>); <span style="color: rgb(218, 146, 74);">// 设置进程需要重新调度标志位</span></p>
+<p>...</p>
+<p>}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 设置重调度标志位</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">inline</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">set_tsk_need_resched</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*tsk</span>) <span style="color: rgb(218, 146, 74);">// task_struct *tsk为进程的PCB</span></p>
+<p>{</p>
+<p><span style="color: rgb(184, 191, 198);">set_tsk_thread_flag</span>(<span style="color: rgb(184, 191, 198);">tsk</span>,<span style="color: rgb(184, 191, 198);">TIF_NEED_RESCHED</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(183, 179, 179);">#define TIF_NEED_RESCHED 3&nbsp;</span><span style="color: rgb(218, 146, 74);">// 重调度标志位为第三位</span></p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">inline</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">set_tsk_thread_flag</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*tsk</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flag</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(184, 191, 198);">set_ti_thread_flag</span>(<span style="color: rgb(184, 191, 198);">tsk-&gt;thread_info</span>,<span style="color: rgb(184, 191, 198);">flag</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">inline</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">set_ti_thread_flag</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">thread_info</span> <span style="color: rgb(184, 191, 198);">*ti</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flag</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(184, 191, 198);">set_bit</span>(<span style="color: rgb(184, 191, 198);">flag</span>,<span style="color: rgb(184, 191, 198);">&amp;ti-&gt;flags</span>); <span style="color: rgb(218, 146, 74);">// 对thread_info结构的flags（unsigned long类型）的TIF_NEED_RESCHED为置位</span></p>
+<p>}</p>
+<p>​</p>
+<p>那么，现在带来的问题就是：进程在哪里检测该标记位呢？我们以一个系统调用返回的例子来说明（当然在其他地方也可以检测：执行schedule函数时、软中断下半部开启时、检测抢占进程时（这里了解下就是在不同点，检测标志位即可））。以下代码为system_call 系统调用的截取代码，其中加上了完整的注释，能看懂的读者就稍微看看，看不懂的附着于注释慢慢理解，实在无法理解，可以暂时忽略，笔者本意是想给读者展示下TIF_NEED_RESCHED标志位的检测，但是考虑到可以混沌一下，所以就把其余的代码进行了注释。从以下源码中我们可以看到，将会在返回用户空间时检测该标志位，最终，还是调用schedule函数完成切换。</p>
+<p>ENTRY(system_call)&nbsp;<span style="color: rgb(218, 146, 74);"># 进入系统调用（注意：看以下代码有个影响即可，你的目的是找到在哪里判断了need_resched标志位）</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushl</span> %<span style="color: rgb(159, 186, 213);">eax</span> <span style="color: rgb(218, 146, 74);"># 保存传递eax寄存器</span></p>
+<p><span style="color: rgb(200, 143, 208);">SAVE_ALL</span>&nbsp;<span style="color: rgb(218, 146, 74);"># 保存其他寄存器</span></p>
+<p>GET_THREAD_INFO(%<span style="color: rgb(159, 186, 213);">ebp</span>) <span style="color: rgb(218, 146, 74);"># 将esp栈指针获取到当前进程信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">cmpl</span> $(nr_syscalls), %<span style="color: rgb(159, 186, 213);">eax</span> <span style="color: rgb(218, 146, 74);"># 看看需要调用的系统函数调用号是否超出范围</span></p>
+<p><span style="color: rgb(200, 143, 208);">jae</span> <span style="color: rgb(200, 143, 208);">syscall_badsys</span></p>
+<p><span style="color: rgb(218, 146, 74);"># 超出范围执行错误系统调用代码</span></p>
+<p><span style="color: rgb(125, 244, 106);">syscall_call:</span></p>
+<p><span style="color: rgb(200, 143, 208);">call</span> *sys_call_table(,%<span style="color: rgb(159, 186, 213);">eax</span>,4) <span style="color: rgb(218, 146, 74);"># 调用对应的系统调用函数（这里将eax中指定的系统调用号，放入到表中查询获得函数的地址然后调用，了解下即可）</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> %<span style="color: rgb(159, 186, 213);">eax</span>,<span style="color: rgb(159, 186, 213);">EAX</span>(%<span style="color: rgb(159, 186, 213);">esp</span>) <span style="color: rgb(218, 146, 74);"># 在上面的call返回后，系统调用的返回值就会放在eax寄存器里，这里我们将其保存在内核栈中</span></p>
+<p><span style="color: rgb(125, 244, 106);">syscall_exit:</span> <span style="color: rgb(218, 146, 74);"># 处理系统调用退出</span></p>
+<p>...</p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> <span style="color: rgb(200, 143, 208);">TI_FLAGS</span>(%<span style="color: rgb(159, 186, 213);">ebp</span>), %<span style="color: rgb(159, 186, 213);">ecx</span> <span style="color: rgb(218, 146, 74);"># 将进程TI_FLAGS 标志位放入ecx中，在32位机中这里为32位</span></p>
+<p><span style="color: rgb(200, 143, 208);">jne</span> <span style="color: rgb(200, 143, 208);">syscall_exit_work</span> <span style="color: rgb(218, 146, 74);"># 执行中断退出函数</span></p>
+<p>...</p>
+<p></p>
+<p><span style="color: rgb(125, 244, 106);">syscall_exit_work:</span></p>
+<p><span style="color: rgb(200, 143, 208);">testb</span> $<span style="color: rgb(243, 179, 248);">_TIF_SYSCALL_TRACE</span>, %cl <span style="color: rgb(218, 146, 74);"># 测试是否开启系统调用trace（只取ecx的低8位作比较）</span></p>
+<p><span style="color: rgb(200, 143, 208);">jz</span> <span style="color: rgb(200, 143, 208);">work_pending</span> <span style="color: rgb(218, 146, 74);"># 如果没有则跳转执行pending任务</span></p>
+<p></p>
+<p><span style="color: rgb(125, 244, 106);">work_pending:</span></p>
+<p><span style="color: rgb(200, 143, 208);">testb</span> $<span style="color: rgb(243, 179, 248);">_TIF_NEED_RESCHED</span>, %cl <span style="color: rgb(218, 146, 74);"># 检测是否设置了NEED_RESCHED标志位（只取ecx的低8位作比较）</span></p>
+<p><span style="color: rgb(200, 143, 208);">jz</span> <span style="color: rgb(200, 143, 208);">work_notifysig</span> <span style="color: rgb(218, 146, 74);">#如果没有设置那么执行该代码，改代码用于处理 未处理的 信号（读者先了解下）</span></p>
+<p><span style="color: rgb(125, 244, 106);">work_resched:</span> <span style="color: rgb(218, 146, 74);"># 否则调用schedule函数完成调度（也即上面的jz 判断zf 不为0，表示需要重新调度）</span></p>
+<p><span style="color: rgb(200, 143, 208);">call</span> <span style="color: rgb(200, 143, 208);">schedule</span> <span style="color: rgb(218, 146, 74);"># 当当前进程被再次被执行时，将会继续执行schedule以下的代码（很合乎情理，从哪里调度就从哪里再次返回）</span></p>
+<p>...</p>
+<p><strong>协程的出现</strong></p>
+<p>在上面我们看到了进程的切换，可以看到从一个进程切换到另一个进程，如果不研究底层，我们根本无法知道是如此的复杂，虽然线程共享了内存数据，但本质上还是进程，所以切换也相对耗时。那么，有没有一种不需要切换却能拥有类似于线程的东西呢？答案便是协程。</p>
+<p>在网上充斥着大量：协程性能高于线程的话题，笔者这里以此文详细介绍协程的作用与实现方式，帮助读者理清思路，树立正确的理解：协程是为了方便更好的编程，而不是提高性能。我们先来看个例子，在该例子中，我们创建了两个线程：生产者线程P，消费者线程C，为了方便读者观看我使用了伪代码（毕竟又不是研究PC怎么写，所以同步代码直接忽略）。我们来看看该代码有何性能问题：</p>
+<ol>
+ <li>p线程仅仅生产了一个数据，然后就阻塞了，等待c线程获取数据</li>
+ <li>c线程仅仅获取了一个数据，然后就阻塞了，等待p线程生产数据</li>
+ <li>通过前面的原理分析，我们知道一个线程在底层需要将自己加入到阻塞队列，然后调用schedule函数将CPU控制权移交。其中又包含了系统调用（进入内核完成阻塞）</li>
+ <li>线程也需要自己的线程栈和TCB（线程控制块）将会占用系统额外空间</li>
+</ol>
+<p><span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">data</span>;</p>
+<p><span style="color: rgb(218, 146, 74);">// 生产者线程</span></p>
+<p><span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Thread</span>(()<span style="color: rgb(184, 191, 198);">-&gt;</span>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span>(;;){</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(184, 191, 198);">data!=</span><span style="color: rgb(132, 182, 203);">null</span>){</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notify</span> <span style="color: rgb(184, 191, 198);">consumer</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wait</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">data</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(28, 198, 133);">Object</span>();</p>
+<p>&nbsp;}</p>
+<p>}).<span style="color: rgb(184, 191, 198);">start</span>();</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 消费者线程</span></p>
+<p><span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Thread</span>(()<span style="color: rgb(184, 191, 198);">-&gt;</span>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(184, 191, 198);">data</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>){</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">notify</span> <span style="color: rgb(184, 191, 198);">consumer</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wait</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">out</span>.<span style="color: rgb(184, 191, 198);">println</span>(<span style="color: rgb(184, 191, 198);">data</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">data</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>}).<span style="color: rgb(184, 191, 198);">start</span>();</p>
+<p>能否优化下呢？我们再来看以下代码，这里一个线程完成了两个线程做的事，而我们将代码改写成了状态机模式，也即通过状态来切换分支，咦，等等，这和线程如此相似。来继续推理：</p>
+<ol>
+ <li>线程需要传入Runnable对象，如果是其他语言的读者，可以参考下你熟悉的语言，是不是传入了一个线程执行体（函数指针、或者对象、或者代码块）</li>
+ <li>线程无外乎就是共享数据，不同线程执行不同的代码</li>
+ <li>使用状态+switch，我们同样生成了对应的分支代码：PROD、CONSUMER</li>
+</ol>
+<p>了解到上述知识后，恭喜你，这就是用状态机实现的协程。现在我们可以来定义一下，何为协程？轻量级的线程，拥有自己的执行代码块，但是却不需要系统调用来切换，只需要在用户空间切换。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">state=PROD</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">data</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">for</span>(;;){</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">switch</span>(<span style="color: rgb(184, 191, 198);">state</span>){</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">PROD</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">data</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(28, 198, 133);">Object</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">state=CONSUMER</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">CONSUMER</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">out</span>.<span style="color: rgb(184, 191, 198);">println</span>(<span style="color: rgb(184, 191, 198);">data</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">data</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">state=PROD</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>咦，读者会问：这不就是增加了性能么？稍等，以上的例子是协程的一个改写例子而已。但是我们想要的不是在代码层面对此进行优化，让我们去编写这些高性能代码，我们想要的是在底层默默地把这些事情做了，就像上面的switch case，让程序员可以像写线程代码一样编写程序，而对于状态机的转换也好，实际的协程实现也好，都由语言本身底层来实现了。看以下Go语言的例子，我们只需要同步的编写代码，但是底层可以由协程来完成处理。如何实现？我们可以用上面的状态机来实现，当然也可以用真正的协程控制块来实现。</p>
+<p><span style="color: rgb(200, 143, 208);">package</span> <span style="color: rgb(184, 191, 198);">main</span></p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">import</span> <span style="color: rgb(210, 107, 107);">"fmt"</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 此通道只能写，不能读。</span></p>
+<p><span style="color: rgb(200, 143, 208);">func</span> <span style="color: rgb(184, 191, 198);">prod</span>(<span style="color: rgb(184, 191, 198);">out</span> <span style="color: rgb(200, 143, 208);">chan</span><span style="color: rgb(184, 191, 198);">&lt;-</span> <span style="color: rgb(200, 143, 208);">int</span>) {</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">for</span> <span style="color: rgb(184, 191, 198);">i</span>:<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">10</span>; <span style="color: rgb(184, 191, 198);">i++</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">out</span> <span style="color: rgb(184, 191, 198);">&lt;-</span> <span style="color: rgb(184, 191, 198);">i*i</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将 i*i 结果写入到只写channel</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;<span style="color: rgb(132, 182, 203);">close</span>(<span style="color: rgb(184, 191, 198);">out</span>)</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 此通道只能读，不能写</span></p>
+<p><span style="color: rgb(200, 143, 208);">func</span> <span style="color: rgb(184, 191, 198);">consumer</span>(<span style="color: rgb(184, 191, 198);">in</span> <span style="color: rgb(184, 191, 198);">&lt;-</span><span style="color: rgb(200, 143, 208);">chan</span> <span style="color: rgb(200, 143, 208);">int</span>) {</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">for</span> <span style="color: rgb(184, 191, 198);">num</span> :<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">range</span> <span style="color: rgb(184, 191, 198);">in</span> {&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 从只读channel中获取数据</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fmt</span><span style="color: rgb(100, 171, 143);">.</span><span style="color: rgb(184, 191, 198);">Println</span>(<span style="color: rgb(210, 107, 107);">"num ="</span>, <span style="color: rgb(184, 191, 198);">num</span>)</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">func</span> <span style="color: rgb(184, 191, 198);">main</span>() {</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">ch</span> :<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">make</span>(<span style="color: rgb(200, 143, 208);">chan</span> <span style="color: rgb(200, 143, 208);">int</span>)&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建一个双向channel</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">// 新建一个groutine， 模拟生产者，产生数据，写入 channel</span></p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">go</span> <span style="color: rgb(184, 191, 198);">producer</span>(<span style="color: rgb(184, 191, 198);">ch</span>)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// channel传参， 传递的是引用。</span></p>
+<p>​</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">// 主协程，模拟消费者，从channel读数据，打印到屏幕</span></p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">consumer</span>(<span style="color: rgb(184, 191, 198);">ch</span>)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 与 producer 传递的是同一个 channel</span></p>
+<p>}</p>
+<p>结论：协程可以帮助我们使用同步代码编写出异步的代码，这一切可以在底层进行实现，比如：socket.write，该函数为阻塞函数，如果我们使用同步代码，可以使用NIO+线程池，比如Epoll+线程池来选择（Epoll判断通道可写，那么将写操作放入到线程池中异步写入），然后写入，但是我们得编写callback回调函数。但是，如果我们使用协程，你只需要在代码层面这样编写：socket.write，然后在底层将这一切全部封装，你以为你写的是同步代码，事实上在底层却使用了NIO+线程池来完成异步性能优化。正如前面的例子那样，原来我需要两个线程，现在我只需要一个线程，然后用状态机实现，你可以在编码层面认为你使用了多线程，比如：go producer，其实我可以完全在底层用一个线程和状态机来完成。这就是协程的魅力：没有协程，可能你需要使用NIO+线程池、异步callback，但是有了协程，放心写同步代码即可。</p>
+<p>总结：</p>
+<ol>
+ <li>进程的出现是为了并行/并发执行提高系统性能</li>
+ <li>线程的出现是为了避免使用进程时的空间浪费和时间性能</li>
+ <li>协程的出现是为了帮助开发者简单的编写程序，对底层的线程和进程进行封装</li>
+</ol>
+<p><strong>协程的实现</strong></p>
+<p>在上面的内核中进程切换中我们看到了shedule函数，在该函数中完成对进程的切换，在切换时，我们需要保存程序的执行数据，比如：CPU寄存器（保存在哪？这个知道就行啦，因为不同的进程肯定执行数据不同，至于保存在哪。在后面我们再详细讲解，别忘了现在主题是：协程实现）。这时，我们称shedule函数为进程调度函数（同它的命名一样）。通过这样的方式我们尝试来推理下，如何实现协程：</p>
+<ol>
+ <li>CPU中有一个IP寄存器（指令指针寄存器，用于指示执行的指令位置）</li>
+ <li>协程和线程都是一个代码执行体（Runnable、代码块、函数指针等等）</li>
+ <li>那么只需要对IP寄存器进行保存修改便可以控制CPU执行不同位置的代码（注意：这里说的异常简单，事实上还需要保存和修改其他寄存器：四个通用寄存器、段寄存器、堆栈寄存器、EFLAGS标志位寄存器等等，这里读者先简化为IP寄存器即可，后面我会通过混沌学习法给读者展示汇编的学习方式和CPU的构造）</li>
+ <li>线程是轻量级进程，在内核中的schedule函数中对进程A的IP保存、然后修改CPU的IP为B进程的指令指针，这样就完成了切换</li>
+ <li>协程呢？同样我们可以在用户态的代码中手动保存IP寄存器，然后切换到其他代码执行体的IP指针，这样就完成了切换</li>
+ <li>那么如何修改和保存呢（保留点好奇心，后面在介绍C语言的方法调用原理时笔者会详细介绍如何保存。为了满足好奇心较重的读者，这里先给出结论：调用某个方法时将会把IP寄存器的值和BP栈基址寄存器压到堆栈中，这时我们就可以得到被切换的进程A的下一条执行指令指针IP，那么enjoy it）</li>
+</ol>
+<p>上面我们给出的推理是向线程一样实现了一个协程，也即协程拥有者自己的协程ccb（协程控制块），其中包含了协程代码块中的上下文信息：CPU寄存器的数据。然后我们可以有三种方式来实现：</p>
+<ol>
+ <li>跟内核一样，拥有着一个调度程序schedule，来选择调度协程</li>
+ <li>不需要调度函数。只需要跟方法调用一样，拥有者严格调用链关系：A代码块 -&gt; B代码块 -&gt; C代码块 ，这时C代码块主动让出CPU只能回到B代码块，同理B也只能回到A代码块，C代码块不能直接回到A代码块。这如何实现？还是需要在之后说完C的方法调用原理才能讲明白，这里了解下即可（学过这部分知识的读者，可以从C的压栈保存RIP和RBP，通过RSP和RBP开辟新的C帧来考虑：A代码块可以手动操作，将A的代码中的CPU数据信息放到栈中，然后手动操作RSP、RBP开辟B代码块的空间，然后修改RIP指向B代码块执行即可，然后在恢复A代码块时，只需要将栈底的RBP以下保存的诸多寄存器数据还原，然后最后还原RIP即可（当然你也可以不在栈上保存这些CPU状态信息，你可以使用malloc开辟一个堆空间来保存，取决于你）。没学过的也没关系，后面会给大家详细介绍）</li>
+ <li>用switch case + 状态机 这种奇葩的技巧来实现</li>
+</ol>
+<p>不难看出，这两种方式的共同点：都是切换代码的执行路径，只不过一个跟线程一样，有一个上下文的控制块，一个直接通过一个变量来切换。</p>
+<p>如果我们使用方法1来实现，这样，我们的协程又有两种实现方式：</p>
+<ol>
+ <li>对称协程：所有协程全部平等，在调度函数中对协程进行选择</li>
+ <li>非对称协程：协程之间关系不平等，有着严格调用链的关系，在释放CPU资源时，只能回退到调用方执行</li>
+</ol>
+<p><br></p></p>
+</body>
+</html>

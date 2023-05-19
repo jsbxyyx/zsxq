@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Redis 深度分析系列一</h1>
+<p>2022-05-20T10:33:23.342+0800</p>
+<p><p><strong>什么是Redis</strong></p>
+<p>要研究Redis，那么还得进入Redis 官网，看看官网对于Redis的定义，以及它提供的功能。笔者认为没有什么比官网的解释更加具备权威和准确性，所以我们在研究任何一个框架和中间件时，何不如直接打开官网一探究竟。我们这里以最新的Redis版本（7.0.0）作为翻译对象，但是在研究Redis时，笔者选择了最开始的2.6版本，该版本麻雀虽小，但五脏俱全，我们把内部的实现原理搞懂后，后面的版本增加的版本无外乎是对内部的代码修修补补，增加部分特性，但都是基于2.6的框架来进行补充，同时2.6的版本代码量较少，我们可以将关注点放在Redis的核心逻辑上，而不是新增加的很多特性，这样容易迷失方向。详细的介绍，如下所示。</p>
+<p>Redis is an open source (BSD licensed), in-memory data structure store used as a database, cache, message broker, and streaming engine. Redis provides data structures such as strings, hashes, lists, sets, sorted sets with range queries, bitmaps, hyperloglogs, geospatial indexes, and streams. Redis has built-in replication, Lua scripting, LRU eviction, transactions, and different levels of on-disk persistence, and provides high availability via Redis Sentinel and automatic partitioning with Redis Cluster.</p>
+<p>​</p>
+<p>Redis 是一个开源（基于BSD 许可）的项目，基于内存实现了多中数据结构，通常被用作与内存数据库、缓存、消息队列和流引擎。Redis 提供多种数据结构，如：字符串、散列表、列表、集合、范围查询的排序集合、位图、hyperloglogs、地理空间索引和流（注意：我们研究的基础版2.6 将不包含hyperloglogs、地理空间索引、流）。Redis 内置了副本集自动复制、Lua 脚本、数据LRU策略、事务和不同级别的数据持久化策略，并通过两种方式提供高可用性：Redis Sentinel（哨兵模式）、Redis Cluster（Redis 集群，我们研究的2.6 将不具备该方式）。</p>
+<p>​</p>
+<p>You can run atomic operations on these types, like appending to a string; incrementing the value in a hash; pushing an element to a list; computing set intersection, union and difference; or getting the member with highest ranking in a sorted set.</p>
+<p>​</p>
+<p>所有的这些数据类型都是原子性操作，例如：像字符串追加值、增加某个哈希类型的value值、将元素推入列表、计算交集、并集 、差集、获取排序集中排名最高的成员。</p>
+<p>​</p>
+<p>To achieve top performance, Redis works with an in-memory dataset. Depending on your use case, Redis can persist your data either by periodically dumping the dataset to disk or by appending each command to a disk-based log. You can also disable persistence if you just need a feature-rich, networked, in-memory cache.</p>
+<p>​</p>
+<p>为了达到Redis的最佳性能，Redis 使用基于内存的数据集，而不是基于磁盘的数据。Redis 通过设置可以定期的将内存中的数据集持久化磁盘或在每次执行指令后都将数据持久化磁盘。如果您只需要一个功能丰富的网络化内存缓存，您也可以禁用该持久化特性。（注：使用磁盘持久化是为了保证数据不会丢失，因为内存是一个掉电就丢数据的存储器，而对于缓存而言为什么能够不启用持久化特性？因为缓存就是对后端的真实数据的临时存储，允许丢失，丢失后只需要读后端的真实数据即可，但是这属于缓存击穿，那么，是不是考虑对后端访问进行限流呢？但笔者发现：很多使用Redis的开发人员，压根就不是把它当作缓存使用，这很危险，因为redis最初就是设计来当缓存的，但是却被妖魔化出很多的功能，不是不能用，而是需要根据实际场景谨慎使用~）</p>
+<p>​</p>
+<p>Redis supports asynchronous replication, with fast non-blocking synchronization and auto-reconnection with partial resynchronization on net split.</p>
+<p>​</p>
+<p>Redis 支持副本集异步复制，其具有快速的非阻塞同步和副本集自动重新连接以及在网络发生阻塞时的部分重新同步（注：为了保证高可用，那么Redis肯定设计出了异步复制当前数据到副本集服务器上，但这里得考虑下如果复制途中，副本集服务器发生网络或者机器异常，当重新连接时如何做？全量重新同步？或者部分同步？）</p>
+<p>​</p>
+<p>Redis is written in ANSI C and works on most POSIX systems like Linux, *BSD, and Mac OS X, without external dependencies. Linux and OS X are the two operating systems where Redis is developed and tested the most, and we recommend using Linux for deployment. Redis may work in Solaris-derived systems like SmartOS, but support is best effort. There is no official support for Windows builds.</p>
+<p>​</p>
+<p>Redis 是用ANSI C编写的，可以在大多数 POSIX 系统上运行，比如 Linux、*BSD 和 Mac OS X，除了C函数库没有外部依赖。Linux 和 OS X 是 Redis 开发和测试最多的两个操作系统，我们推荐使用 Linux 进行部署。Redis 可以在 Solaris 派生的系统（如 SmartOS）中工作，但支持非常有限。Windows 版本没有官方支持。</p>
+<p><strong>ANSI C与GNU C</strong></p>
+<p>ANSI C与GNU C均为C的标准定义。ANSI C标准 ANSI C标准被几乎所有广泛使用的编译器所支持，多数C语言代码是在ANSI C基础上进行编写。ANSI C是美国国家标准协会(ANSI)对C语言发布的标准，使用C的软件开发者被鼓励遵循ANSI C文档的要求。ANSI C经历了以下的历史过程：</p>
+<ol>
+ <li>C89标准：1983年，美国国家标准协会组成了一个委员会为了创建C语言的一套标准，经过漫长的过程，该标准于1989年完成。因此，这个版本的语言也经常被称为C89标准。</li>
+ <li>C90及后续标准：在1990年，ANSI C标准有了一些小的改动，这个版本有时候也被、称为C90标准。随着时代的发展，ANSI C标准也在不断与时俱进。出现了C99标准、C11标准等</li>
+</ol>
+<p>GNU C标准起源于GNU计划，它由Richard Stallman在1983年9月27日公开发起，目标是创建一套完全自由的操作系统，但是它们设计了一整套编写操作系统的套件：编译器、汇编器、链接器等，唯独没有操作系统，当时，Linus正在编写Linux，而这时正好编写系统的套件，就是这么巧：这时直接使用GNU C的套件，而GNU 套件定义了GNU C 的标准（所以Linux也被称之为：GNU / Linux ）。我们知道任何东西都不会可能独立存在，因为ANSI C的影响甚远，GCC也不得不支持其中的标准，否则就会成为孤家寡人，所以在GCC 4.7版本时，GCC 编译器已支持4种C语言标准：C89/C90、C94/C95、C99/C11（不完全支持）。</p>
+<p>那么GNU C与ANSI C有何区别呢？我们可以这样认为：GNU C 对 ANSI C进行了增强，补充了很多新特性（我们在混沌学堂里说了什么？语言面向编译器工作，只要编译器支持的语法我们都可以使用~）：零长度和变量长度数组、case语句范围、语句表达式、typeof关键字、可变参数宏、标号元素、当前函数名、特殊属性声明、内建函数等等特性，这些特性是什么？看这里 ：<a href="https://gcc.gnu.org/onlinedocs/gcc/C-Extensions.html#C-Extensions" target="_blank">https://gcc.gnu.org/onlinedocs/gcc/C-Extensions.html#C-Extensions</a>。这里笔者将特性粘贴到这里方便读者查阅，详细描述参考上述网址。</p>
+<p>• Local Labels: Labels local to a block.• Labels as Values: Getting pointers to labels, and computed gotos.• Nested Functions: Nested function in GNU C.• Nonlocal Gotos: Nonlocal gotos.• Constructing Calls: Dispatching a call to another function.• Typeof: typeof: referring to the type of an expression.• Conditionals: Omitting the middle operand of a ‘?:’ expression.• __int128: 128-bit integers—__int128.• Long Long: Double-word integers—long long int.• Complex: Data types for complex numbers.• Floating Types: Additional Floating Types.• Half-Precision: Half-Precision Floating Point.• Decimal Float: Decimal Floating Types.• Hex Floats: Hexadecimal floating-point constants.• Fixed-Point: Fixed-Point Types.• Named Address Spaces: Named address spaces.• Zero Length: Zero-length arrays.• Empty Structures: Structures with no members.• Variable Length: Arrays whose length is computed at run time.• Variadic Macros: Macros with a variable number of arguments.• Escaped Newlines: Slightly looser rules for escaped newlines.• Subscripting: Any array can be subscripted, even if not an lvalue.• Pointer Arith: Arithmetic on void-pointers and function pointers.• Variadic Pointer Args: Pointer arguments to variadic functions.• Pointers to Arrays: Pointers to arrays with qualifiers work as expected.• Initializers: Non-constant initializers.• Compound Literals: Compound literals give structures, unions or arrays as values.• Designated Inits: Labeling elements of initializers.• Case Ranges: ‘case 1 ... 9’ and such.• Cast to Union: Casting to union type from any member of the union.• Mixed Labels and Declarations: Mixing declarations, labels and code.• Function Attributes: Declaring that functions have no side effects, or that they can never return.• Variable Attributes: Specifying attributes of variables.• Type Attributes: Specifying attributes of types.• Label Attributes: Specifying attributes on labels.• Enumerator Attributes: Specifying attributes on enumerators.• Statement Attributes: Specifying attributes on statements.• Attribute Syntax: Formal syntax for attributes.• Function Prototypes: Prototype declarations and old-style definitions.• C++ Comments: C++ comments are recognized.• Dollar Signs: Dollar sign is allowed in identifiers.• Character Escapes: ‘\e’ stands for the character ESC.• Alignment: Determining the alignment of a function, type or variable.• Inline: Defining inline functions (as fast as macros).• Volatiles: What constitutes an access to a volatile object.• Using Assembly Language with C: Instructions and extensions for interfacing C with assembler.• Alternate Keywords: __const__, __asm__, etc., for header files.• Incomplete Enums: enum foo;, with details to follow.• Function Names: Printable strings which are the name of the current function.• Return Address: Getting the return or frame address of a function.• Vector Extensions: Using vector instructions through built-in functions.• Offsetof: Special syntax for implementing offsetof.• __sync Builtins: Legacy built-in functions for atomic memory access.• __atomic Builtins: Atomic built-in functions with memory model.• Integer Overflow Builtins: Built-in functions to perform arithmetics and arithmetic overflow checking.• x86 specific memory model extensions for transactional memory: x86 memory models.• Object Size Checking: Built-in functions for limited buffer overflow checking.• Other Builtins: Other built-in functions.• Target Builtins: Built-in functions specific to particular targets.• Target Format Checks: Format checks specific to particular targets.• Pragmas: Pragmas accepted by GCC.• Unnamed Fields: Unnamed struct/union fields within structs/unions.• Thread-Local: Per-thread variables.• Binary constants: Binary constants using the ‘0b’ prefix.<strong>源码结构</strong></p>
+<p>Redis 源码结构较为简单：</p>
+<ol>
+ <li>deps：依赖库函数（jemalloc内存池管理、lua脚本支持）</li>
+ <li>src：主要源代码</li>
+ <li>tests：测试用例</li>
+ <li>utils：工具库</li>
+</ol>
+<p>main函数在redis.c 中，那么我们下一个内容开始，便从该函数逐个分析Redis的启动流程，通过启动流程我们可以掌握组件之间的组合：哪些组件完成什么样的功能，然后我们再将这些功能进行逐个分析，便可以将整个Redis全部掌握，Redis 2.6 的核心文件不超过200个，所以还是非常简单的，因为Redis 就是：事件循环 + 数据结构，真的很简单~。只不过内部大量使用了ANSI C的语法和库函数，这需要读者了解它们才能更好理解，当然我们也可以直接使用 man 命令 来查询这些函数的作用。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">main</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">argc</span>, <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">**</span><span style="color: rgb(184, 191, 198);">argv</span>) {</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

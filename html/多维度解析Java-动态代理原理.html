@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>多维度解析Java 动态代理原理</h1>
+<p>2022-03-21T22:11:53.425+0800</p>
+<p><p>本文将从以下几个维度中详细说明JDK动态代理的原理：</p>
+<ol>
+ <li>使用维度</li>
+ <li>Java字节码维度</li>
+ <li>Java代理类实现维度</li>
+</ol>
+<p>由于笔者水平有限，仅做分享，如有错误之处，还望读者不吝批评指正~</p>
+<p><strong>使用实例</strong></p>
+<p>我们可以从实例中看到，使用代理类的流程如下：</p>
+<ol>
+ <li>创建代理类Class对象</li>
+ <li>创建代理类的实例对象</li>
+ <li>创建回调处理器InvocationHandler实例</li>
+ <li>调用实例方法</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ProxyDemo</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">main</span>(<span style="color: rgb(28, 198, 133);">String</span>[] <span style="color: rgb(184, 191, 198);">args</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">getProperties</span>().<span style="color: rgb(184, 191, 198);">put</span>(<span style="color: rgb(210, 107, 107);">"sun.misc.ProxyGenerator.saveGeneratedFiles"</span>, <span style="color: rgb(210, 107, 107);">"true"</span>); <span style="color: rgb(218, 146, 74);">// 将创建的代理类$Proxy0的字节码保存</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">InvocationHandler</span> <span style="color: rgb(184, 191, 198);">handler</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">MyInvocationHandler</span>(); <span style="color: rgb(218, 146, 74);">// 创建回调函数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">proxyClass</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Proxy</span>.<span style="color: rgb(184, 191, 198);">getProxyClass</span>(<span style="color: rgb(184, 191, 198);">Foo</span>.<span style="color: rgb(200, 143, 208);">class</span>.<span style="color: rgb(184, 191, 198);">getClassLoader</span>(), <span style="color: rgb(184, 191, 198);">Foo</span>.<span style="color: rgb(200, 143, 208);">class</span>); <span style="color: rgb(218, 146, 74);">// 创建代理类</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Foo</span> <span style="color: rgb(184, 191, 198);">f</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">Foo</span>) <span style="color: rgb(184, 191, 198);">proxyClass</span>.<span style="color: rgb(184, 191, 198);">getConstructor</span>(<span style="color: rgb(184, 191, 198);">InvocationHandler</span>.<span style="color: rgb(200, 143, 208);">class</span>).<span style="color: rgb(184, 191, 198);">newInstance</span>(<span style="color: rgb(184, 191, 198);">handler</span>); <span style="color: rgb(218, 146, 74);">// 生成代理对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">f</span>.<span style="color: rgb(184, 191, 198);">foo</span>(); <span style="color: rgb(218, 146, 74);">// 调用代理对象方法</span></p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 回调处理器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">MyInvocationHandler</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">InvocationHandler</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">invoke</span>(<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">proxy</span>, <span style="color: rgb(184, 191, 198);">Method</span> <span style="color: rgb(184, 191, 198);">method</span>, <span style="color: rgb(28, 198, 133);">Object</span>[] <span style="color: rgb(184, 191, 198);">args</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Throwable</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">out</span>.<span style="color: rgb(184, 191, 198);">println</span>(<span style="color: rgb(184, 191, 198);">method</span>.<span style="color: rgb(184, 191, 198);">getName</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">Foo</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">foo</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>逻辑推理</strong></p>
+<p>从上面的使用流程中我们可以尝试推理下：为何如此设计？我们想想，在Java中 类是对象的模板，对象是模板的实例，那么这时我们需要创建一个代理的类就毋庸置疑了，同时我们肯定也需要创建一个模板的实例，也即代理对象Foo，我们从实例中可以看到是通过构造函数传入InvocationHandler来构建类的实例，相信熟悉反射的读者应该能看明白。那么从Proxy.getProxyClass(Foo.class.getClassLoader(), Foo.class)中我们看到，传入了类加载器和接口的Class对象，这一切都说得通了：</p>
+<ol>
+ <li>底层肯定通过某种方式创建了某个类，该类实现了Foo接口</li>
+ <li>当我们调用该类实现的Foo接口的foo方法时，将会自动的回调我们传入的InvocationHandler方法</li>
+ <li>由于JVM加载类需要类加载器，这时我们还需要传递一个类加载器：Foo.class.getClassLoader()</li>
+</ol>
+<p><strong>调用层面描述</strong></p>
+<p>接下来我们来看看该类生成的代理类$Proxy0的部分重点源码，从源码中我们得到以下信息：</p>
+<ol>
+ <li>$Proxy0继承自Proxy类，实现了Foo接口</li>
+ <li>构造器传入InvocationHandler对象</li>
+ <li>实现的Foo接口的方法修饰为final方法，同时在该方法中直接调用InvocationHandler的invoke方法</li>
+ <li>在静态方法中，预创建了foo方法所需要的反射对象，这时我们可以考虑为何如此做？读者可以看看InvocationHandler中需要传入该Method实例，而在类初始化时就进行创建可以有效的提高调用性能</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">$Proxy0</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Proxy</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Foo</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造器传入InvocationHandler对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">$Proxy0</span>(<span style="color: rgb(184, 191, 198);">InvocationHandler</span> <span style="color: rgb(184, 191, 198);">var1</span>) <span style="color: rgb(200, 143, 208);">throws</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">var1</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 实现的Foo接口方法</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">foo</span>() <span style="color: rgb(200, 143, 208);">throws</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>.<span style="color: rgb(184, 191, 198);">h</span>.<span style="color: rgb(184, 191, 198);">invoke</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">m3</span>, (<span style="color: rgb(28, 198, 133);">Object</span>[])<span style="color: rgb(132, 182, 203);">null</span>); <span style="color: rgb(218, 146, 74);">// 调用InvocationHandler的invoke方法</span></p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">RuntimeException</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">Error</span> <span style="color: rgb(184, 191, 198);">var2</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(184, 191, 198);">var2</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">var3</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">UndeclaredThrowableException</span>(<span style="color: rgb(184, 191, 198);">var3</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 预创建反射需要的Method对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">m3</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Class</span>.<span style="color: rgb(184, 191, 198);">forName</span>(<span style="color: rgb(210, 107, 107);">"org.com.msb.ProxyDemo$Foo"</span>).<span style="color: rgb(184, 191, 198);">getMethod</span>(<span style="color: rgb(210, 107, 107);">"foo"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">NoSuchMethodException</span> <span style="color: rgb(184, 191, 198);">var2</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NoSuchMethodError</span>(<span style="color: rgb(184, 191, 198);">var2</span>.<span style="color: rgb(184, 191, 198);">getMessage</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">ClassNotFoundException</span> <span style="color: rgb(184, 191, 198);">var3</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NoClassDefFoundError</span>(<span style="color: rgb(184, 191, 198);">var3</span>.<span style="color: rgb(184, 191, 198);">getMessage</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>Proxy类创建原理</strong></p>
+<p>在上面我们看到了产生的代理类的源码实现，核心操作我们看到是在Proxy类中执行，我们来看看Proxy的实现过程，这里我们主要看getProxyClass方法，流程如下：</p>
+<ol>
+ <li>克隆一个传入的接口类数组，通过复制该数组，我们可以保证在创建过程中intfs的定性（也即不会被外部方法进行修改）</li>
+ <li>通过缓存获取，如果没有获取成功，那么通过ProxyClassFactory类创建代理类对象</li>
+ <li>ProxyClassFactory类实现了实际创建代理类的核心方法（作者：黄俊，微信：bx_java），创建代理Class对象的过程如下：</li>
+ <li class="ql-indent-1">遍历接口Class数组，验证类加载器、接口类型、是否实现多个相同接口等等验证操作</li>
+ <li class="ql-indent-1">定义代理类所属包名和访问修饰符</li>
+ <li class="ql-indent-1">使用 proxyClassNamePrefix + nextUniqueNumber 生成代理类的名字</li>
+ <li class="ql-indent-1">通过ProxyGenerator类创建代理类的字节码文件</li>
+ <li class="ql-indent-1">通过defineClass JNI方法进行字节码加载操作，该操作将会返回Class实例</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">Proxy</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">java</span>.<span style="color: rgb(184, 191, 198);">io</span>.<span style="color: rgb(184, 191, 198);">Serializable</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 用于在实现方法中回调的调用处理器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">InvocationHandler</span> <span style="color: rgb(184, 191, 198);">h</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 保存该处理器对象构造方法</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">Proxy</span>(<span style="color: rgb(184, 191, 198);">InvocationHandler</span> <span style="color: rgb(184, 191, 198);">h</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Objects</span>.<span style="color: rgb(184, 191, 198);">requireNonNull</span>(<span style="color: rgb(184, 191, 198);">h</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">h</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">h</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构建代理类的Class对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">getProxyClass</span>(<span style="color: rgb(184, 191, 198);">ClassLoader</span> <span style="color: rgb(184, 191, 198);">loader</span>, <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span>... <span style="color: rgb(184, 191, 198);">interfaces</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span></p>
+<p>&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">intfs</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">interfaces</span>.<span style="color: rgb(184, 191, 198);">clone</span>(); <span style="color: rgb(218, 146, 74);">// 克隆一个传入的接口类数组，通过复制该数组，我们可以保证在创建过程中intfs的定性（也即不会被外部方法进行修改）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">getProxyClass0</span>(<span style="color: rgb(184, 191, 198);">loader</span>, <span style="color: rgb(184, 191, 198);">intfs</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 执行创建操作</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">getProxyClass0</span>(<span style="color: rgb(184, 191, 198);">ClassLoader</span> <span style="color: rgb(184, 191, 198);">loader</span>,<span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span>... <span style="color: rgb(184, 191, 198);">interfaces</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 限制接口数量为2byte大小（JVM规范定义）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">interfaces</span>.<span style="color: rgb(184, 191, 198);">length</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">65535</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(<span style="color: rgb(210, 107, 107);">"interface limit exceeded"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 通过缓存获取，如果没有获取成功，那么创建代理类对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">proxyClassCache</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">loader</span>, <span style="color: rgb(184, 191, 198);">interfaces</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将在proxyClassCache中获取loader对应的interfaces的代理类为空时调用，这里使用了策略模式，实际完成创建代理的方法在该类中，所以读者直接看这里即可</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ProxyClassFactory</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">BiFunction&lt;ClassLoader</span>, <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span>[], <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;&gt;</span>{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 代理类名前缀名</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">proxyClassNamePrefix</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(210, 107, 107);">"$Proxy"</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 用于与前缀名拼接的自增原子性long对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">AtomicLong</span> <span style="color: rgb(184, 191, 198);">nextUniqueNumber</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">AtomicLong</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 实现代理对象的创建</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">apply</span>(<span style="color: rgb(184, 191, 198);">ClassLoader</span> <span style="color: rgb(184, 191, 198);">loader</span>, <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">interfaces</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Map&lt;Class&lt;?&gt;</span>, <span style="color: rgb(28, 198, 133);">Boolean</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">interfaceSet</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IdentityHashMap&lt;&gt;</span>(<span style="color: rgb(184, 191, 198);">interfaces</span>.<span style="color: rgb(184, 191, 198);">length</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">intf</span> : <span style="color: rgb(184, 191, 198);">interfaces</span>) { <span style="color: rgb(218, 146, 74);">// 遍历接口Class数组</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 使用传递的类加载器加载接口类信息，在加载过程中将会对这些接口的定义进行约束检测</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">interfaceClass</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">interfaceClass</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Class</span>.<span style="color: rgb(184, 191, 198);">forName</span>(<span style="color: rgb(184, 191, 198);">intf</span>.<span style="color: rgb(184, 191, 198);">getName</span>(), <span style="color: rgb(132, 182, 203);">false</span>, <span style="color: rgb(184, 191, 198);">loader</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">ClassNotFoundException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">interfaceClass</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">intf</span>) { <span style="color: rgb(218, 146, 74);">// 如果发现传入的类加载器加载的Class对象与传入的接口class对象不相同，说明调用该方法时的类加载器与传入的类加载器不符，这时表明当前接口对传入的类加载器不可见，抛出异常</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">intf</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">" is not visible from class loader"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 验证该类为接口类型</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!interfaceClass</span>.<span style="color: rgb(184, 191, 198);">isInterface</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">interfaceClass</span>.<span style="color: rgb(184, 191, 198);">getName</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">" is not an interface"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 验证没有重复实现同一个接口</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">interfaceSet</span>.<span style="color: rgb(184, 191, 198);">put</span>(<span style="color: rgb(184, 191, 198);">interfaceClass</span>, <span style="color: rgb(28, 198, 133);">Boolean</span>.<span style="color: rgb(184, 191, 198);">TRUE</span>) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"repeated interface: "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">interfaceClass</span>.<span style="color: rgb(184, 191, 198);">getName</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">proxyPkg</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 定义代理类所属包名</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">accessFlags</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Modifier</span>.<span style="color: rgb(184, 191, 198);">PUBLIC</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">Modifier</span>.<span style="color: rgb(184, 191, 198);">FINAL</span>; <span style="color: rgb(218, 146, 74);">// 默认代理类的访问修饰符（public final）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 遍历需要实现的接口class实例，记录一个 non-public 代理接口的包，这样就可以在同一个包中定义代理类，同时验证所有 non-public 代理接口都在同一个包中（如果代理的接口为非public的，必然生成的类需要和该接口所在的包相同）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">intf</span> : <span style="color: rgb(184, 191, 198);">interfaces</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">intf</span>.<span style="color: rgb(184, 191, 198);">getModifiers</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!Modifier</span>.<span style="color: rgb(184, 191, 198);">isPublic</span>(<span style="color: rgb(184, 191, 198);">flags</span>)) { <span style="color: rgb(218, 146, 74);">// 如果找到一个接口不是public共有的，那么修改代理的accessFlags修饰符仅为final</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">accessFlags</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Modifier</span>.<span style="color: rgb(184, 191, 198);">FINAL</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">name</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">intf</span>.<span style="color: rgb(184, 191, 198);">getName</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">n</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">name</span>.<span style="color: rgb(184, 191, 198);">lastIndexOf</span>(<span style="color: rgb(210, 107, 107);">'.'</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">pkg</span> <span style="color: rgb(184, 191, 198);">=</span> ((<span style="color: rgb(184, 191, 198);">n</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>) <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(210, 107, 107);">""</span> : <span style="color: rgb(184, 191, 198);">name</span>.<span style="color: rgb(184, 191, 198);">substring</span>(<span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">n</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(100, 171, 143);">1</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">proxyPkg</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">proxyPkg</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">pkg</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!pkg</span>.<span style="color: rgb(184, 191, 198);">equals</span>(<span style="color: rgb(184, 191, 198);">proxyPkg</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"non-public interfaces from different packages"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果不是non-public的接口，那么使用com.sun.proxy作为代理类的包名</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">proxyPkg</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">proxyPkg</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ReflectUtil</span>.<span style="color: rgb(184, 191, 198);">PROXY_PACKAGE</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">"."</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 生成代理类的名字</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">num</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nextUniqueNumber</span>.<span style="color: rgb(184, 191, 198);">getAndIncrement</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">proxyName</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">proxyPkg</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">proxyClassNamePrefix</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">num</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 生成代理类的字节文件 </span>（作者：黄俊，微信：bx_java）</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">byte</span>[] <span style="color: rgb(184, 191, 198);">proxyClassFile</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ProxyGenerator</span>.<span style="color: rgb(184, 191, 198);">generateProxyClass</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">proxyName</span>, <span style="color: rgb(184, 191, 198);">interfaces</span>, <span style="color: rgb(184, 191, 198);">accessFlags</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 直接通过defineClass JNI方法进行字节码加载操作，该操作将会返回Class实例</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">defineClass0</span>(<span style="color: rgb(184, 191, 198);">loader</span>, <span style="color: rgb(184, 191, 198);">proxyName</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">proxyClassFile</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">proxyClassFile</span>.<span style="color: rgb(184, 191, 198);">length</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">ClassFormatError</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(<span style="color: rgb(184, 191, 198);">e</span>.<span style="color: rgb(184, 191, 198);">toString</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>ProxyGenerator类原理</strong></p>
+<p>前面介绍到我们通过该类的：ProxyGenerator.generateProxyClass( proxyName, interfaces, accessFlags)方法创建代理类的字节码对象，本小节我们来看看该方法的实现过程。流程如下：</p>
+<ol>
+ <li>创建ProxyGenerator对象</li>
+ <li>调用ProxyGenerator对象的generateClassFile生成字节码</li>
+ <li>根据设置环境变量saveGeneratedFiles为true，那么保存在字节码信息</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">byte</span>[] <span style="color: rgb(141, 141, 240);">generateProxyClass</span>(<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">name</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">interfaces</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">accessFlags</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建ProxyGenerator对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ProxyGenerator</span> <span style="color: rgb(184, 191, 198);">gen</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ProxyGenerator</span>(<span style="color: rgb(184, 191, 198);">name</span>, <span style="color: rgb(184, 191, 198);">interfaces</span>, <span style="color: rgb(184, 191, 198);">accessFlags</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">byte</span>[] <span style="color: rgb(184, 191, 198);">classFile</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">gen</span>.<span style="color: rgb(184, 191, 198);">generateClassFile</span>(); <span style="color: rgb(218, 146, 74);">// 生成字节码</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果设置环境变量saveGeneratedFiles为true，那么保存在字节码信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">saveGeneratedFiles</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">java</span>.<span style="color: rgb(184, 191, 198);">security</span>.<span style="color: rgb(184, 191, 198);">AccessController</span>.<span style="color: rgb(184, 191, 198);">doPrivileged</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">java</span>.<span style="color: rgb(184, 191, 198);">security</span>.<span style="color: rgb(184, 191, 198);">PrivilegedAction&lt;</span><span style="color: rgb(28, 198, 133);">Void</span><span style="color: rgb(184, 191, 198);">&gt;</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">Void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">name</span>.<span style="color: rgb(184, 191, 198);">lastIndexOf</span>(<span style="color: rgb(210, 107, 107);">'.'</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Path</span> <span style="color: rgb(184, 191, 198);">path</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Path</span> <span style="color: rgb(184, 191, 198);">dir</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Paths</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">name</span>.<span style="color: rgb(184, 191, 198);">substring</span>(<span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">i</span>).<span style="color: rgb(184, 191, 198);">replace</span>(<span style="color: rgb(210, 107, 107);">'.'</span>, <span style="color: rgb(184, 191, 198);">File</span>.<span style="color: rgb(184, 191, 198);">separatorChar</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Files</span>.<span style="color: rgb(184, 191, 198);">createDirectories</span>(<span style="color: rgb(184, 191, 198);">dir</span>); <span style="color: rgb(218, 146, 74);">// 创建目录</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">path</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">dir</span>.<span style="color: rgb(184, 191, 198);">resolve</span>(<span style="color: rgb(184, 191, 198);">name</span>.<span style="color: rgb(184, 191, 198);">substring</span>(<span style="color: rgb(184, 191, 198);">i+</span><span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(184, 191, 198);">name</span>.<span style="color: rgb(184, 191, 198);">length</span>()) <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">".class"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">path</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Paths</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">name</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">".class"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Files</span>.<span style="color: rgb(184, 191, 198);">write</span>(<span style="color: rgb(184, 191, 198);">path</span>, <span style="color: rgb(184, 191, 198);">classFile</span>); <span style="color: rgb(218, 146, 74);">// 写入字节码信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">IOException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">InternalError</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"I/O exception saving generated file: "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">e</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;});</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">classFile</span>;</p>
+<p>}</p>
+<p>我们看到核心方法为ProxyGenerator对象的generateClassFile方法。我们继续跟进该方法的实现（先看流程实现，然后笔者会在后面详细描述该方法中用到的属性信息）。流程如下：</p>
+<ol>
+ <li>添加java.lang.Object的hashCode、equals和toString方法</li>
+ <li>添加代理接口中的方法</li>
+ <li>验证接口信息，因为我们需要保证相同签名的接口具有相同的返回值</li>
+ <li>生成代理类中的所有字段和方法的FieldInfo和MethodInfo结构</li>
+ <li>生成静态初始化方法字节码</li>
+ <li>验证方法和字段长度为2byte内（JVM规范定义）</li>
+ <li>按照JVM规范定义，创建内存输出流和数据输出流（数据输出流，可以按照字节数写入，基础很重要哈），来向内存字节数组中写入JVM规范定义的类文件结构（u2表示两个字节，u1表示一个，同理u4也是如此）</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ProxyGenerator</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">Method</span> <span style="color: rgb(184, 191, 198);">hashCodeMethod</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">Method</span> <span style="color: rgb(184, 191, 198);">equalsMethod</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">Method</span> <span style="color: rgb(184, 191, 198);">toStringMethod</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 在ProxyGenerator的静态方法中，预先获取Object的Method对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">hashCodeMethod</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(28, 198, 133);">Object</span>.<span style="color: rgb(200, 143, 208);">class</span>.<span style="color: rgb(184, 191, 198);">getMethod</span>(<span style="color: rgb(210, 107, 107);">"hashCode"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">equalsMethod</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">Object</span>.<span style="color: rgb(200, 143, 208);">class</span>.<span style="color: rgb(184, 191, 198);">getMethod</span>(<span style="color: rgb(210, 107, 107);">"equals"</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span>[] { <span style="color: rgb(28, 198, 133);">Object</span>.<span style="color: rgb(200, 143, 208);">class</span> });</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">toStringMethod</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(28, 198, 133);">Object</span>.<span style="color: rgb(200, 143, 208);">class</span>.<span style="color: rgb(184, 191, 198);">getMethod</span>(<span style="color: rgb(210, 107, 107);">"toString"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">NoSuchMethodException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NoSuchMethodError</span>(<span style="color: rgb(184, 191, 198);">e</span>.<span style="color: rgb(184, 191, 198);">getMessage</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">byte</span>[] <span style="color: rgb(184, 191, 198);">generateClassFile</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 添加java.lang.Object的hashCode、equals和toString方法，必须在代理接口的方法之前完成的，以便java.lang.Object中的方法优先于代理接口中的重复方法</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addProxyMethod</span>(<span style="color: rgb(184, 191, 198);">hashCodeMethod</span>, <span style="color: rgb(28, 198, 133);">Object</span>.<span style="color: rgb(200, 143, 208);">class</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addProxyMethod</span>(<span style="color: rgb(184, 191, 198);">equalsMethod</span>, <span style="color: rgb(28, 198, 133);">Object</span>.<span style="color: rgb(200, 143, 208);">class</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addProxyMethod</span>(<span style="color: rgb(184, 191, 198);">toStringMethod</span>, <span style="color: rgb(28, 198, 133);">Object</span>.<span style="color: rgb(200, 143, 208);">class</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 添加代理接口中的方法</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">intf</span> : <span style="color: rgb(184, 191, 198);">interfaces</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">Method</span> <span style="color: rgb(184, 191, 198);">m</span> : <span style="color: rgb(184, 191, 198);">intf</span>.<span style="color: rgb(184, 191, 198);">getMethods</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addProxyMethod</span>(<span style="color: rgb(184, 191, 198);">m</span>, <span style="color: rgb(184, 191, 198);">intf</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 对于每一组具有相同签名的代理方法，验证这些方法的返回类型是否兼容。也即如果有多个具备相同签名的方法，那么必须可以根据返回类型来区分这些方法，比如考虑下：interface foo1{ int foo(); } interface foo2{ double foo(); } 如果具备完全相同的方法，但是返回类型不是引用类型，也即类型不一致？这时如何代理？答案是只能抛出异常：java.lang.IllegalArgumentException：methods with same signature foo() but incompatible return types: int and others</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">List&lt;ProxyMethod&gt;</span> <span style="color: rgb(184, 191, 198);">sigmethods</span> : <span style="color: rgb(184, 191, 198);">proxyMethods</span>.<span style="color: rgb(184, 191, 198);">values</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">checkReturnTypes</span>(<span style="color: rgb(184, 191, 198);">sigmethods</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 生成代理类中的所有字段和方法的FieldInfo和MethodInfo结构</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">methods</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">generateConstructor</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">List&lt;ProxyMethod&gt;</span> <span style="color: rgb(184, 191, 198);">sigmethods</span> : <span style="color: rgb(184, 191, 198);">proxyMethods</span>.<span style="color: rgb(184, 191, 198);">values</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">ProxyMethod</span> <span style="color: rgb(184, 191, 198);">pm</span> : <span style="color: rgb(184, 191, 198);">sigmethods</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 添加方法静态属性字节码</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fields</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">FieldInfo</span>(<span style="color: rgb(184, 191, 198);">pm</span>.<span style="color: rgb(184, 191, 198);">methodFieldName</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"Ljava/lang/reflect/Method;"</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ACC_PRIVATE</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">ACC_STATIC</span>));</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 生成代理方法字节码</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">methods</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">pm</span>.<span style="color: rgb(184, 191, 198);">generateMethod</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 生成静态初始化方法字节码</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">methods</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">generateStaticInitializer</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">IOException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">InternalError</span>(<span style="color: rgb(210, 107, 107);">"unexpected I/O Exception"</span>, <span style="color: rgb(184, 191, 198);">e</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 验证方法和字段长度为2byte内（JVM规范定义）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">methods</span>.<span style="color: rgb(184, 191, 198);">size</span>() <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">65535</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(<span style="color: rgb(210, 107, 107);">"method limit exceeded"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fields</span>.<span style="color: rgb(184, 191, 198);">size</span>() <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">65535</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(<span style="color: rgb(210, 107, 107);">"field limit exceeded"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入代理类名</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">getClass</span>(<span style="color: rgb(184, 191, 198);">dotToSlash</span>(<span style="color: rgb(184, 191, 198);">className</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入父类类名</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">getClass</span>(<span style="color: rgb(184, 191, 198);">superclassName</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入接口类名</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">intf</span>: <span style="color: rgb(184, 191, 198);">interfaces</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">getClass</span>(<span style="color: rgb(184, 191, 198);">dotToSlash</span>(<span style="color: rgb(184, 191, 198);">intf</span>.<span style="color: rgb(184, 191, 198);">getName</span>()));</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置为只读，以保证禁止在此之后添加新的常量池，因为我们即将写入最终的常量池表&nbsp;</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">setReadOnly</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构建内存字节输出流对象，用于存放生成的字节码信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ByteArrayOutputStream</span> <span style="color: rgb(184, 191, 198);">bout</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ByteArrayOutputStream</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">DataOutputStream</span> <span style="color: rgb(184, 191, 198);">dout</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DataOutputStream</span>(<span style="color: rgb(184, 191, 198);">bout</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入魔术变量 u4 magic;</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dout</span>.<span style="color: rgb(184, 191, 198);">writeInt</span>(<span style="color: rgb(100, 171, 143);">0xCAFEBABE</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 u2 minor_version 最小版本兼容信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dout</span>.<span style="color: rgb(184, 191, 198);">writeShort</span>(<span style="color: rgb(184, 191, 198);">CLASSFILE_MINOR_VERSION</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 major_version 主版本号</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dout</span>.<span style="color: rgb(184, 191, 198);">writeShort</span>(<span style="color: rgb(184, 191, 198);">CLASSFILE_MAJOR_VERSION</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入常量池信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">write</span>(<span style="color: rgb(184, 191, 198);">dout</span>);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 u2 access_flags 访问修饰符</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dout</span>.<span style="color: rgb(184, 191, 198);">writeShort</span>(<span style="color: rgb(184, 191, 198);">accessFlags</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 this_class 当前类信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dout</span>.<span style="color: rgb(184, 191, 198);">writeShort</span>(<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">getClass</span>(<span style="color: rgb(184, 191, 198);">dotToSlash</span>(<span style="color: rgb(184, 191, 198);">className</span>)));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 super_class 父类信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dout</span>.<span style="color: rgb(184, 191, 198);">writeShort</span>(<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">getClass</span>(<span style="color: rgb(184, 191, 198);">superclassName</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 u2 interfaces_count 接口数量</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dout</span>.<span style="color: rgb(184, 191, 198);">writeShort</span>(<span style="color: rgb(184, 191, 198);">interfaces</span>.<span style="color: rgb(184, 191, 198);">length</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 interfaces[interfaces_count] 接口实现信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">intf</span> : <span style="color: rgb(184, 191, 198);">interfaces</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dout</span>.<span style="color: rgb(184, 191, 198);">writeShort</span>(<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">getClass</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dotToSlash</span>(<span style="color: rgb(184, 191, 198);">intf</span>.<span style="color: rgb(184, 191, 198);">getName</span>())));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 u2 fields_count 属性数量</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dout</span>.<span style="color: rgb(184, 191, 198);">writeShort</span>(<span style="color: rgb(184, 191, 198);">fields</span>.<span style="color: rgb(184, 191, 198);">size</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 field_info fields[fields_count] 属性信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">FieldInfo</span> <span style="color: rgb(184, 191, 198);">f</span> : <span style="color: rgb(184, 191, 198);">fields</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">f</span>.<span style="color: rgb(184, 191, 198);">write</span>(<span style="color: rgb(184, 191, 198);">dout</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 u2 methods_count 方法数量</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dout</span>.<span style="color: rgb(184, 191, 198);">writeShort</span>(<span style="color: rgb(184, 191, 198);">methods</span>.<span style="color: rgb(184, 191, 198);">size</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 method_info methods[methods_count] 方法信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">MethodInfo</span> <span style="color: rgb(184, 191, 198);">m</span> : <span style="color: rgb(184, 191, 198);">methods</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">m</span>.<span style="color: rgb(184, 191, 198);">write</span>(<span style="color: rgb(184, 191, 198);">dout</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入 u2 attributes_count 属性信息，不过我们这里没有类文件的属性信息，所以设置为0</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dout</span>.<span style="color: rgb(184, 191, 198);">writeShort</span>(<span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">IOException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">InternalError</span>(<span style="color: rgb(210, 107, 107);">"unexpected I/O Exception"</span>, <span style="color: rgb(184, 191, 198);">e</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 返回生成的字节码信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">bout</span>.<span style="color: rgb(184, 191, 198);">toByteArray</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>我们看到其实在generateClassFile方法中就是校验加写入字节码，那么如何写入的字节码呢？以及用到的ProxyGenerator核心属性，我们需要进行详细讲解。定义了如下几个信息：</p>
+<ol>
+ <li>定义了最小版本号和主版本号信息</li>
+ <li>定义生成代理类需要使用的常量池标签</li>
+ <li>定义生成代理类需要使用的访问修饰符变量</li>
+ <li>定义生成代理类需要使用的字节码信息</li>
+ <li>定义代理类的父类类名</li>
+ <li>定义Proxy类中的handler变量名</li>
+ <li>代理类名</li>
+ <li>代理类访问修饰符</li>
+ <li>代理类常量池信息</li>
+ <li>代理类方法信息</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ProxyGenerator</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 定义了最小版本号和主版本号信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CLASSFILE_MAJOR_VERSION</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">49</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CLASSFILE_MINOR_VERSION</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 定义生成代理类需要使用的常量池标签</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_UTF8</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_UNICODE</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">2</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_INTEGER</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">3</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_FLOAT</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">4</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_LONG</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">5</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_DOUBLE</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">6</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_CLASS</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">7</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_STRING</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">8</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_FIELD</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">9</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_METHOD</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">10</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_INTERFACEMETHOD</span>&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">11</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">CONSTANT_NAMEANDTYPE</span>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">12</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 定义生成代理类需要使用的访问修饰符变量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ACC_PUBLIC</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0x00000001</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ACC_PRIVATE</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0x00000002</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ACC_STATIC</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0x00000008</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ACC_FINAL</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0x00000010</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ACC_SUPER</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0x00000020</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 定义生成代理类需要使用的字节码信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">opc_aconst_null</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">opc_iconst_0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">3</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">opc_bipush</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">16</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">opc_sipush</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">17</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">opc_ldc</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">18</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">opc_ldc_w</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">19</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// ...字节码个数1byte，太多这里省略N个字节码定义</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 定义代理类的父类类名</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">superclassName</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(210, 107, 107);">"java/lang/reflect/Proxy"</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 定义Proxy类中的handler变量名</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">handlerFieldName</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(210, 107, 107);">"h"</span>;</p>
+<p><span style="color: rgb(218, 146, 74);">// 代理类名</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">className</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 代理类访问修饰符</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">accessFlags</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 代理类常量池信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">ConstantPool</span> <span style="color: rgb(184, 191, 198);">cp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ConstantPool</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 代理类属性信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">List&lt;FieldInfo&gt;</span> <span style="color: rgb(184, 191, 198);">fields</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ArrayList&lt;&gt;</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 代理类方法信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">List&lt;MethodInfo&gt;</span> <span style="color: rgb(184, 191, 198);">methods</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ArrayList&lt;&gt;</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 方法签名字符串与ProxyMethod方法描述对象的映射，注意：相同描述符（方法名+入参类型+返回类型），但是相同方法名+参数类型的方法，将会由多个ProxyMethod描述</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">Map&lt;</span><span style="color: rgb(28, 198, 133);">String</span>, <span style="color: rgb(184, 191, 198);">List&lt;ProxyMethod&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">proxyMethods</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">HashMap&lt;&gt;</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// ProxyMethod的个数，用于生成方法属性名</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">proxyMethodCount</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ConstantPool</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 常量池实体</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">List&lt;Entry&gt;</span> <span style="color: rgb(184, 191, 198);">pool</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ArrayList&lt;&gt;</span>(<span style="color: rgb(100, 171, 143);">32</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将所有类型的常量池数据映射到常量池索引,用于查找现有Entry的索引下标</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">Map&lt;</span><span style="color: rgb(28, 198, 133);">Object</span>,<span style="color: rgb(28, 198, 133);">Short</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">map</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">HashMap&lt;&gt;</span>(<span style="color: rgb(100, 171, 143);">16</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 只读标记位</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">readOnly</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 属性信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">FieldInfo</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">accessFlags</span>; <span style="color: rgb(218, 146, 74);">// 访问修饰符</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">name</span>; <span style="color: rgb(218, 146, 74);">// 属性名</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">descriptor</span>; <span style="color: rgb(218, 146, 74);">// 描述符</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 方法信息</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">MethodInfo</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">accessFlags</span>; <span style="color: rgb(218, 146, 74);">// 访问修饰符</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">name</span>; <span style="color: rgb(218, 146, 74);">// 方法名</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">descriptor</span>;<span style="color: rgb(218, 146, 74);">// 方法描述符</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">short</span> <span style="color: rgb(184, 191, 198);">maxStack</span>; <span style="color: rgb(218, 146, 74);">// 方法使用的操作数栈大小</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">short</span> <span style="color: rgb(184, 191, 198);">maxLocals</span>; <span style="color: rgb(218, 146, 74);">// 方法使用的局部变量表大小</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ByteArrayOutputStream</span> <span style="color: rgb(184, 191, 198);">code</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ByteArrayOutputStream</span>(); <span style="color: rgb(218, 146, 74);">// 方法信息的输出字节流</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">List&lt;ExceptionTableEntry&gt;</span> <span style="color: rgb(184, 191, 198);">exceptionTable</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ArrayList&lt;ExceptionTableEntry&gt;</span>(); <span style="color: rgb(218, 146, 74);">// 方法异常分派表</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">short</span>[] <span style="color: rgb(184, 191, 198);">declaredExceptions</span>; <span style="color: rgb(218, 146, 74);">// 方法声明的可能抛出的异常信息索引（常量池索引下标）</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 代理方法包装对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ProxyMethod</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">methodName</span>; <span style="color: rgb(218, 146, 74);">// 方法名</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">parameterTypes</span>; <span style="color: rgb(218, 146, 74);">// 参数类型</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">returnType</span>; <span style="color: rgb(218, 146, 74);">// 返回类型</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span>[] <span style="color: rgb(184, 191, 198);">exceptionTypes</span>; <span style="color: rgb(218, 146, 74);">// 异常类型</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Class&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">fromClass</span>; <span style="color: rgb(218, 146, 74);">// 方法所属类对象</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">methodFieldName</span>; <span style="color: rgb(218, 146, 74);">// 方法所在类的属性名（ "m" + proxyMethodCount++）</span></p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>通过以上的变量描述，相信不用笔者多描述，读者应该也能猜出个一二了，是的，就是根据传入的接口实例，校验过后通过生成的ConstantPool、FieldInfo、MethodInfo对象来完成字节码的构建，写入过程严格按照JVM的规范来进行。额，我想读者是不是也有点好奇心，咋写的？这样，笔者给出ProxyMethod写入字节码生成MethodInfo方法信息的过程来给充满好奇心的读者给以满足~</p>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ProxyMethod</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">MethodInfo</span> <span style="color: rgb(184, 191, 198);">generateMethod</span>() <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">IOException</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">desc</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">getMethodDescriptor</span>(<span style="color: rgb(184, 191, 198);">parameterTypes</span>, <span style="color: rgb(184, 191, 198);">returnType</span>); <span style="color: rgb(218, 146, 74);">// 通过参数类型+返回类型来构建方法描述符</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">MethodInfo</span> <span style="color: rgb(184, 191, 198);">minfo</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">MethodInfo</span>(<span style="color: rgb(184, 191, 198);">methodName</span>, <span style="color: rgb(184, 191, 198);">desc</span>, <span style="color: rgb(184, 191, 198);">ACC_PUBLIC</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">ACC_FINAL</span>); <span style="color: rgb(218, 146, 74);">// 创建方法元数据对象，并指定方法修饰符为public final</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span>[] <span style="color: rgb(184, 191, 198);">parameterSlot</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(28, 198, 133);">int</span>[<span style="color: rgb(184, 191, 198);">parameterTypes</span>.<span style="color: rgb(184, 191, 198);">length</span>]; <span style="color: rgb(218, 146, 74);">// 构建存放入参的slot</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nextSlot</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构建入参parameterSlot的大小描述</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">parameterSlot</span>.<span style="color: rgb(184, 191, 198);">length</span>; <span style="color: rgb(184, 191, 198);">i++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">parameterSlot</span>[<span style="color: rgb(184, 191, 198);">i</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nextSlot</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nextSlot</span> <span style="color: rgb(184, 191, 198);">+=</span> <span style="color: rgb(184, 191, 198);">getWordsPerType</span>(<span style="color: rgb(184, 191, 198);">parameterTypes</span>[<span style="color: rgb(184, 191, 198);">i</span>]);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">localSlot0</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nextSlot</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">short</span> <span style="color: rgb(184, 191, 198);">pc</span>, <span style="color: rgb(184, 191, 198);">tryBegin</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">tryEnd</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构建数据输出流，用于存放方法的字节码信息</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">DataOutputStream</span> <span style="color: rgb(184, 191, 198);">out</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DataOutputStream</span>(<span style="color: rgb(184, 191, 198);">minfo</span>.<span style="color: rgb(184, 191, 198);">code</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入局部变量的this引用到输出流中，也即aload 0</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">code_aload</span>(<span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">out</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入getfiled字节码</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">out</span>.<span style="color: rgb(184, 191, 198);">writeByte</span>(<span style="color: rgb(184, 191, 198);">opc_getfield</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 写入getfiled字节码后面跟随属性描述符</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">out</span>.<span style="color: rgb(184, 191, 198);">writeShort</span>(<span style="color: rgb(184, 191, 198);">cp</span>.<span style="color: rgb(184, 191, 198);">getFieldRef</span>(<span style="color: rgb(184, 191, 198);">superclassName</span>, <span style="color: rgb(184, 191, 198);">handlerFieldName</span>, <span style="color: rgb(210, 107, 107);">"Ljava/lang/reflect/InvocationHandler;"</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;... <span style="color: rgb(218, 146, 74);">// 同样省略一万字，因为再往下就是JVM字节码的信息了，这似乎与Proxy的原理偏离了，读者了解到这里即可，对于字节码的原理，笔者会在另外一片文章中给出</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">minfo</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>总结</strong></p>
+<p>JDK的动态代理类过程如下：</p>
+<ol>
+ <li>验证代理类实现接口信息</li>
+ <li>构建代理类的方法名：proxyClassNamePrefix = "$Proxy" + AtomicLong nextUniqueNumber</li>
+ <li>创建ProxyGenerator类生成代理类的Class信息，在该类的generateProxyClass方法中，实现流程如下：</li>
+ <li class="ql-indent-1">构建内存字节输出流并用数据输出流包装该流对象</li>
+ <li class="ql-indent-1">构建ConstantPool、FieldInfo、MethodInfo对象信息</li>
+ <li class="ql-indent-1">将ConstantPool、FieldInfo、MethodInfo对象信息按照JVM规范，写入到数据输出流中</li>
+</ol></p>
+</body>
+</html>

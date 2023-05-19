@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux 进程PID创建原理</h1>
+<p>2022-02-11T10:38:02.918+0800</p>
+<p><p><strong>知识推理</strong></p>
+<p>我们可以站在设计者的角度来解决这个问题，直接来知识推理：</p>
+<ol>
+ <li>PID代表了进程（包括LWP，轻量级进程，也即线程，之前有讲过）的ID</li>
+ <li>PID可以被复用，毕竟进程的PCB（进程控制块）被销毁了，肯定要归还PID的</li>
+ <li>那么我们就需要一个容器来管理PID的分配和回收</li>
+ <li>PID只是一个数字而已（0---N（最大上限））</li>
+ <li>通过上述分析，我们得出特性：保存数字最简单、快捷、空间复杂度低是我们的需求</li>
+ <li>很容易联想到位图（这就够了）</li>
+</ol>
+<p>既然决定了使用位图来表示0---N的PID，那么这时我们就可以继续联想，CPU有没有提供一些指令集，让我们来操作位图呢？答案是必须的，肯定有特殊指令集来加速位图的访问，因为我们使用位图就是要足够的快，那么我们来看这两个I386的指令：</p>
+<ol>
+ <li>BTS -- Bit Test and Set (位测试并置位)</li>
+ <li>BTS 指令先将指定位的值存储到 CF 标志中，然后设置该位的值（0或者1）</li>
+ <li><span style="color: rgb(200, 143, 208);">mov</span> $0x80, %al <span style="color: rgb(218, 146, 74);"># 将 1000 0000 放入到ax的低8位中</span></li>
+ <li><span style="color: rgb(200, 143, 208);">btsl</span> $7, %<span style="color: rgb(159, 186, 213);">eax</span> <span style="color: rgb(218, 146, 74);"># 将eax的第7位（下标从0开始），那么这时由于al的第7位已经是1，所以在执行 bts 指令后，这个 1 会被存在 CF 中，然后对该位置 1 ，置位后 eax 自然是 0x80</span></li>
+ <li>SBB -- Integer Subtraction with Borrow（整数减法与借位）</li>
+ <li>eg：SBB EAX, imm32【intel 汇编语法，imm32为32位立即数】。将源操作数 imm32 和 Eflags 中CF（进位）标志位相加，然后减掉 EAX中原来的值，然后将结果放入到目的操作数EAX中。也即：EAX = imm32 + CF -EAX</li>
+</ol>
+<p>那么我们来看看如何使用这两个指令来设置bit位，同时获取设置之前的值。看如下代码：</p>
+<ol>
+ <li>我们使用bts 指令将 addr的第nr位设置为1，之前的结果放在了CF标志位中</li>
+ <li>我们使用sbb指令执行：oldbit = oldbit + CF - oldbit ，这时很容易得出：oldbit = CF，也即我们取出了CF标志位中的值</li>
+</ol>
+<p><span style="color: rgb(218, 146, 74);"># AT&amp;T语法 这里我们令：nr为要设置的bit位&nbsp;addr为bit为的起始地址&nbsp;oldbit为nr位被设置为1之前的值（0或者1）</span></p>
+<p><span style="color: rgb(200, 143, 208);">btsl</span> <span style="color: rgb(200, 143, 208);">nr</span>,addr</p>
+<p><span style="color: rgb(200, 143, 208);">sbbl</span> <span style="color: rgb(200, 143, 208);">oldbit</span>,oldbit</p>
+<p>那么我们趁热打铁，看看接下来我们要使用的linux内核函数test_and_set_bit的原理。肯定有读者不会内联汇编，不过不打紧，我就已经翻译成了上面的汇编。不过还是得说下怎么来的，内联汇编中从输出也即 =r 这里开始就是0下标，往后就是1、2，所以这里得出 %0 ： oldbit ，%1：ADDR，%2：nr</p>
+<p><span style="color: rgb(183, 179, 179);">#define ADDR (*(volatile long *) addr) </span><span style="color: rgb(218, 146, 74);">// 将addr转为long指针同时解引用，这时可以获取addr指向的内存单元中的32 为值，I386为32位机，所以这里 long为32位</span></p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">__inline__</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">test_and_set_bit</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">nr</span>, <span style="color: rgb(200, 143, 208);">volatile</span> <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">*</span> <span style="color: rgb(184, 191, 198);">addr</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">oldbit</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 别慌，内联汇编而已，我书里有讲</span></p>
+<p><span style="color: rgb(184, 191, 198);">__asm__</span> <span style="color: rgb(184, 191, 198);">__volatile__</span>( <span style="color: rgb(184, 191, 198);">LOCK_PREFIX</span> <span style="color: rgb(218, 146, 74);">// 锁前缀，用于保证 btsl 指令的原子性</span></p>
+<p><span style="color: rgb(210, 107, 107);">"btsl %2,%1&nbsp;// 等于：btsl nr,addr</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sbbl</span> <span style="color: rgb(184, 191, 198);">%</span><span style="color: rgb(100, 171, 143);">0</span>,<span style="color: rgb(184, 191, 198);">%</span><span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(210, 107, 107);">" // 等于：sbbl oldbit,oldbit</span></p>
+<p>:<span style="color: rgb(210, 107, 107);">"=r"</span> (<span style="color: rgb(184, 191, 198);">oldbit</span>),<span style="color: rgb(210, 107, 107);">"=m"</span> (<span style="color: rgb(184, 191, 198);">ADDR</span>)</p>
+<p>:<span style="color: rgb(210, 107, 107);">"Ir"</span> (<span style="color: rgb(184, 191, 198);">nr</span>) : <span style="color: rgb(210, 107, 107);">"memory"</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">oldbit</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><strong>Linux源码分析</strong></p>
+<p>在了解以上知识后，现在我们之前来看linux内核的源码，在创建进程时如何分配PID。我们很容易的得出结论：调用alloc_pidmap函数分配PID。</p>
+<p><span style="color: rgb(184, 191, 198);">asmlinkage</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">sys_fork</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(141, 141, 240);">regs</span>) <span style="color: rgb(218, 146, 74);">// 创建进程系统调用入口</span></p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">do_fork</span>(<span style="color: rgb(184, 191, 198);">SIGCHLD</span>, <span style="color: rgb(184, 191, 198);">regs</span>.<span style="color: rgb(184, 191, 198);">esp</span>, <span style="color: rgb(184, 191, 198);">&amp;regs</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">NULL</span>, <span style="color: rgb(184, 191, 198);">NULL</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">do_fork</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">clone_flags</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">stack_start</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(184, 191, 198);">*regs</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">stack_size</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*parent_tidptr</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*child_tidptr</span>){</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*p</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">p</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">copy_process</span>(<span style="color: rgb(184, 191, 198);">clone_flags</span>, <span style="color: rgb(184, 191, 198);">stack_start</span>, <span style="color: rgb(184, 191, 198);">regs</span>, <span style="color: rgb(184, 191, 198);">stack_size</span>, <span style="color: rgb(184, 191, 198);">parent_tidptr</span>, <span style="color: rgb(184, 191, 198);">child_tidptr</span>); <span style="color: rgb(218, 146, 74);">// 从当前进程，也即创建进程的父进程的资源信息中拷贝并设置 PCB（task_struct） 信息</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">task_struct</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">copy_process</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">clone_flags</span>,</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">stack_start</span>,</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pt_regs</span> <span style="color: rgb(184, 191, 198);">*regs</span>,</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">stack_size</span>,</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*parent_tidptr</span>,</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*child_tidptr</span>){</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">clone_flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">CLONE_IDLETASK</span>) <span style="color: rgb(218, 146, 74);">// 内核线程的IDEL线程 总是为0</span></p>
+<p><span style="color: rgb(184, 191, 198);">p-&gt;pid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">else</span> {&nbsp;<span style="color: rgb(218, 146, 74);">// 其他进程，调用alloc_pidmap函数分配PID</span></p>
+<p><span style="color: rgb(184, 191, 198);">p-&gt;pid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">alloc_pidmap</span>();</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">p-&gt;pid</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">bad_fork_cleanup</span>;</p>
+<p>}</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>接下来我们来分析alloc_pidmap函数即可。通过源码我们得知：</p>
+<ol>
+ <li>进程分配的最大PID个数由 PID_MAX_DEFAULT 来控制，最大为 PID_MAX_LIMIT</li>
+ <li>分配pid时，首先尝试通过 last_pid + 1 来计算偏移量来计算pid</li>
+ <li>如果last_pid分配失效，那么我们只能通过扫描位图数组中的位图，来寻找可用的pid</li>
+</ol>
+<p><span style="color: rgb(218, 146, 74);">/*</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 最大400万个pid</span></p>
+<p><span style="color: rgb(218, 146, 74);">*/</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define PID_MAX_LIMIT (4*1024*1024)</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">/*</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 控制分配给进程的默认最大pid 32768</span></p>
+<p><span style="color: rgb(218, 146, 74);">*/</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define PID_MAX_DEFAULT 0x8000</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 一个page页的移位大小</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define PAGE_SHIFT 12</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 一个page页的大小 2^12 = 4 KB</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define PAGE_SIZE (1UL &lt;&lt; PAGE_SHIFT)</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 总共有需要多少个 byte（entry） ，这里除8，就是算出多少个entry</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define PIDMAP_ENTRIES (PID_MAX_LIMIT/PAGE_SIZE/8)</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 每一页的bit位数</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define BITS_PER_PAGE (PAGE_SIZE*8)</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 每一页bit位的掩码，用于和pid计算 offset 偏移量，也即要设置的页的bit位 nr</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define BITS_PER_PAGE_MASK (BITS_PER_PAGE-1)</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 用于表示一个页 4kb 中的位图结构。我们可以得出一页最多能表示的位为：4KB * 1024 * 8 = 32768 bit</span></p>
+<p><span style="color: rgb(200, 143, 208);">typedef</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pidmap</span> {</p>
+<p><span style="color: rgb(184, 191, 198);">atomic_t</span> <span style="color: rgb(184, 191, 198);">nr_free</span>; <span style="color: rgb(218, 146, 74);">// 可用的位个数</span></p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">page</span>; <span style="color: rgb(218, 146, 74);">// page页的地址</span></p>
+<p>} <span style="color: rgb(184, 191, 198);">pidmap_t</span>;</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 全局位图数组</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">pidmap_t</span> <span style="color: rgb(184, 191, 198);">pidmap_array</span>[<span style="color: rgb(184, 191, 198);">PIDMAP_ENTRIES</span>] <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>{ [ <span style="color: rgb(100, 171, 143);">0</span> ... <span style="color: rgb(184, 191, 198);">PIDMAP_ENTRIES-</span><span style="color: rgb(100, 171, 143);">1</span> ] <span style="color: rgb(184, 191, 198);">=</span> { <span style="color: rgb(184, 191, 198);">ATOMIC_INIT</span>(<span style="color: rgb(184, 191, 198);">BITS_PER_PAGE</span>), <span style="color: rgb(184, 191, 198);">NULL</span> } };</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 最大pid为限制进程的 32768</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">pid_max</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">PID_MAX_DEFAULT</span>;</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 当前最后一个进程的pid</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">last_pid</span>;</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 当达到最大的pid_max时，重置last_pid 为 RESERVED_PIDS （为何为300？因为内核线程的id分配通常小于300，所以如果从0开始，没有意义，内核线程将不会销毁，那么更不会归还PID）</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define RESERVED_PIDS 300</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 初始化位图数组的第一项</span></p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">__init</span> <span style="color: rgb(141, 141, 240);">pidmap_init</span>(<span style="color: rgb(28, 198, 133);">void</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">pidmap_array-&gt;page</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span>)<span style="color: rgb(184, 191, 198);">get_zeroed_page</span>(<span style="color: rgb(184, 191, 198);">GFP_KERNEL</span>); <span style="color: rgb(218, 146, 74);">// 分配一页空页</span></p>
+<p><span style="color: rgb(184, 191, 198);">set_bit</span>(<span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">pidmap_array-&gt;page</span>); <span style="color: rgb(218, 146, 74);">// 将第0位置1 （进程0位特殊内核线程IDLE TASK）</span></p>
+<p><span style="color: rgb(184, 191, 198);">atomic_dec</span>(<span style="color: rgb(184, 191, 198);">&amp;pidmap_array-&gt;nr_free</span>); <span style="color: rgb(218, 146, 74);">// 减少可用个数</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 分配可用位图</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">alloc_pidmap</span>(<span style="color: rgb(28, 198, 133);">void</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">pid</span>, <span style="color: rgb(184, 191, 198);">offset</span>, <span style="color: rgb(184, 191, 198);">max_steps</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">PIDMAP_ENTRIES</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(100, 171, 143);">1</span>; <span style="color: rgb(218, 146, 74);">// 最大寻找可用位图entry的step</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pidmap_t</span> <span style="color: rgb(184, 191, 198);">*map</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">last_pid</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(100, 171, 143);">1</span>; <span style="color: rgb(218, 146, 74);">// 将最后分配的进程pid + 1</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">pid</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">pid_max</span>) <span style="color: rgb(218, 146, 74);">// 达到最大限制，那么还原pid为300</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">RESERVED_PIDS</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">offset</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">pid</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">BITS_PER_PAGE_MASK</span>; <span style="color: rgb(218, 146, 74);">// 计算要设置的page页的位偏移量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">map</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">pidmap_array</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">pid</span> <span style="color: rgb(184, 191, 198);">/</span> <span style="color: rgb(184, 191, 198);">BITS_PER_PAGE</span>; <span style="color: rgb(218, 146, 74);">// 获取当前要设置的map结构（很容易计算：数组起始地址 + 当前pid / 每一页的数量 【这里算出了偏移量】 = pidmap_array数组的首地址 + 偏移量 联想下指针的 *(p+N)操作遍历数组）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">likely</span>(<span style="color: rgb(184, 191, 198);">map-&gt;page</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">!test_and_set_bit</span>(<span style="color: rgb(184, 191, 198);">offset</span>, <span style="color: rgb(184, 191, 198);">map-&gt;page</span>))) { <span style="color: rgb(218, 146, 74);">// 存放位图的page页存在，且test_and_set_bit 设置成功，并且返回的oldbit为0，那么获取pid成功。减少当前map的可用位数，同时更新last_pid</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">return_pid</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">atomic_dec</span>(<span style="color: rgb(184, 191, 198);">&amp;map-&gt;nr_free</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">last_pid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">pid</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">pid</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!offset</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">!atomic_read</span>(<span style="color: rgb(184, 191, 198);">&amp;map-&gt;nr_free</span>)) { <span style="color: rgb(218, 146, 74);">// 偏移量为0（被IDEL TASK用）或者 当前位图中的位已经分配完，那么查找下一个可用的位图</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">next_map</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">map</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">next_free_map</span>(<span style="color: rgb(184, 191, 198);">map</span>, <span style="color: rgb(184, 191, 198);">&amp;max_steps</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!map</span>) <span style="color: rgb(218, 146, 74);">// pidmap_array数组遍历完毕还是没找到，那么失败退出</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">failure</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">offset</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(218, 146, 74);">// 重置偏移量，表示从新找到的map的第0个bit处开始找，因为这里已经不是第一个map的0下标，所以没有问题</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/*</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 查找当前获取到的位图的可用的bit位</span></p>
+<p><span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">scan_more</span>:</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">offset</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">find_next_zero_bit</span>(<span style="color: rgb(184, 191, 198);">map-&gt;page</span>, <span style="color: rgb(184, 191, 198);">BITS_PER_PAGE</span>, <span style="color: rgb(184, 191, 198);">offset</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">offset</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">BITS_PER_PAGE</span>) <span style="color: rgb(218, 146, 74);">// 查找了当前map所有的bit位，都没有找到，那么继续获取下一个map</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">next_map</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">test_and_set_bit</span>(<span style="color: rgb(184, 191, 198);">offset</span>, <span style="color: rgb(184, 191, 198);">map-&gt;page</span>)) <span style="color: rgb(218, 146, 74);">// 找到可用位，那么原子性设置该位，设置失败，那么继续执行scan_more，找到可用的位</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">scan_more</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/* 通过扫描位图，获取到pid，那么我们首先获取到当前位所处的页，然后根据每页的数量BITS_PER_PAGE和当前偏移量来计算PID，很简单：每页BITS_PER_PAGE个位，那么只需要 当前map的页 * BITS_PER_PAGE + 偏移量即可 */</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pid</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">map</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">pidmap_array</span>) <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">BITS_PER_PAGE</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">offset</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">return_pid</span>;&nbsp;<span style="color: rgb(218, 146, 74);">// 返回pid</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">failure</span>: <span style="color: rgb(218, 146, 74);">// 失败后返回-1</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

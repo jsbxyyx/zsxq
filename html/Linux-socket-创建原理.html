@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux socket 创建原理</h1>
+<p>2022-07-28T08:08:41.659+0800</p>
+<p><p><strong>概述</strong></p>
+<p>在C语言网络编程中，我们通过socket函数创建fd，何为fd呢？在vfs中，一切皆文件，对于套接字也一样，均是通过实现VFS框架中的结构指针完成创建（详细参考混沌学堂）。本文将详细介绍 server socket的创建原理，为后面分析 socket 的 option （SO_XXXX）原理打下基础。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">serverFD</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">socket</span>(<span style="color: rgb(184, 191, 198);">AF_INET</span>, <span style="color: rgb(184, 191, 198);">SOCK_STREAM</span>, <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>上述源码，我们看到制定了协议簇为 AF_INET ，协议实现为 TCP 协议（SOCK_STREAM 面向流协议）。同样，我们跟进系统调用 sys_socket。</p>
+<p><span style="color: rgb(184, 191, 198);">asmlinkage</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">sys_socket</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">family</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">type</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">protocol</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">retval</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_create</span>(<span style="color: rgb(184, 191, 198);">family</span>, <span style="color: rgb(184, 191, 198);">type</span>, <span style="color: rgb(184, 191, 198);">protocol</span>, <span style="color: rgb(184, 191, 198);">&amp;sock</span>); <span style="color: rgb(218, 146, 74);">// 创建socket</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_map_fd</span>(<span style="color: rgb(184, 191, 198);">sock</span>); <span style="color: rgb(218, 146, 74);">// 将socket 映射为file，同时返回fd</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_release</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">retval</span>;</p>
+<p>}</p>
+<p><strong>sock_create 函数</strong></p>
+<p>可以看到该函数，将会根据协议簇找到 net_proto_family ，然后调用 net_proto_family的 create 方法来完成socket的数据填充，同时在该方法中传入了 protocol 协议号，表示使用该协议簇中的 protocol 协议，对于本例而言，创建的为 SOCK_STREAM 协议。源码如下。</p>
+<p><span style="color: rgb(184, 191, 198);">x</span>&nbsp;<span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">net_proto_family</span> <span style="color: rgb(184, 191, 198);">*net_families</span>[<span style="color: rgb(184, 191, 198);">NPROTO</span>]; <span style="color: rgb(218, 146, 74);">// 协议簇数组static struct net_proto_family *net_families[NPROTO]; // 协议簇数组</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define NPROTO 32 </span><span style="color: rgb(218, 146, 74);">// 长度最大为32，目前来说够用</span></p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">sock_create</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">family</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">type</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">protocol</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">**res</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>;</p>
+<p>...</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">net_families</span>[<span style="color: rgb(184, 191, 198);">family</span>] <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>) { <span style="color: rgb(218, 146, 74);">// 指定的协议簇不存在</span></p>
+<p><span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EAFNOSUPPORT</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>}</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">sock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_alloc</span>()))&nbsp;<span style="color: rgb(218, 146, 74);">// 分配 socket 结构</span></p>
+<p>{</p>
+<p><span style="color: rgb(184, 191, 198);">printk</span>(<span style="color: rgb(184, 191, 198);">KERN_WARNING</span> <span style="color: rgb(210, 107, 107);">"socket: no more sockets\n"</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-ENFILE</span>; <span style="color: rgb(218, 146, 74);">/* Not exactly a match, but its the</span></p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">closest posix thing */</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>}</p>
+<p><span style="color: rgb(184, 191, 198);">sock-&gt;type</span>&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">type</span>;</p>
+<p>...</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">net_families</span>[<span style="color: rgb(184, 191, 198);">family</span>]<span style="color: rgb(184, 191, 198);">-&gt;create</span>(<span style="color: rgb(184, 191, 198);">sock</span>, <span style="color: rgb(184, 191, 198);">protocol</span>)) <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(218, 146, 74);">// 根据协议簇填充socket属性</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_module_put</span>;</p>
+<p>...</p>
+<p>}</p>
+<p><strong>sock_alloc 函数</strong></p>
+<p>该函数用于分配 socket 结构，可以看到这里通过socketfs的 超级块来分配，同时分配的有inode信息，由于这里只是socket 挂入VFS，不涉及实际inode文件操作，所以对于socket的inode而言，所有inode的操作均为空操作。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">vfsmount</span> <span style="color: rgb(184, 191, 198);">*sock_mnt</span>; <span style="color: rgb(218, 146, 74);">// socket 文件系统挂载点</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file_system_type</span> <span style="color: rgb(141, 141, 240);">sock_fs_type</span> <span style="color: rgb(184, 191, 198);">=</span> { <span style="color: rgb(218, 146, 74);">// 文件系统操作函数</span></p>
+<p>.<span style="color: rgb(184, 191, 198);">name</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(210, 107, 107);">"sockfs"</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">get_sb</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sockfs_get_sb</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">kill_sb</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">kill_anon_super</span>,</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// socket 超级块操作函数</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">super_operations</span> <span style="color: rgb(141, 141, 240);">sockfs_ops</span> <span style="color: rgb(184, 191, 198);">=</span> {</p>
+<p>.<span style="color: rgb(184, 191, 198);">alloc_inode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_alloc_inode</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">destroy_inode</span> <span style="color: rgb(184, 191, 198);">=sock_destroy_inode</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">statfs</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">simple_statfs</span>,</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 创建并初始化超级块</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">super_block</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">sockfs_get_sb</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file_system_type</span> <span style="color: rgb(184, 191, 198);">*fs_type</span>,</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">dev_name</span>, <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">data</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">get_sb_pseudo</span>(<span style="color: rgb(184, 191, 198);">fs_type</span>, <span style="color: rgb(210, 107, 107);">"socket:"</span>, <span style="color: rgb(184, 191, 198);">&amp;sockfs_ops</span>, <span style="color: rgb(184, 191, 198);">SOCKFS_MAGIC</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">sock_alloc</span>(<span style="color: rgb(28, 198, 133);">void</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">inode</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">sock</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">inode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">new_inode</span>(<span style="color: rgb(184, 191, 198);">sock_mnt-&gt;mnt_sb</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!inode</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SOCKET_I</span>(<span style="color: rgb(184, 191, 198);">inode</span>); <span style="color: rgb(218, 146, 74);">// 由于 inode 与 socket 内存连续，均在 struct socket_alloc 结构中，所以可以通过inode指针来获取socket的指针</span></p>
+<p>...</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">sock</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 混沌学堂学员应该没问题：超级块管理了fs的元数据，对于inode而言，也是其分配</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">new_inode</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">super_block</span> <span style="color: rgb(184, 191, 198);">*sb</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">last_ino</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">inode</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">spin_lock_prefetch</span>(<span style="color: rgb(184, 191, 198);">&amp;inode_lock</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">inode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">alloc_inode</span>(<span style="color: rgb(184, 191, 198);">sb</span>); <span style="color: rgb(218, 146, 74);">// 根据超级块，创建inode</span></p>
+<p>...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">alloc_inode</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">super_block</span> <span style="color: rgb(184, 191, 198);">*sb</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">address_space_operations</span> <span style="color: rgb(141, 141, 240);">empty_aops</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode_operations</span> <span style="color: rgb(141, 141, 240);">empty_iops</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file_operations</span> <span style="color: rgb(141, 141, 240);">empty_fops</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*inode</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 尝试调用超级块的 alloc_inode 方法创建，若该函数不存在，那么使用slab分配器分配</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">sb-&gt;s_op-&gt;alloc_inode</span>)</p>
+<p><span style="color: rgb(184, 191, 198);">inode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sb-&gt;s_op-&gt;alloc_inode</span>(<span style="color: rgb(184, 191, 198);">sb</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">else</span></p>
+<p><span style="color: rgb(184, 191, 198);">inode</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*</span>) <span style="color: rgb(184, 191, 198);">kmem_cache_alloc</span>(<span style="color: rgb(184, 191, 198);">inode_cachep</span>, <span style="color: rgb(184, 191, 198);">SLAB_KERNEL</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">inode</span>) { <span style="color: rgb(218, 146, 74);">// 创建成功，那么初始化inode成员变量，可以看到操作函数均初始化为空操作</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">address_space</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(184, 191, 198);">mapping</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;inode-&gt;i_data</span>;</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">inode-&gt;i_op</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;empty_iops</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">inode-&gt;i_fop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;empty_fops</span>;</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">inode-&gt;i_mapping</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">mapping</span>;</p>
+<p>}</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">inode</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// socket 包装结构，包装 实际 socket 和 inode，注意这里没有使用指针，所以整个内存块包含这两个信息</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket_alloc</span> {</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(141, 141, 240);">socket</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(141, 141, 240);">vfs_inode</span>;</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 上述 super_operations 操作的回调函数实现</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">sock_alloc_inode</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">super_block</span> <span style="color: rgb(184, 191, 198);">*sb</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 首先通过slab分配器分配一个 socket_alloc 结构</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket_alloc</span> <span style="color: rgb(184, 191, 198);">*ei</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">ei</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket_alloc</span> <span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">kmem_cache_alloc</span>(<span style="color: rgb(184, 191, 198);">sock_inode_cachep</span>, <span style="color: rgb(184, 191, 198);">SLAB_KERNEL</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!ei</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">init_waitqueue_head</span>(<span style="color: rgb(184, 191, 198);">&amp;ei-&gt;socket</span>.<span style="color: rgb(184, 191, 198);">wait</span>); <span style="color: rgb(218, 146, 74);">// 初始化结构中socket的等待链表</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 初始化 socket_alloc 中socket的成员变量</span></p>
+<p><span style="color: rgb(184, 191, 198);">ei-&gt;socket</span>.<span style="color: rgb(184, 191, 198);">fasync_list</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">ei-&gt;socket</span>.<span style="color: rgb(184, 191, 198);">state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SS_UNCONNECTED</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">ei-&gt;socket</span>.<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">ei-&gt;socket</span>.<span style="color: rgb(184, 191, 198);">ops</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">ei-&gt;socket</span>.<span style="color: rgb(184, 191, 198);">sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">ei-&gt;socket</span>.<span style="color: rgb(184, 191, 198);">file</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">ei-&gt;socket</span>.<span style="color: rgb(184, 191, 198);">passcred</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">&amp;ei-&gt;vfs_inode</span>;</p>
+<p>}</p>
+<p><strong>TCP 协议簇初始化原理</strong></p>
+<p>前面我们看到会通过 net_families[family]-&gt;create(sock, protocol)) 方法初始化socket，那么对于TCP协议簇来说，何时初始化他们呢？</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">net_proto_family</span> <span style="color: rgb(184, 191, 198);">*net_families</span>[<span style="color: rgb(184, 191, 198);">NPROTO</span>]; <span style="color: rgb(218, 146, 74);">// 协议簇数组</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 注册 net_proto_family 协议出</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">sock_register</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">net_proto_family</span> <span style="color: rgb(184, 191, 198);">*ops</span>)</p>
+<p>{</p>
+<p>...</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">net_families</span>[<span style="color: rgb(184, 191, 198);">ops-&gt;family</span>] <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>) {</p>
+<p><span style="color: rgb(184, 191, 198);">net_families</span>[<span style="color: rgb(184, 191, 198);">ops-&gt;family</span>]<span style="color: rgb(184, 191, 198);">=ops</span>; <span style="color: rgb(218, 146, 74);">// 在对应数组处填入 net_proto_family 指针</span></p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>}</p>
+<p>...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// TCP/IP 协议簇描述结构</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">net_proto_family</span> <span style="color: rgb(141, 141, 240);">inet_family_ops</span> <span style="color: rgb(184, 191, 198);">=</span> {</p>
+<p>.<span style="color: rgb(184, 191, 198);">family</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">PF_INET</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">create</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_create</span>, <span style="color: rgb(218, 146, 74);">// 指定填充socket的方法</span></p>
+<p>.<span style="color: rgb(184, 191, 198);">owner</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">THIS_MODULE</span>,</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// TCP/IP 协议簇中的具体协议描述数组（这里，我们关注 SOCK_STREAM 即可）</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_protosw</span> <span style="color: rgb(141, 141, 240);">inetsw_array</span>[] <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>{</p>
+<p>&nbsp;&nbsp;&nbsp;{ <span style="color: rgb(218, 146, 74);">// TCP 协议</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">type</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SOCK_STREAM</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">protocol</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(184, 191, 198);">IPPROTO_TCP</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">prot</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&amp;tcp_prot</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">ops</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&amp;inet_stream_ops</span>, <span style="color: rgb(218, 146, 74);">// 指定 tcp 操作函数指针</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">capability</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">no_check</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(100, 171, 143);">0</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">INET_PROTOSW_PERMANENT</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;},</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;{ <span style="color: rgb(218, 146, 74);">// UDP 协议</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">type</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SOCK_DGRAM</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">protocol</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(184, 191, 198);">IPPROTO_UDP</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">prot</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&amp;udp_prot</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">ops</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&amp;inet_dgram_ops</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">capability</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">no_check</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(184, 191, 198);">UDP_CSUM_DEFAULT</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">INET_PROTOSW_PERMANENT</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;},</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;{ <span style="color: rgb(218, 146, 74);">// 原始socket协议（可监听IP层协议）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">type</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">SOCK_RAW</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">protocol</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(184, 191, 198);">IPPROTO_IP</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">prot</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&amp;raw_prot</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">ops</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&amp;inet_dgram_ops</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">capability</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">CAP_NET_RAW</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">no_check</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;<span style="color: rgb(184, 191, 198);">UDP_CSUM_DEFAULT</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">=</span>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">INET_PROTOSW_REUSE</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// TCP 操作结构，这里将函数指针初始化，后面我们在操作该socket时，将会用到以下函数</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">proto_ops</span> <span style="color: rgb(141, 141, 240);">inet_stream_ops</span> <span style="color: rgb(184, 191, 198);">=</span> {</p>
+<p>.<span style="color: rgb(184, 191, 198);">family</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">PF_INET</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">owner</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">THIS_MODULE</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">release</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_release</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">bind</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_bind</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">connect</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_stream_connect</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">socketpair</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_no_socketpair</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">accept</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_accept</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">getname</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_getname</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">poll</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tcp_poll</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">ioctl</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_ioctl</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">listen</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_listen</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">shutdown</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_shutdown</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">setsockopt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_setsockopt</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">getsockopt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_getsockopt</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">sendmsg</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_sendmsg</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">recvmsg</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inet_recvmsg</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">mmap</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_no_mmap</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">sendpage</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tcp_sendpage</span></p>
+<p>};</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 协议初始化</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">__init</span> <span style="color: rgb(141, 141, 240);">inet_init</span>(<span style="color: rgb(28, 198, 133);">void</span>){</p>
+<p>&nbsp;...</p>
+<p>&nbsp;(<span style="color: rgb(28, 198, 133);">void</span>)<span style="color: rgb(184, 191, 198);">sock_register</span>(<span style="color: rgb(184, 191, 198);">&amp;inet_family_ops</span>); <span style="color: rgb(218, 146, 74);">// 将TCP/IP 协议簇注册到 net_families 数组中</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">q</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inetsw_array</span>; <span style="color: rgb(184, 191, 198);">q</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">&amp;inetsw_array</span>[<span style="color: rgb(184, 191, 198);">INETSW_ARRAY_LEN</span>]; <span style="color: rgb(184, 191, 198);">++q</span>) <span style="color: rgb(218, 146, 74);">// 循环遍历 inetsw_array 数组，注册协议簇中的协议：SOCK_STREAM TCP 协议</span></p>
+<p><span style="color: rgb(184, 191, 198);">inet_register_protosw</span>(<span style="color: rgb(184, 191, 198);">q</span>);</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">list_head</span> <span style="color: rgb(141, 141, 240);">inetsw</span>[<span style="color: rgb(184, 191, 198);">SOCK_MAX</span>]; <span style="color: rgb(218, 146, 74);">// TCP/IP 协议簇中协议数组</span></p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">inet_register_protosw</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_protosw</span> <span style="color: rgb(184, 191, 198);">*p</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p><span style="color: rgb(184, 191, 198);">list_for_each</span>(<span style="color: rgb(184, 191, 198);">lh</span>, <span style="color: rgb(184, 191, 198);">&amp;inetsw</span>[<span style="color: rgb(184, 191, 198);">p-&gt;type</span>]) { <span style="color: rgb(218, 146, 74);">// 遍历 inet_protosw *p 数组，将其添加到 inetsw 数组中</span></p>
+<p><span style="color: rgb(184, 191, 198);">answer</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">list_entry</span>(<span style="color: rgb(184, 191, 198);">lh</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_protosw</span>, <span style="color: rgb(184, 191, 198);">list</span>);</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">/* Check only the non-wild match. */</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">INET_PROTOSW_PERMANENT</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">answer-&gt;flags</span>) {</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">protocol</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">answer-&gt;protocol</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">last_perm</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">lh</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">answer</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>}</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>inet_create 函数</strong></p>
+<p>前面我们看到在TCP/IP协议簇初始化过程中，将该函数作为 struct net_proto_family inet_family_ops TCP操作创建socket的实现。通过源码我们看到，将会调用 sk_alloc 分配Linux 底层网络结构 sock，随后遍历协议数组，匹配 protocol 指定的协议簇中的协议，然后使用匹配的 inet_protosw *answer 协议中定义的操作函数初始化 sock。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">inet_create</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">protocol</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">list_head</span> <span style="color: rgb(184, 191, 198);">*p</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_protosw</span> <span style="color: rgb(184, 191, 198);">*answer</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_opt</span> <span style="color: rgb(184, 191, 198);">*inet</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-ENOBUFS</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sock-&gt;state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SS_UNCONNECTED</span>; <span style="color: rgb(218, 146, 74);">// sock 状态为未连接状态</span></p>
+<p><span style="color: rgb(184, 191, 198);">sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sk_alloc</span>(<span style="color: rgb(184, 191, 198);">PF_INET</span>, <span style="color: rgb(184, 191, 198);">GFP_KERNEL</span>, <span style="color: rgb(184, 191, 198);">inet_sk_size</span>(<span style="color: rgb(184, 191, 198);">protocol</span>),</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">inet_sk_slab</span>(<span style="color: rgb(184, 191, 198);">protocol</span>)); <span style="color: rgb(218, 146, 74);">// 分配Linux 内核底层 sock 结构，上层的socket结构为满足 bsd socket 规范，实际操作将由 sock 结构来完成</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!sk</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>​</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">list_for_each_rcu</span>(<span style="color: rgb(184, 191, 198);">p</span>, <span style="color: rgb(184, 191, 198);">&amp;inetsw</span>[<span style="color: rgb(184, 191, 198);">sock-&gt;type</span>]) { <span style="color: rgb(218, 146, 74);">// 遍历TCP/IP协议簇中的协议数组，找到传入 protocol 参数指定的协议</span></p>
+<p><span style="color: rgb(184, 191, 198);">answer</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">list_entry</span>(<span style="color: rgb(184, 191, 198);">p</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inet_protosw</span>, <span style="color: rgb(184, 191, 198);">list</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">protocol</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">answer-&gt;protocol</span>) { <span style="color: rgb(218, 146, 74);">// 精确匹配</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">protocol</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">IPPROTO_IP</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 默认情况下我们指定的 protocol 为 0 ，此时将使用 IPPROTO_IP（ IPPROTO_IP = 0 ） 对比，所以此时，将默认选取数组中的第一个协议：</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">IPPROTO_IP</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">protocol</span>) {</p>
+<p><span style="color: rgb(184, 191, 198);">protocol</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">answer-&gt;protocol</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>}</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">IPPROTO_IP</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">answer-&gt;protocol</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>}</p>
+<p><span style="color: rgb(184, 191, 198);">answer</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>}</p>
+<p>...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将协议中指定的 ops 赋值到sock 和 sk 结构中</span></p>
+<p><span style="color: rgb(184, 191, 198);">sock-&gt;ops</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">answer-&gt;ops</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_prot</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">answer-&gt;prot</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_no_check</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">answer-&gt;no_check</span>;</p>
+<p>...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sock_init_data</span>(<span style="color: rgb(184, 191, 198);">sock</span>, <span style="color: rgb(184, 191, 198);">sk</span>); <span style="color: rgb(218, 146, 74);">// 初始化 socket和sock数据</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 默认接收缓存区和发送缓冲区内存大小</span></p>
+<p><span style="color: rgb(184, 191, 198);">__u32</span> <span style="color: rgb(184, 191, 198);">sysctl_wmem_default</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SK_WMEM_MAX</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">__u32</span> <span style="color: rgb(184, 191, 198);">sysctl_rmem_default</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SK_RMEM_MAX</span>;</p>
+<p><span style="color: rgb(183, 179, 179);">#define SK_WMEM_MAX 65535</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define SK_RMEM_MAX 65535</span></p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">sock_init_data</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 初始化 sk 队列</span></p>
+<p><span style="color: rgb(184, 191, 198);">skb_queue_head_init</span>(<span style="color: rgb(184, 191, 198);">&amp;sk-&gt;sk_receive_queue</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">skb_queue_head_init</span>(<span style="color: rgb(184, 191, 198);">&amp;sk-&gt;sk_write_queue</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">skb_queue_head_init</span>(<span style="color: rgb(184, 191, 198);">&amp;sk-&gt;sk_error_queue</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">init_timer</span>(<span style="color: rgb(184, 191, 198);">&amp;sk-&gt;sk_timer</span>); <span style="color: rgb(218, 146, 74);">// 初始化 sk 计时器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 初始化 接收、发送、状态等信息并双向绑定 sock 与 sk（这里了解即可，在后面用到时我们还会回来看看这里的值）</span></p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_allocation</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">GFP_KERNEL</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_rcvbuf</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sysctl_rmem_default</span>; <span style="color: rgb(218, 146, 74);">// 接收队列</span></p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_sndbuf</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sysctl_wmem_default</span>; <span style="color: rgb(218, 146, 74);">// 发送队列</span></p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">TCP_CLOSE</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_zapped</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_socket</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span>(<span style="color: rgb(184, 191, 198);">sock</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_type</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock-&gt;type</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_sleep</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;sock-&gt;wait</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sock-&gt;sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sk</span>;</p>
+<p>} <span style="color: rgb(200, 143, 208);">else</span></p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_sleep</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_dst_lock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">RW_LOCK_UNLOCKED</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_callback_lock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">RW_LOCK_UNLOCKED</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_state_change</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_def_wakeup</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_data_ready</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_def_readable</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_write_space</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_def_write_space</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_error_report</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_def_error_report</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_destruct</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_def_destruct</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_peercred</span>.<span style="color: rgb(184, 191, 198);">pid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_peercred</span>.<span style="color: rgb(184, 191, 198);">uid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_peercred</span>.<span style="color: rgb(184, 191, 198);">gid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_rcvlowat</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_rcvtimeo</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">MAX_SCHEDULE_TIMEOUT</span>; <span style="color: rgb(218, 146, 74);">// 接收超时时间</span></p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_sndtimeo</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">MAX_SCHEDULE_TIMEOUT</span>; <span style="color: rgb(218, 146, 74);">// 发送超时时间</span></p>
+<p><span style="color: rgb(184, 191, 198);">sk-&gt;sk_owner</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">atomic_set</span>(<span style="color: rgb(184, 191, 198);">&amp;sk-&gt;sk_refcnt</span>, <span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>}</p>
+<p><strong>sock_map_fd 函数</strong></p>
+<p>该函数用于将 socket 映射到 file 结构，同时将file结构放入进程的file数组中，同时返回数组下标 fd（详细参考混沌学堂介绍）。</p>
+<p><span style="color: rgb(218, 146, 74);">// socket 文件操作函数指针结构</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file_operations</span> <span style="color: rgb(141, 141, 240);">socket_file_ops</span> <span style="color: rgb(184, 191, 198);">=</span> {</p>
+<p>.<span style="color: rgb(184, 191, 198);">owner</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">THIS_MODULE</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">llseek</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">no_llseek</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">aio_read</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_aio_read</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">aio_write</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_aio_write</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">poll</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_poll</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">ioctl</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_ioctl</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">mmap</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_mmap</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">open</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_no_open</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">release</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_close</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">fasync</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_fasync</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">readv</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_readv</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">writev</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_writev</span>,</p>
+<p>.<span style="color: rgb(184, 191, 198);">sendpage</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_sendpage</span></p>
+<p>};</p>
+<p>​</p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">sock_map_fd</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">qstr</span> <span style="color: rgb(141, 141, 240);">this</span>; <span style="color: rgb(218, 146, 74);">// 保存字符串信息，用于创建 dentry</span></p>
+<p><span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">name</span>[<span style="color: rgb(100, 171, 143);">32</span>];</p>
+<p><span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">get_unused_fd</span>(); <span style="color: rgb(218, 146, 74);">// 找到一个未使用的fd下标，用于存放 file 结构指针</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*file</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">get_empty_filp</span>(); <span style="color: rgb(218, 146, 74);">// 分配 file 结构</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!file</span>) {</p>
+<p><span style="color: rgb(184, 191, 198);">put_unused_fd</span>(<span style="color: rgb(184, 191, 198);">fd</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-ENFILE</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>}</p>
+<p><span style="color: rgb(184, 191, 198);">sprintf</span>(<span style="color: rgb(184, 191, 198);">name</span>, <span style="color: rgb(210, 107, 107);">"[%lu]"</span>, <span style="color: rgb(184, 191, 198);">SOCK_INODE</span>(<span style="color: rgb(184, 191, 198);">sock</span>)<span style="color: rgb(184, 191, 198);">-&gt;i_ino</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">this</span>.<span style="color: rgb(184, 191, 198);">name</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">name</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">this</span>.<span style="color: rgb(184, 191, 198);">len</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">strlen</span>(<span style="color: rgb(184, 191, 198);">name</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">this</span>.<span style="color: rgb(184, 191, 198);">hash</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SOCK_INODE</span>(<span style="color: rgb(184, 191, 198);">sock</span>)<span style="color: rgb(184, 191, 198);">-&gt;i_ino</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">file-&gt;f_dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">d_alloc</span>(<span style="color: rgb(184, 191, 198);">sock_mnt-&gt;mnt_sb-&gt;s_root</span>, <span style="color: rgb(184, 191, 198);">&amp;this</span>); <span style="color: rgb(218, 146, 74);">// 分配一个新的文件目录，并指定父目录为超级块的根目录</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!file-&gt;f_dentry</span>) {</p>
+<p><span style="color: rgb(184, 191, 198);">put_filp</span>(<span style="color: rgb(184, 191, 198);">file</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">put_unused_fd</span>(<span style="color: rgb(184, 191, 198);">fd</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-ENOMEM</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 初始化file结构属性，同时将file与socket绑定</span></p>
+<p><span style="color: rgb(184, 191, 198);">file-&gt;f_dentry-&gt;d_op</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;sockfs_dentry_operations</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">d_add</span>(<span style="color: rgb(184, 191, 198);">file-&gt;f_dentry</span>, <span style="color: rgb(184, 191, 198);">SOCK_INODE</span>(<span style="color: rgb(184, 191, 198);">sock</span>));</p>
+<p><span style="color: rgb(184, 191, 198);">file-&gt;f_vfsmnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">mntget</span>(<span style="color: rgb(184, 191, 198);">sock_mnt</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">sock-&gt;file</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">file</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">file-&gt;f_op</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SOCK_INODE</span>(<span style="color: rgb(184, 191, 198);">sock</span>)<span style="color: rgb(184, 191, 198);">-&gt;i_fop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;socket_file_ops</span>; <span style="color: rgb(218, 146, 74);">// 文件操作与inode操作初始化为 socket_file_ops</span></p>
+<p><span style="color: rgb(184, 191, 198);">file-&gt;f_mode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">3</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">file-&gt;f_flags</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">O_RDWR</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">file-&gt;f_pos</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">fd_install</span>(<span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(184, 191, 198);">file</span>); <span style="color: rgb(218, 146, 74);">// 将 file 结构放入到 fd 下标处</span></p>
+<p>}</p>
+<p><span style="color: rgb(184, 191, 198);">out</span>:</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// file 结构放入到 fd 下标</span></p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">fd_install</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">file</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">files_struct</span> <span style="color: rgb(184, 191, 198);">*files</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">current-&gt;files</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">spin_lock</span>(<span style="color: rgb(184, 191, 198);">&amp;files-&gt;file_lock</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">unlikely</span>(<span style="color: rgb(184, 191, 198);">files-&gt;fd</span>[<span style="color: rgb(184, 191, 198);">fd</span>] <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span>))</p>
+<p><span style="color: rgb(184, 191, 198);">BUG</span>();</p>
+<p><span style="color: rgb(184, 191, 198);">files-&gt;fd</span>[<span style="color: rgb(184, 191, 198);">fd</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">file</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">spin_unlock</span>(<span style="color: rgb(184, 191, 198);">&amp;files-&gt;file_lock</span>);</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理十 ThreadPerChannelEventLoopGroup原理</h1>
+<p>2022-03-08T09:56:02.699+0800</p>
+<p><p>ThreadPerChannelEventLoopGroup 将会为每一个通道创建一个自己的EventLoop实例，我们看到这种特性就是BIO的特性，当然我们在后面描述oio时将会用到该类。读者注意：该类在生产线上慎用（通常不用），因为无法利用NIO的特性，一个通道一个线程将会导致系统性能极度下降。</p>
+<p><strong>核心变量与构造器</strong></p>
+<p>通过变量的定义，很容易的理解到以下几点：</p>
+<ol>
+ <li>该类对于每个通道都使用一个EventLoop对象来处理</li>
+ <li>由于通道数可能非常大，这时可以通过设置maxChannels来限制并发的通道数</li>
+ <li>当通道数达到最大时，将会抛出ChannelException tooManyChannels异常</li>
+ <li>我们创建activeChildren和idleChildren来缓存EventLoop对象，提升性能</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ThreadPerChannelEventLoopGroup</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractEventExecutorGroup</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">EventLoopGroup</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">Object</span>[] <span style="color: rgb(184, 191, 198);">childArgs</span>; <span style="color: rgb(218, 146, 74);">// 传递给管理的EventLoop对象使用参数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxChannels</span>; <span style="color: rgb(218, 146, 74);">// 最大通道数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>; <span style="color: rgb(218, 146, 74);">// 执行器对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Set&lt;EventLoop&gt;</span> <span style="color: rgb(184, 191, 198);">activeChildren</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Collections</span>.<span style="color: rgb(184, 191, 198);">newSetFromMap</span>(<span style="color: rgb(184, 191, 198);">PlatformDependent</span>.<span style="color: rgb(184, 191, 198);">&lt;EventLoop</span>, <span style="color: rgb(28, 198, 133);">Boolean</span><span style="color: rgb(184, 191, 198);">&gt;newConcurrentHashMap</span>()); <span style="color: rgb(218, 146, 74);">// 管理活动的EventLoop对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Queue&lt;EventLoop&gt;</span> <span style="color: rgb(184, 191, 198);">idleChildren</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ConcurrentLinkedQueue&lt;EventLoop&gt;</span>(); <span style="color: rgb(218, 146, 74);">// 管理空闲的EventLoop对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ChannelException</span> <span style="color: rgb(184, 191, 198);">tooManyChannels</span>; <span style="color: rgb(218, 146, 74);">// 在通道数量超过最大通道数时抛出的异常对象</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">volatile</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">shuttingDown</span>; <span style="color: rgb(218, 146, 74);">// 是否处于 关闭中 状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Promise&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">terminationFuture</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultPromise&lt;</span><span style="color: rgb(28, 198, 133);">Void</span><span style="color: rgb(184, 191, 198);">&gt;</span>(<span style="color: rgb(184, 191, 198);">GlobalEventExecutor</span>.<span style="color: rgb(184, 191, 198);">INSTANCE</span>); <span style="color: rgb(218, 146, 74);">// 关闭结果Promise，调用方可以根据该对象来判断当前执行器组是否已经终止</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">FutureListener&lt;</span><span style="color: rgb(28, 198, 133);">Object</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">childTerminationListener</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">FutureListener&lt;</span><span style="color: rgb(28, 198, 133);">Object</span><span style="color: rgb(184, 191, 198);">&gt;</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">operationComplete</span>(<span style="color: rgb(184, 191, 198);">Future&lt;</span><span style="color: rgb(28, 198, 133);">Object</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">future</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isTerminated</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">terminationFuture</span>.<span style="color: rgb(184, 191, 198);">trySuccess</span>(<span style="color: rgb(132, 182, 203);">null</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}; <span style="color: rgb(218, 146, 74);">// EventLoop对象终止后回调的监听器</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造方法：设置maxChannels最大通道数为0，表示无限制</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">ThreadPerChannelEventLoopGroup</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造方法：设置maxChannels最大通道数为maxChannels，并提供了默认工厂函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">ThreadPerChannelEventLoopGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxChannels</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">maxChannels</span>, <span style="color: rgb(184, 191, 198);">Executors</span>.<span style="color: rgb(184, 191, 198);">defaultThreadFactory</span>());</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 构造方法：设置maxChannels最大通道数为maxChannels，并提供了默认执行器（每个任务创建一个线程来执行）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">ThreadPerChannelEventLoopGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxChannels</span>, <span style="color: rgb(184, 191, 198);">ThreadFactory</span> <span style="color: rgb(184, 191, 198);">threadFactory</span>, <span style="color: rgb(28, 198, 133);">Object</span>... <span style="color: rgb(184, 191, 198);">args</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>(<span style="color: rgb(184, 191, 198);">maxChannels</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ThreadPerTaskExecutor</span>(<span style="color: rgb(184, 191, 198);">threadFactory</span>), <span style="color: rgb(184, 191, 198);">args</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 完整构造器：对参数进行初始化</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">ThreadPerChannelEventLoopGroup</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxChannels</span>, <span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(28, 198, 133);">Object</span>... <span style="color: rgb(184, 191, 198);">args</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">maxChannels</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(<span style="color: rgb(28, 198, 133);">String</span>.<span style="color: rgb(184, 191, 198);">format</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"maxChannels: %d (expected: &gt;= 0)"</span>, <span style="color: rgb(184, 191, 198);">maxChannels</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">executor</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"executor"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">args</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">childArgs</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">EmptyArrays</span>.<span style="color: rgb(184, 191, 198);">EMPTY_OBJECTS</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">childArgs</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">args</span>.<span style="color: rgb(184, 191, 198);">clone</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">maxChannels</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">maxChannels</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">executor</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">executor</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tooManyChannels</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ThrowableUtil</span>.<span style="color: rgb(184, 191, 198);">unknownStackTrace</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ChannelException</span>(<span style="color: rgb(210, 107, 107);">"too many channels (max: "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">maxChannels</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">')'</span>),</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ThreadPerChannelEventLoopGroup</span>.<span style="color: rgb(200, 143, 208);">class</span>, <span style="color: rgb(210, 107, 107);">"nextChild()"</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法newChild原理</strong></p>
+<p>该方法将创建管理的EventLoop对象。可以看到创建的类型为ThreadPerChannelEventLoop对象。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(141, 141, 240);">newChild</span>(<span style="color: rgb(183, 179, 179);">@SuppressWarnings</span>(<span style="color: rgb(210, 107, 107);">"UnusedParameters"</span>) <span style="color: rgb(28, 198, 133);">Object</span>... <span style="color: rgb(184, 191, 198);">args</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ThreadPerChannelEventLoop</span>(<span style="color: rgb(200, 143, 208);">this</span>);</p>
+<p>}</p>
+<p><strong>核心方法next原理</strong></p>
+<p>由于该类对于每个通道都由一个EventLoop对象来执行，所以这里的next方法将不支持操作。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(141, 141, 240);">next</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">UnsupportedOperationException</span>();</p>
+<p>}</p>
+<p><strong>核心方法shutdownGracefully原理</strong></p>
+<p>该方法用于关闭事件循环组。流程如下：</p>
+<ol>
+ <li>设置shuttingDown为true，标识已经处于关闭中状态</li>
+ <li>关闭所有处于活动中的EventLoop</li>
+ <li>关闭所有空闲的EventLoop</li>
+ <li>如果此时状态已经变为终止状态，那么设置terminationFuture执行成功</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;</span> <span style="color: rgb(141, 141, 240);">shutdownGracefully</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">quietPeriod</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">shuttingDown</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>; <span style="color: rgb(218, 146, 74);">// 标识已经处于关闭中状态 </span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">l</span>: <span style="color: rgb(184, 191, 198);">activeChildren</span>) { <span style="color: rgb(218, 146, 74);">// 关闭所有处于活动中的EventLoop</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">l</span>.<span style="color: rgb(184, 191, 198);">shutdownGracefully</span>(<span style="color: rgb(184, 191, 198);">quietPeriod</span>, <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">unit</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">l</span>: <span style="color: rgb(184, 191, 198);">idleChildren</span>) { <span style="color: rgb(218, 146, 74);">// 关闭所有空闲的EventLoop</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">l</span>.<span style="color: rgb(184, 191, 198);">shutdownGracefully</span>(<span style="color: rgb(184, 191, 198);">quietPeriod</span>, <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">unit</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果此时状态已经变为终止状态，那么设置terminationFuture执行成功，那么此时调用方可以通过terminationFuture来获取终止状态</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isTerminated</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">terminationFuture</span>.<span style="color: rgb(184, 191, 198);">trySuccess</span>(<span style="color: rgb(132, 182, 203);">null</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">terminationFuture</span>();</p>
+<p>}</p>
+<p><strong>核心方法awaitTermination原理</strong></p>
+<p>该方法用于超时等待事件循环组终止。流程如下：</p>
+<ol>
+ <li>计算超时时间</li>
+ <li>遍历所有活动的EventLoop，调用他们的awaitTermination</li>
+ <li>遍历所有空闲的EventLoop，调用他们的awaitTermination</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">awaitTermination</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>)</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">deadline</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">unit</span>.<span style="color: rgb(184, 191, 198);">toNanos</span>(<span style="color: rgb(184, 191, 198);">timeout</span>); <span style="color: rgb(218, 146, 74);">// 计算超时时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">l</span>: <span style="color: rgb(184, 191, 198);">activeChildren</span>) { <span style="color: rgb(218, 146, 74);">// 遍历所有活动的EventLoop，调用他们的awaitTermination</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeLeft</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">deadline</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">timeLeft</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 检查是否超时</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">isTerminated</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">l</span>.<span style="color: rgb(184, 191, 198);">awaitTermination</span>(<span style="color: rgb(184, 191, 198);">timeLeft</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span>.<span style="color: rgb(184, 191, 198);">NANOSECONDS</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">l</span>: <span style="color: rgb(184, 191, 198);">idleChildren</span>) { <span style="color: rgb(218, 146, 74);">// 遍历所有空闲的EventLoop，调用他们的awaitTermination</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeLeft</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">deadline</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">timeLeft</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 检查是否超时</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">isTerminated</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">l</span>.<span style="color: rgb(184, 191, 198);">awaitTermination</span>(<span style="color: rgb(184, 191, 198);">timeLeft</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span>.<span style="color: rgb(184, 191, 198);">NANOSECONDS</span>)) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">isTerminated</span>();</p>
+<p>}</p>
+<p><strong>核心方法register原理</strong></p>
+<p>该系列方法将把传递进来的Channel通道注册到管理的EventLoop中。我们看到核心方法就是nextChild，该方法将返回一个可用的EventLoop，然后调用其register方法完成注册。只不过区别如下：</p>
+<ol>
+ <li>register(Channel channel)在注册时创建了一个DefaultChannelPromise对通道进行包装</li>
+ <li>register(ChannelPromise promise)直接将ChannelPromise 传递给l.register方法</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(141, 141, 240);">register</span>(<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">channel</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">channel</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"channel"</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">l</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nextChild</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">l</span>.<span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DefaultChannelPromise</span>(<span style="color: rgb(184, 191, 198);">channel</span>, <span style="color: rgb(184, 191, 198);">l</span>));</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">FailedChannelFuture</span>(<span style="color: rgb(184, 191, 198);">channel</span>, <span style="color: rgb(184, 191, 198);">GlobalEventExecutor</span>.<span style="color: rgb(184, 191, 198);">INSTANCE</span>, <span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(141, 141, 240);">register</span>(<span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">nextChild</span>().<span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">promise</span>);</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">t</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">promise</span>.<span style="color: rgb(184, 191, 198);">setFailure</span>(<span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">promise</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法nextChild原理</strong></p>
+<p>上面我们看到该方法将会返回一个可用的EventLoop。流程如下：</p>
+<ol>
+ <li>判断状态是否已经处于关闭中，此时将抛出任务拒绝异常</li>
+ <li>尝试从空闲的队列中获取EventLoop。如果获取失败，那么判断是否达到最大通道数，如果达到，那么抛出tooManyChannels异常，否则创建一个新的EventLoop将其添加到activeChildren活动对象集中，并返回该EventLoop</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(141, 141, 240);">nextChild</span>() <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">shuttingDown</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">RejectedExecutionException</span>(<span style="color: rgb(210, 107, 107);">"shutting down"</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">EventLoop</span> <span style="color: rgb(184, 191, 198);">loop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">idleChildren</span>.<span style="color: rgb(184, 191, 198);">poll</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">loop</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 获取失败</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">maxChannels</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">activeChildren</span>.<span style="color: rgb(184, 191, 198);">size</span>() <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">maxChannels</span>) { <span style="color: rgb(218, 146, 74);">// 检查是否达到最大通道限制</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(184, 191, 198);">tooManyChannels</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">loop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newChild</span>(<span style="color: rgb(184, 191, 198);">childArgs</span>); <span style="color: rgb(218, 146, 74);">// 创建新的EventLoop</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">loop</span>.<span style="color: rgb(184, 191, 198);">terminationFuture</span>().<span style="color: rgb(184, 191, 198);">addListener</span>(<span style="color: rgb(184, 191, 198);">childTerminationListener</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">activeChildren</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">loop</span>); <span style="color: rgb(218, 146, 74);">// 添加到活动集</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">loop</span>;</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

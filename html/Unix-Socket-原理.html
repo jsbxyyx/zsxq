@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Unix Socket 原理</h1>
+<p>2022-07-05T10:10:59.536+0800</p>
+<p><p>前面我们在分析Redis的ae事件模型和流程处理时，看到这样的代码。笔者也曾说过对于 unix socket 而言将不会涉及到内核网络栈，而仅仅只是在 Socket 接口基础上在内存中实现了进程间通讯，本文将详细介绍内核对于该进程通讯的实现过程，注意：读者需要具备C语言基础，至少得知道函数指针的意义。而又由于内核功能模块间互相耦合，即便通过函数指针来解耦，但是也存在着大量的函数指针，笔者将规避与unix socket不相关的功能模块，读者看到这些地方时，只需要了解输入和输出就好。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">anetUnixServer</span>(<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">path</span>, <span style="color: rgb(184, 191, 198);">mode_t</span> <span style="color: rgb(184, 191, 198);">perm</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">s</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_un</span> <span style="color: rgb(141, 141, 240);">sa</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">s</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">anetCreateSocket</span>(<span style="color: rgb(184, 191, 198);">err</span>,<span style="color: rgb(184, 191, 198);">AF_LOCAL</span>)) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>) <span style="color: rgb(218, 146, 74);">// 创建unix server socket</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">memset</span>(<span style="color: rgb(184, 191, 198);">&amp;sa</span>,<span style="color: rgb(100, 171, 143);">0</span>,<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">sa</span>));</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sa</span>.<span style="color: rgb(184, 191, 198);">sun_family</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">AF_LOCAL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">strncpy</span>(<span style="color: rgb(184, 191, 198);">sa</span>.<span style="color: rgb(184, 191, 198);">sun_path</span>,<span style="color: rgb(184, 191, 198);">path</span>,<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">sa</span>.<span style="color: rgb(184, 191, 198);">sun_path</span>)<span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">anetListen</span>(<span style="color: rgb(184, 191, 198);">err</span>,<span style="color: rgb(184, 191, 198);">s</span>,(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span><span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">&amp;sa</span>,<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">sa</span>)) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>) <span style="color: rgb(218, 146, 74);">// 开启监听</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">perm</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">chmod</span>(<span style="color: rgb(184, 191, 198);">sa</span>.<span style="color: rgb(184, 191, 198);">sun_path</span>, <span style="color: rgb(184, 191, 198);">perm</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">s</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">anetCreateSocket</span>(<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">domain</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">s</span>, <span style="color: rgb(184, 191, 198);">on</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">s</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">socket</span>(<span style="color: rgb(184, 191, 198);">domain</span>, <span style="color: rgb(184, 191, 198);">SOCK_STREAM</span>, <span style="color: rgb(100, 171, 143);">0</span>)) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>) { <span style="color: rgb(218, 146, 74);">// 调用系统调用 sys_socket 创建</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">anetSetError</span>(<span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(210, 107, 107);">"creating socket: %s"</span>, <span style="color: rgb(184, 191, 198);">strerror</span>(<span style="color: rgb(184, 191, 198);">errno</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">setsockopt</span>(<span style="color: rgb(184, 191, 198);">s</span>, <span style="color: rgb(184, 191, 198);">SOL_SOCKET</span>, <span style="color: rgb(184, 191, 198);">SO_REUSEADDR</span>, <span style="color: rgb(184, 191, 198);">&amp;on</span>, <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">on</span>)) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">anetSetError</span>(<span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(210, 107, 107);">"setsockopt SO_REUSEADDR: %s"</span>, <span style="color: rgb(184, 191, 198);">strerror</span>(<span style="color: rgb(184, 191, 198);">errno</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">s</span>;</p>
+<p>}</p>
+<p><strong>sys_socket 函数</strong></p>
+<p>该函数为创建socket的系统调用接口，family 用于指明协议簇，type 表示交互类型，通常我们指定 SOCK_STREAM 表示面向字节流的类型，protocol 表示套接字使用的特定协议，通常只存在一个协议来支持给定协议族中的特定套接字类型，在这种情况下，protocol可以指定为0。但是，在存在多种处理协议时，必须以protocol的方式指定特定的协议（TCP和Unix 我们都将其设置为0即可）。</p>
+<p>在Unix Socket中，我们看到 family 为 AF_LOCAL，type为SOCK_STREAM，protocol为0。通过源码得知，创建核心在于 sock_create(family, type, protocol, &amp;sock) 函数。</p>
+<p><span style="color: rgb(218, 146, 74);">// 内核 unix family的定义，AF_UNIX 与 AF_LOCAL 等价，只不过满足POSIX规范</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define AF_UNIX 1 </span><span style="color: rgb(218, 146, 74);">/* Unix domain sockets */</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define AF_LOCAL 1 </span><span style="color: rgb(218, 146, 74);">/* POSIX name for AF_UNIX */</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define PF_UNIX AF_UNIX </span><span style="color: rgb(218, 146, 74);">// PF_UNIX 等价于AF_UNIX</span></p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">asmlinkage</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">sys_socket</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">family</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">type</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">protocol</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">retval</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_create</span>(<span style="color: rgb(184, 191, 198);">family</span>, <span style="color: rgb(184, 191, 198);">type</span>, <span style="color: rgb(184, 191, 198);">protocol</span>, <span style="color: rgb(184, 191, 198);">&amp;sock</span>); <span style="color: rgb(218, 146, 74);">// 实际创建unix socket</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_map_fd</span>(<span style="color: rgb(184, 191, 198);">sock</span>); <span style="color: rgb(218, 146, 74);">// VFS 约定一切皆文件，所以需要将 socket 映射为fd 返回 </span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_release</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">out</span>:</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">retval</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">out_release</span>:</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sock_release</span>(<span style="color: rgb(184, 191, 198);">sock</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">retval</span>;</p>
+<p>}</p>
+<p><strong>sock_create 函数</strong></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">sock_create</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">family</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">type</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">protocol</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">**res</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 检查协议范围</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">family</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">family</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">NPROTO</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-EAFNOSUPPORT</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">type</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">type</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">SOCK_MAX</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-EINVAL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 检查协议兼容性</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">family</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">PF_INET</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">type</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">SOCK_PACKET</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">warned</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!warned</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">warned</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">printk</span>(<span style="color: rgb(184, 191, 198);">KERN_INFO</span> <span style="color: rgb(210, 107, 107);">"%s uses obsolete (PF_INET,SOCK_PACKET)\n"</span>, <span style="color: rgb(184, 191, 198);">current-&gt;comm</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">family</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">PF_PACKET</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">net_families</span>[<span style="color: rgb(184, 191, 198);">family</span>] <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>) { <span style="color: rgb(218, 146, 74);">// 若指定协议簇的net_proto_family不存在，那么退出</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EAFNOSUPPORT</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">sock</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_alloc</span>()))&nbsp;<span style="color: rgb(218, 146, 74);">// 分配一个socket（由于一切皆VFS，所以这里的socket其实就是 sock_mnt 挂载点分配Linux自身维护VFS的socket结构，此结构涉及到VFS相关，这里只需要知道它基于VFS的innode创建即可）</span></p>
+<p>&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">printk</span>(<span style="color: rgb(184, 191, 198);">KERN_WARNING</span> <span style="color: rgb(210, 107, 107);">"socket: no more sockets\n"</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-ENFILE</span>; <span style="color: rgb(218, 146, 74);">/* Not exactly a match, but its the</span></p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">closest posix thing */</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sock-&gt;type</span>&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">type</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">net_families</span>[<span style="color: rgb(184, 191, 198);">family</span>]<span style="color: rgb(184, 191, 198);">-&gt;create</span>(<span style="color: rgb(184, 191, 198);">sock</span>, <span style="color: rgb(184, 191, 198);">protocol</span>)) <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(218, 146, 74);">// 调用对应协议簇创建底层sock</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_module_put</span>;</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>AF_LOCAL 协议簇</strong></p>
+<p>至此我们看到实际调用协议簇的create方法完成sock的创建，这里我们研究AF_LOCAL，所以我们直接看AF_LOCAL的协议簇和它的create方法实现。</p>
+<p><span style="color: rgb(218, 146, 74);">// AF_LOCAL 也即 PF_UNIX 的协议簇定义</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">net_proto_family</span> <span style="color: rgb(141, 141, 240);">unix_family_ops</span> <span style="color: rgb(184, 191, 198);">=</span> {</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">family</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">PF_UNIX</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">create</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_create</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">owner</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">THIS_MODULE</span>,</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 定义了unix socket 的相关操作函数指针的赋值（对外统一提供Socket解耦，具体场景对其中的函数指针进行赋值操作）</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">proto_ops</span> <span style="color: rgb(141, 141, 240);">unix_stream_ops</span> <span style="color: rgb(184, 191, 198);">=</span> {</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">family</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">PF_UNIX</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">owner</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">THIS_MODULE</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">release</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_release</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">bind</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_bind</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">connect</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_stream_connect</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">socketpair</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_socketpair</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">accept</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_accept</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">getname</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_getname</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">poll</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_poll</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">ioctl</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_ioctl</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">listen</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_listen</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">shutdown</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_shutdown</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">setsockopt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_no_setsockopt</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">getsockopt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_no_getsockopt</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">sendmsg</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_stream_sendmsg</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">recvmsg</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_stream_recvmsg</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">mmap</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_no_mmap</span>,</p>
+<p>&nbsp;.<span style="color: rgb(184, 191, 198);">sendpage</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_no_sendpage</span>,</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// PF_UNIX协议簇 sock 创建方法 </span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">unix_create</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">protocol</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">protocol</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">protocol</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">PF_UNIX</span>) <span style="color: rgb(218, 146, 74);">// 只支持PF_UNIX，所以当我们指定protocol为0时，这里将不会检查protocol，将使用默认的PF_UNIX，且目前只存在PF_UNIX这一种协议</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-EPROTONOSUPPORT</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sock-&gt;state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SS_UNCONNECTED</span>; <span style="color: rgb(218, 146, 74);">// 初始状态为未连接状态</span></p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">switch</span> (<span style="color: rgb(184, 191, 198);">sock-&gt;type</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">SOCK_STREAM</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sock-&gt;ops</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;unix_stream_ops</span>; <span style="color: rgb(218, 146, 74);">// 注意：这里设置了sock的相关操作~</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 无奈之举：看解释，不管你信不信，BSD存在 AF_UNIX, SOCK_RAW 定义，尽管没有使用它</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/*</span></p>
+<p><span style="color: rgb(218, 146, 74);">* Believe it or not BSD has AF_UNIX, SOCK_RAW though</span></p>
+<p><span style="color: rgb(218, 146, 74);">* nothing uses it.</span></p>
+<p><span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">SOCK_RAW</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sock-&gt;type=SOCK_DGRAM</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">SOCK_DGRAM</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sock-&gt;ops</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;unix_dgram_ops</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">default</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-ESOCKTNOSUPPORT</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">unix_create1</span>(<span style="color: rgb(184, 191, 198);">sock</span>) <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(100, 171, 143);">0</span> : <span style="color: rgb(184, 191, 198);">-ENOMEM</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 完成进一步的数据填充</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">unix_create1</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 分配底层网络框架：sock结构</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">unix_sock</span> <span style="color: rgb(184, 191, 198);">*u</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">atomic_read</span>(<span style="color: rgb(184, 191, 198);">&amp;unix_nr_socks</span>) <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(100, 171, 143);">2</span><span style="color: rgb(184, 191, 198);">*files_stat</span>.<span style="color: rgb(184, 191, 198);">max_files</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sk_alloc</span>(<span style="color: rgb(184, 191, 198);">PF_UNIX</span>, <span style="color: rgb(184, 191, 198);">GFP_KERNEL</span>, <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">unix_sock</span>),</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unix_sk_cachep</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!sk</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">atomic_inc</span>(<span style="color: rgb(184, 191, 198);">&amp;unix_nr_socks</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 初始化sock相关数据</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">out</span>:</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">sk</span>;</p>
+<p>}</p>
+<p><strong>unix socket 绑定与监听过程</strong></p>
+<p>redis中我们看到当unix socket 创建过后，将调用如下代码完成unix server socket 的绑定和监听，我们来看看具体实现原理。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">anetUnixServer</span>(<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">path</span>, <span style="color: rgb(184, 191, 198);">mode_t</span> <span style="color: rgb(184, 191, 198);">perm</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">s</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_un</span> <span style="color: rgb(141, 141, 240);">sa</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">s</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">anetCreateSocket</span>(<span style="color: rgb(184, 191, 198);">err</span>,<span style="color: rgb(184, 191, 198);">AF_LOCAL</span>)) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">memset</span>(<span style="color: rgb(184, 191, 198);">&amp;sa</span>,<span style="color: rgb(100, 171, 143);">0</span>,<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">sa</span>));</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sa</span>.<span style="color: rgb(184, 191, 198);">sun_family</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">AF_LOCAL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">strncpy</span>(<span style="color: rgb(184, 191, 198);">sa</span>.<span style="color: rgb(184, 191, 198);">sun_path</span>,<span style="color: rgb(184, 191, 198);">path</span>,<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">sa</span>.<span style="color: rgb(184, 191, 198);">sun_path</span>)<span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>); <span style="color: rgb(218, 146, 74);">// 注意这个path的使用，这里传入的为sockaddr_un，但是将其强转为sockaddr指针</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">anetListen</span>(<span style="color: rgb(184, 191, 198);">err</span>,<span style="color: rgb(184, 191, 198);">s</span>,(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span><span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">&amp;sa</span>,<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">sa</span>)) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">perm</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">chmod</span>(<span style="color: rgb(184, 191, 198);">sa</span>.<span style="color: rgb(184, 191, 198);">sun_path</span>, <span style="color: rgb(184, 191, 198);">perm</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">s</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">anetListen</span>(<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">s</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> <span style="color: rgb(184, 191, 198);">*sa</span>, <span style="color: rgb(184, 191, 198);">socklen_t</span> <span style="color: rgb(184, 191, 198);">len</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">bind</span>(<span style="color: rgb(184, 191, 198);">s</span>,<span style="color: rgb(184, 191, 198);">sa</span>,<span style="color: rgb(184, 191, 198);">len</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">anetSetError</span>(<span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(210, 107, 107);">"bind: %s"</span>, <span style="color: rgb(184, 191, 198);">strerror</span>(<span style="color: rgb(184, 191, 198);">errno</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">close</span>(<span style="color: rgb(184, 191, 198);">s</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">listen</span>(<span style="color: rgb(184, 191, 198);">s</span>, <span style="color: rgb(100, 171, 143);">511</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">anetSetError</span>(<span style="color: rgb(184, 191, 198);">err</span>, <span style="color: rgb(210, 107, 107);">"listen: %s"</span>, <span style="color: rgb(184, 191, 198);">strerror</span>(<span style="color: rgb(184, 191, 198);">errno</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">close</span>(<span style="color: rgb(184, 191, 198);">s</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ANET_ERR</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ANET_OK</span>;</p>
+<p>}</p>
+<p><strong>sockaddr_un 与 sockaddr</strong></p>
+<p>这两个结构定义一样，只不过sockaddr_un用于指定unix socket 的路径名（深度理解下C语言的指针原理~）。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_un</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sa_family_t</span> <span style="color: rgb(184, 191, 198);">sun_family</span>; <span style="color: rgb(218, 146, 74);">/* AF_UNIX */</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">sun_path</span>[<span style="color: rgb(184, 191, 198);">UNIX_PATH_MAX</span>]; <span style="color: rgb(218, 146, 74);">/* pathname */</span></p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sa_family_t</span> <span style="color: rgb(184, 191, 198);">sa_family</span>; <span style="color: rgb(218, 146, 74);">/* address family, AF_xxx */</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">sa_data</span>[<span style="color: rgb(100, 171, 143);">14</span>]; <span style="color: rgb(218, 146, 74);">/* 14 bytes of protocol address */</span></p>
+<p>};</p>
+<p><strong>unix_stream_ops 之 unix_bind 绑定操作</strong></p>
+<p>该操作对于unix socket 而言，仅仅是创建接入VFS的innode，然后将自身放入hash表中。</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">unix_address</span></p>
+<p>{</p>
+<p><span style="color: rgb(184, 191, 198);">atomic_t</span> <span style="color: rgb(184, 191, 198);">refcnt</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">len</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(184, 191, 198);">hash</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_un</span> <span style="color: rgb(141, 141, 240);">name</span>[<span style="color: rgb(100, 171, 143);">0</span>];</p>
+<p>}; <span style="color: rgb(218, 146, 74);">// unix socket 的地址结构体</span></p>
+<p>​</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">unix_bind</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> <span style="color: rgb(184, 191, 198);">*uaddr</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">addr_len</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock-&gt;sk</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">unix_sock</span> <span style="color: rgb(184, 191, 198);">*u</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_sk</span>(<span style="color: rgb(184, 191, 198);">sk</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_un</span> <span style="color: rgb(184, 191, 198);">*sunaddr=</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_un</span> <span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">uaddr</span>;<span style="color: rgb(218, 146, 74);">// 强转为sockaddr_un</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">dentry</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>; <span style="color: rgb(218, 146, 74);">// Linux VFS 中使用 dentry 来维护文件的目录，所以socket也需要一个dentry结构 </span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">nameidata</span> <span style="color: rgb(141, 141, 240);">nd</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(184, 191, 198);">hash</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">unix_address</span> <span style="color: rgb(184, 191, 198);">*addr</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">hlist_head</span> <span style="color: rgb(184, 191, 198);">*list</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EINVAL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">sunaddr-&gt;sun_family</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">AF_UNIX</span>) <span style="color: rgb(218, 146, 74);">// 协议簇必须为 AF_UNIX</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">addr_len==</span><span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(28, 198, 133);">short</span>)) { <span style="color: rgb(218, 146, 74);">// 地址长度为short 2字节时，自动绑定</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_autobind</span>(<span style="color: rgb(184, 191, 198);">sock</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_mkname</span>(<span style="color: rgb(184, 191, 198);">sunaddr</span>, <span style="color: rgb(184, 191, 198);">addr_len</span>, <span style="color: rgb(184, 191, 198);">&amp;hash</span>);&nbsp;<span style="color: rgb(218, 146, 74);">// 校验 sun_path </span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addr_len</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addr</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">kmalloc</span>(<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">*addr</span>)<span style="color: rgb(184, 191, 198);">+addr_len</span>, <span style="color: rgb(184, 191, 198);">GFP_KERNEL</span>); <span style="color: rgb(218, 146, 74);">// 分配存放地址内存</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!addr</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_up</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将用户空间传入的信息填入 unix_address 结构</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">memcpy</span>(<span style="color: rgb(184, 191, 198);">addr-&gt;name</span>, <span style="color: rgb(184, 191, 198);">sunaddr</span>, <span style="color: rgb(184, 191, 198);">addr_len</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addr-&gt;len</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">addr_len</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addr-&gt;hash</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">hash</span> <span style="color: rgb(184, 191, 198);">^</span> <span style="color: rgb(184, 191, 198);">sk-&gt;sk_type</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">atomic_set</span>(<span style="color: rgb(184, 191, 198);">&amp;addr-&gt;refcnt</span>, <span style="color: rgb(100, 171, 143);">1</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">sunaddr-&gt;sun_path</span>[<span style="color: rgb(100, 171, 143);">0</span>]) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// path 路径存在，检测其父目录并创建对应的innode</span></p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">vfs_mknod</span>(<span style="color: rgb(184, 191, 198);">nd</span>.<span style="color: rgb(184, 191, 198);">dentry-&gt;d_inode</span>, <span style="color: rgb(184, 191, 198);">dentry</span>, <span style="color: rgb(184, 191, 198);">mode</span>, <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;}</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 为了快速找到该socket，这里将其放入到通过链地址法和数组组成的hash表中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">list</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;unix_socket_table</span>[<span style="color: rgb(184, 191, 198);">dentry-&gt;d_inode-&gt;i_ino</span> <span style="color: rgb(184, 191, 198);">&amp;</span> (<span style="color: rgb(184, 191, 198);">UNIX_HASH_SIZE-</span><span style="color: rgb(100, 171, 143);">1</span>)];</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">u-&gt;dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nd</span>.<span style="color: rgb(184, 191, 198);">dentry</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">u-&gt;mnt</span>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nd</span>.<span style="color: rgb(184, 191, 198);">mnt</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">__unix_insert_socket</span>(<span style="color: rgb(184, 191, 198);">list</span>, <span style="color: rgb(184, 191, 198);">sk</span>); <span style="color: rgb(218, 146, 74);">// 放入hash 表</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_up</span>;</p>
+<p>}</p>
+<p><strong>unix_stream_ops 之 unix_listen监听操作</strong></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">unix_listen</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">backlog</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock-&gt;sk</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">unix_sock</span> <span style="color: rgb(184, 191, 198);">*u</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_sk</span>(<span style="color: rgb(184, 191, 198);">sk</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EOPNOTSUPP</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">sock-&gt;type!=SOCK_STREAM</span>) <span style="color: rgb(218, 146, 74);">// 对于unix server socket 只支持流协议</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EINVAL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!u-&gt;addr</span>) <span style="color: rgb(218, 146, 74);">// 地址不存在直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unix_state_wlock</span>(<span style="color: rgb(184, 191, 198);">sk</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">sk-&gt;sk_state</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">TCP_CLOSE</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">sk-&gt;sk_state</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">TCP_LISTEN</span>) <span style="color: rgb(218, 146, 74);">// 状态必须为初始状态</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_unlock</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">backlog</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">sk-&gt;sk_max_ack_backlog</span>) <span style="color: rgb(218, 146, 74);">// 设置backlog 超过之前设置的大小，那么唤醒所有等待连接的其他unix socket 进程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wake_up_interruptible_all</span>(<span style="color: rgb(184, 191, 198);">&amp;u-&gt;peer_wait</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk-&gt;sk_max_ack_backlog</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">backlog</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk-&gt;sk_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">TCP_LISTEN</span>;</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>unix socket 连接过程</strong></p>
+<p>现在我们来看看客户端连接unix server socket的流程。我们看到这里其实就是校验server socket的接收队列是否超过设置的backlog长度，若超过那么根据timeo变量来选择是否阻塞当前进程，若没有超过，那么将新分配的服务端 socket 与客户端socket绑定，然后将新的服务端socket放入到接收队列中。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">unix_stream_connect</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr</span> <span style="color: rgb(184, 191, 198);">*uaddr</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">addr_len</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_un</span> <span style="color: rgb(184, 191, 198);">*sunaddr=</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sockaddr_un</span> <span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">uaddr</span>; <span style="color: rgb(218, 146, 74);">// server socket 地址，其实就是</span><a href="http://sun.path" target="_blank" style="color: rgb(218, 146, 74);">sun.path</a></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock-&gt;sk</span>; <span style="color: rgb(218, 146, 74);">// 客户端 sock</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">unix_sock</span> <span style="color: rgb(184, 191, 198);">*u</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_sk</span>(<span style="color: rgb(184, 191, 198);">sk</span>), <span style="color: rgb(184, 191, 198);">*newu</span>, <span style="color: rgb(184, 191, 198);">*otheru</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*newsk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>; <span style="color: rgb(218, 146, 74);">// new sock , 也即与当前 socket *sock 连接的 服务端socket</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*other</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>; <span style="color: rgb(218, 146, 74);">// server sock</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sk_buff</span> <span style="color: rgb(184, 191, 198);">*skb</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(184, 191, 198);">hash</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">st</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeo</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_mkname</span>(<span style="color: rgb(184, 191, 198);">sunaddr</span>, <span style="color: rgb(184, 191, 198);">addr_len</span>, <span style="color: rgb(184, 191, 198);">&amp;hash</span>); <span style="color: rgb(218, 146, 74);">// 校验path</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">addr_len</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newsk</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_create1</span>(<span style="color: rgb(184, 191, 198);">NULL</span>); <span style="color: rgb(218, 146, 74);">// 创建要给新的sock 完成连接，server socket 只是个接收连接的，而在服务端同样需要一个 socket 来接收连接，而这里的 newsk 就是这个socket</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">newsk</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">skb</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_wmalloc</span>(<span style="color: rgb(184, 191, 198);">newsk</span>, <span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">GFP_KERNEL</span>); <span style="color: rgb(218, 146, 74);">// 分配skb作为发送到server socket的数据载体，注意：由于这里根本没有数据，所以这里将 size 设置为 1</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">skb</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">other</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_find_other</span>(<span style="color: rgb(184, 191, 198);">sunaddr</span>, <span style="color: rgb(184, 191, 198);">addr_len</span>, <span style="color: rgb(184, 191, 198);">sk-&gt;sk_type</span>, <span style="color: rgb(184, 191, 198);">hash</span>, <span style="color: rgb(184, 191, 198);">&amp;err</span>); <span style="color: rgb(218, 146, 74);">// 根据路径信息找到server socket</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!other</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">other-&gt;sk_state</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">TCP_LISTEN</span>) <span style="color: rgb(218, 146, 74);">// 对端状态，必须为监听状态</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_unlock</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">skb_queue_len</span>(<span style="color: rgb(184, 191, 198);">&amp;other-&gt;sk_receive_queue</span>) <span style="color: rgb(184, 191, 198);">&gt;</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">other-&gt;sk_max_ack_backlog</span>) { <span style="color: rgb(218, 146, 74);">// server socket 队列长度超过设置的大小，那么根据timeo设置，看看是否需要阻塞当前进程，等待server socket慢慢消化需要连接的客户端socket</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EAGAIN</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!timeo</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_unlock</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">timeo</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_wait_for_peer</span>(<span style="color: rgb(184, 191, 198);">other</span>, <span style="color: rgb(184, 191, 198);">timeo</span>); <span style="color: rgb(218, 146, 74);">// 需要等待，等待时长由timeo指定</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sock_intr_errno</span>(<span style="color: rgb(184, 191, 198);">timeo</span>); <span style="color: rgb(218, 146, 74);">// 根据等待时长返回值来返回合适的错误值</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">signal_pending</span>(<span style="color: rgb(184, 191, 198);">current</span>)) <span style="color: rgb(218, 146, 74);">// 若当前进程有需要处理的信号，那么退出当前系统调用，让进程处理信号</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sock_put</span>(<span style="color: rgb(184, 191, 198);">other</span>); <span style="color: rgb(218, 146, 74);">// 如果 server socket 没有地方引用，则销毁 server socket ，然后重试</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">restart</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sock_hold</span>(<span style="color: rgb(184, 191, 198);">sk</span>); <span style="color: rgb(218, 146, 74);">// 增加客户端 socket 的引用</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unix_peer</span>(<span style="color: rgb(184, 191, 198);">newsk</span>) <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">sk</span>; <span style="color: rgb(218, 146, 74);">// 用新的socket 包含 当前客户端sk</span></p>
+<p>&nbsp;... <span style="color: rgb(218, 146, 74);">// 设置状态值</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newsk-&gt;sk_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">TCP_ESTABLISHED</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newsk-&gt;sk_type</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SOCK_STREAM</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newsk-&gt;sk_peercred</span>.<span style="color: rgb(184, 191, 198);">pid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">current-&gt;tgid</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newsk-&gt;sk_peercred</span>.<span style="color: rgb(184, 191, 198);">uid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">current-&gt;euid</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newsk-&gt;sk_peercred</span>.<span style="color: rgb(184, 191, 198);">gid</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">current-&gt;egid</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newu</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_sk</span>(<span style="color: rgb(184, 191, 198);">newsk</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newsk-&gt;sk_sleep</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;newu-&gt;peer_wait</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">otheru</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unix_sk</span>(<span style="color: rgb(184, 191, 198);">other</span>);</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将客户端socket 与 new socket 绑定</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unix_peer</span>(<span style="color: rgb(184, 191, 198);">sk</span>) <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newsk</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sock-&gt;state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">SS_CONNECTED</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">sk-&gt;sk_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">TCP_ESTABLISHED</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">__skb_queue_tail</span>(<span style="color: rgb(184, 191, 198);">&amp;other-&gt;sk_receive_queue</span>, <span style="color: rgb(184, 191, 198);">skb</span>); <span style="color: rgb(218, 146, 74);">// 将newsk 的 skb 信息放入到server socket的接收队列中，于是乎：server socket 就可以accept它了~</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>}</p>
+<p><strong>unix socket 接收连接过程</strong></p>
+<p>接收过程很简单，直接从server socket的接收队列中获取即可。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">unix_accept</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*sock</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">socket</span> <span style="color: rgb(184, 191, 198);">*newsock</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">skb</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">skb_recv_datagram</span>(<span style="color: rgb(184, 191, 198);">sk</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">flags&amp;O_NONBLOCK</span>, <span style="color: rgb(184, 191, 198);">&amp;err</span>);</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sk_buff</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">skb_recv_datagram</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">sock</span> <span style="color: rgb(184, 191, 198);">*sk</span>, <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(184, 191, 198);">flags</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">noblock</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">err</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">skb</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">skb_dequeue</span>(<span style="color: rgb(184, 191, 198);">&amp;sk-&gt;sk_receive_queue</span>); <span style="color: rgb(218, 146, 74);">// 直接从接收队列中出队即可（当然，这里忽略了若接收队列为空，那么将根据阻塞模式来选择等待或者返回）</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>}</p>
+<p><strong>总结</strong></p>
+<p>至此，我们发现：unix socket 只是利用了VFS 和网络栈框架在内存中模拟了网络通讯，事实上在server socket 与 socket之间的通讯，没有经过网络栈和任何协议处理，均是在socket 的 接收缓冲区与发送缓冲区、server socket的接收队列，在内存中传送数据。所以我们将unix socket通讯称之为 IPC 进程通讯的一种方式。</p>
+<p><br></p></p>
+</body>
+</html>

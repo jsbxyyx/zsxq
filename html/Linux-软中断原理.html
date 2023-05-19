@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux 软中断原理</h1>
+<p>2022-11-22T07:26:39.229+0800</p>
+<p><p>前面我们描述了 Linux 对于硬中断的处理原理：</p>
+<p>1、注册中断号对应的 irq_desc_t 描述符</p>
+<p>2、在描述符中添加 irqaction 回调结构</p>
+<p>3、硬中断发生时根据 CPU 提供的中断号，找到 irq_desc_t 数组中对应下标的 irq_desc_t 描述符</p>
+<p>4、循环调用该描述符上注册的中断处理函数（包含在 irqaction 结构中）</p>
+<p>本节我们将详细描述CPU 的软中断处理过程。我们知道硬中断的处理是需要关闭 CPU 的中断响应的，此时如果中断处理函数长时间占用CPU 处理时间，那么由于 CPU 不在响应任何中断，包括时钟中断、键盘、鼠标等等，那么将会让用户产生非常不好的体验：死机了。所以我们需要将一些处理下放到允许发生中断的上下文中执行，所以 Linux 将整个中断响应过程分为上下两部分：中断上半部（关闭硬中断处理）、中断下版本（也称之为软中断 softirq，此时可以响应硬中断）。</p>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">raise_softirq 函数</strong></h3>
+<p><br></p>
+<p>该函数用于在硬中断处理过程中，设置软中断标志位，表示后续需要在中断下半部中继续完成未完成的中断处理，其中nr为软中断的标志位，前面我们看到网卡的中断下半部 nr 为 NET_RX_SOFTIRQ（处理接收数据）、NET_TX_SOFTIRQ（处理发送数据）。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">raise_softirq(unsigned int nr)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> flags;
+ </div>
+ <div class="ql-code-block">
+  local_irq_save(flags); <span class="ql-token hljs-comment">// 关闭硬中断，保证原子性</span>
+ </div>
+ <div class="ql-code-block">
+  raise_softirq_irqoff(nr);
+ </div>
+ <div class="ql-code-block">
+  local_irq_restore(flags);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">raise_softirq_irqoff(unsigned int nr)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  __raise_softirq_irqoff(nr); <span class="ql-token hljs-comment">// 设置软中断标志位 nr 为 1，表示需要处理该位上的软中断</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!in_interrupt()) <span class="ql-token hljs-comment">// 若当前已经存在 软中断和硬中断 正在处理，那么直接退出（为何？因为我们根本无需启动 softirqd 内核线程（后面会说）或者自己处理软中断，因为它们会负责处理，中断上半部处理完成后，会回调软中断处理，软中断如果已经在处理 那么更不需要当前进程参与了）</span>
+ </div>
+ <div class="ql-code-block">
+  wakeup_softirqd(); <span class="ql-token hljs-comment">// 否则处理软中断【作者：黄俊 微信：bx_java】</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 将对应位设置为 1</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define __raise_softirq_irqoff(nr) do { local_softirq_pending() |= 1UL &lt;&lt; (nr); } while (0)</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define local_softirq_pending() softirq_pending(smp_processor_id())</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define softirq_pending(cpu) __IRQ_STAT((cpu), __softirq_pending)</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">int</span> __softirq_pending; <span class="ql-token hljs-comment">// 整形共 32 位，支持 最多 32 个 软中断标志位</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 判断当前是否已经在处理硬中断或者软中断</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define in_interrupt() (irq_count())</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define irq_count() (preempt_count() &amp; (HARDIRQ_MASK | SOFTIRQ_MASK))</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define preempt_count() (current_thread_info()-&gt;preempt_count)</span>
+ </div>
+ <div class="ql-code-block">
+  __s32 preempt_count; <span class="ql-token hljs-comment">// 带符号的整型变量，用于标识当前是否允许抢占、是否正在执行软中断和硬中断等，值必须大于0，值为 0 标识可以在内核态抢占执行（什么是内核抢占？后面文章描述），小于0 那么是 bug 值</span>
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">wakeup_softirqd 函数</strong></h3>
+<p><br></p>
+<p>该函数很简单，在 Linux 中 每个 CPU 都存在一个 内核线程 ksoftirqd，该内核线程将负责处理该CPU 上的软中断。为何需要存在该内核线程？考虑下，CPU 处理软中断 是不是 需要占用 被中断的进程的 内核态时间，如果长期占用，那么进程将不再执行任何用户代码，这个后果就不用我说了吧，所以 需要将该处理过程 剥离开，运行 软中断内核线程 与 应用进程 并发执行。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">wakeup_softirqd(void)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 获取当前 CPU 的 ksoftirqd 内核线程，若它不处于运行状态，那么唤醒【作者：黄俊 微信：bx_java】</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct task_struct *tsk =</span> __get_cpu_var(ksoftirqd);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (tsk &amp;&amp; tsk-&gt;state != TASK_RUNNING)
+ </div>
+ <div class="ql-code-block">
+  wake_up_process(tsk);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">ksoftirqd 内核线程的创建</strong></h3>
+<p><br></p>
+<p>创建过程非常明显：</p>
+<p>1、MASTER CPU 注册回调函数</p>
+<p>2、SLAVE CPU 启动时发布 CPU_ONLINE 事件，监听事件后创建 ksoftirqd 内核线程</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  asmlinkage <span class="ql-token hljs-type">void</span> __init <span class="ql-token hljs-title">start_kernel(void)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;rest_init(); &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">rest_init(void)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  kernel_thread(init, <span class="ql-token hljs-literal">NULL</span>, CLONE_KERNEL); <span class="ql-token hljs-comment">// 创建 init 1 号进程【作者：黄俊 微信：bx_java】</span>
+ </div>
+ <div class="ql-code-block">
+  unlock_kernel();
+ </div>
+ <div class="ql-code-block">
+  cpu_idle();
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">init(void * unused)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;smp_prepare_cpus(max_cpus);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">do_pre_smp_initcalls(void)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  spawn_ksoftirqd(); <span class="ql-token hljs-comment">// 创建当前 CPU 的 ksoftirqd 内核线程</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// CPU 启动时将会回调该通知块的 cpu_callback 函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-class">struct notifier_block __devinitdata cpu_nfb =</span> {
+ </div>
+ <div class="ql-code-block">
+  .notifier_call = cpu_callback
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  __init <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">spawn_ksoftirqd(void)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  cpu_callback(&amp;cpu_nfb, CPU_ONLINE, (<span class="ql-token hljs-type">void</span> *)(<span class="ql-token hljs-type">long</span>)smp_processor_id()); <span class="ql-token hljs-comment">// 注册当前 CPU 启动时的动作 CPU_ONLINE（后续会描述 SMP 对称多处理器的启动原理：MASTER 与 SLAVE）</span>
+ </div>
+ <div class="ql-code-block">
+  register_cpu_notifier(&amp;cpu_nfb);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 当前CPU启动时回调</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> __devinit <span class="ql-token hljs-title">cpu_callback(struct notifier_block *nfb,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> &nbsp;unsigned long action,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> &nbsp;void *hcpu)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> hotcpu = (<span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span>)hcpu;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (action == CPU_ONLINE) { <span class="ql-token hljs-comment">// 事件类型为 CPU_ONLINE ，那么创建 ksoftirqd 内核线程</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (kernel_thread(ksoftirqd, hcpu, CLONE_KERNEL) &lt; <span class="ql-token hljs-number">0</span>) {
+ </div>
+ <div class="ql-code-block">
+  printk(<span class="ql-token hljs-string">"ksoftirqd for %i failed\n"</span>, hotcpu);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> NOTIFY_BAD;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">while</span> (!per_cpu(ksoftirqd, hotcpu)) <span class="ql-token hljs-comment">// 等待 ksoftirqd 线程完成启动</span>
+ </div>
+ <div class="ql-code-block">
+  yield();
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> NOTIFY_OK;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">ksoftirqd 函数</strong></h3>
+<p><br></p>
+<p>该函数为 ksoftirqd 内核线程的执行函数。我们看到这里很简单：当存在软中断时，一直循环处理所有软中断，若不存在软中断可执行或者被设置抢占，那么释放 CPU 切换其他进程执行。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">ksoftirqd(void * __bind_cpu)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  __set_current_state(TASK_INTERRUPTIBLE); <span class="ql-token hljs-comment">// 设置 ksoftirqd 内核线程状态为 TASK_INTERRUPTIBLE（可中断唤醒注册），刚创建时，肯定为 该状态</span>
+ </div>
+ <div class="ql-code-block">
+  mb(); <span class="ql-token hljs-comment">// 保证状态对其他CPU可见，同时能够读取到后续变量的最新值，也避免了 编译器对当前代码的优化</span>
+ </div>
+ <div class="ql-code-block">
+  __get_cpu_var(ksoftirqd) = current; <span class="ql-token hljs-comment">// 设置当前结构为 ksoftirqd 处理函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">for</span> (;;) { <span class="ql-token hljs-comment">// 循环处理所有软中断，若不存在任何软中断，那么将自己设置为 TASK_INTERRUPTIBLE状态后 切换到其他进程执行，释放当前CPU的占用</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!local_softirq_pending()) <span class="ql-token hljs-comment">// 不存在软中断【作者：黄俊 微信：bx_java】</span>
+ </div>
+ <div class="ql-code-block">
+  schedule();
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  __set_current_state(TASK_RUNNING); <span class="ql-token hljs-comment">// 被唤醒后，设置状态为 运行状态</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">while</span> (local_softirq_pending()) { <span class="ql-token hljs-comment">// 循环处理所有挂起的软中断</span>
+ </div>
+ <div class="ql-code-block">
+  do_softirq(); <span class="ql-token hljs-comment">// 处理软中断</span>
+ </div>
+ <div class="ql-code-block">
+  cond_resched(); <span class="ql-token hljs-comment">// 每次执行完成后，看看是否被抢占执行了，也即设置 TIF_NEED_RESCHED 标志位，如果发生抢占，那么切换CPU使用权</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  __set_current_state(TASK_INTERRUPTIBLE); <span class="ql-token hljs-comment">// 处理完成后将自己设置为 可中断阻塞状态，当没有软中断执行时，切换 进程</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">do_softirq 函数</strong></h3>
+<p><br></p>
+<p>该函数我们之前在硬中断的处理末尾看到，同时也在 ksoftirqd 内核线程处理过程中看到。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define irq_exit() // 硬中断退出时，检测是否发生了软中断，若存在，那么借用当前进程的内核上下文去执行 软中断</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">do</span> {
+ </div>
+ <div class="ql-code-block">
+  preempt_count() -= IRQ_EXIT_OFFSET;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!in_interrupt() &amp;&amp; softirq_pending(smp_processor_id())) <span class="ql-token hljs-comment">// 硬中断与软中断没有在执行，同时当前 CPU的 软中断存在挂起的软中断，那么执行</span>
+ </div>
+ <div class="ql-code-block">
+  do_softirq();
+ </div>
+ <div class="ql-code-block">
+  preempt_enable_no_resched(); <span class="ql-token hljs-comment">// 开启内核抢占机制，但不检测抢占标志位 TIF_NEED_RESCHED【作者：黄俊 微信：bx_java】</span>
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">while</span> (<span class="ql-token hljs-number">0</span>)
+ </div>
+</div>
+<p>该函数的处理过程，很明显，读者自行查看如下描述。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define MAX_SOFTIRQ_RESTART 10 // 借用当前进程内核上下文处理软中断的最大次数，超过该次数将唤醒 ksoftirqd </span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  asmlinkage <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">do_softirq(void)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> max_restart = MAX_SOFTIRQ_RESTART;
+ </div>
+ <div class="ql-code-block">
+  __u32 pending;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> flags;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (in_interrupt()) <span class="ql-token hljs-comment">// 存在正在执行的软中断或者硬中断，那么退出（因为它们会负责处理软中断）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  local_irq_save(flags); <span class="ql-token hljs-comment">// 关闭硬中断保证操作的原子性</span>
+ </div>
+ <div class="ql-code-block">
+  pending = local_softirq_pending(); <span class="ql-token hljs-comment">// 获取当前挂起的软中断标志位 组合 整形变量【作者：黄俊 微信：bx_java】</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (pending) { <span class="ql-token hljs-comment">// 存在挂起的软中断，那么执行它们</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct softirq_action *h;</span>
+ </div>
+ <div class="ql-code-block">
+  local_bh_disable(); <span class="ql-token hljs-comment">// 关闭中断下版本，也即在 preempt_count 中设置 SOFTIRQ_OFFSET 位，此时后续进入软中断的进程调用 in_interrupt() 函数时，直接退出，保证软中断只有一个正在执行</span>
+ </div>
+ <div class="ql-code-block">
+  restart:
+ </div>
+ <div class="ql-code-block">
+  local_softirq_pending() = <span class="ql-token hljs-number">0</span>; <span class="ql-token hljs-comment">// 回复软中断处理变量，因为我们当前已经将原来的软中断处理位保存在当前内核栈上</span>
+ </div>
+ <div class="ql-code-block">
+  local_irq_enable(); <span class="ql-token hljs-comment">// local_softirq_pending已经保存了，那么我们只需要遍历执行即可，无需管其他进程是否在后续处理软中断过程中设置标志位，因为那是下一个软中断处理轮次了，所以此时放心的 开启硬中断（再一次表名了关闭硬中断保证原子性）</span>
+ </div>
+ <div class="ql-code-block">
+  h = softirq_vec; <span class="ql-token hljs-comment">// 获取设置的软中断处理函数数组</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">do</span> { <span class="ql-token hljs-comment">// 遍历所有待处理的软中断，回调它们的处理函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (pending &amp; <span class="ql-token hljs-number">1</span>)
+ </div>
+ <div class="ql-code-block">
+  h-&gt;action(h);
+ </div>
+ <div class="ql-code-block">
+  h++;
+ </div>
+ <div class="ql-code-block">
+  pending &gt;&gt;= <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">while</span> (pending);
+ </div>
+ <div class="ql-code-block">
+  local_irq_disable(); <span class="ql-token hljs-comment">// 处理完本轮次的软中断，那么再次关闭硬中断保证原子性</span>
+ </div>
+ <div class="ql-code-block">
+  pending = local_softirq_pending(); <span class="ql-token hljs-comment">// 获取下一轮次待处理的软中断</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (pending &amp;&amp; --max_restart) <span class="ql-token hljs-comment">// 若未到达最大次数且存在软中断，那么继续执行软中断</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> restart;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (pending) <span class="ql-token hljs-comment">// 否则唤醒 softirqd</span>
+ </div>
+ <div class="ql-code-block">
+  wakeup_softirqd();
+ </div>
+ <div class="ql-code-block">
+  __local_bh_enable(); <span class="ql-token hljs-comment">// 处理完成后 还原软中断的处理位，让其他进程得以处理后续发生的软中断</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  local_irq_restore(flags); <span class="ql-token hljs-comment">// 开启硬中断</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p></p>
+</body>
+</html>

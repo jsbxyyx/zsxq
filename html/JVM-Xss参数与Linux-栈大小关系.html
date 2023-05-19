@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>JVM Xss参数与Linux 栈大小关系</h1>
+<p>2022-04-12T09:44:51.287+0800</p>
+<p><p><strong>Xss参数设置</strong></p>
+<p>在JVM中，我们可以指定-Xss来设置JVM线程栈大小，该参数描述如下。在Java中存在着不同的类型的线程，而对于Xss来说，指的就是Java线程栈的大小，所以我们这里关心ThreadStackSize即可。</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">product_pd</span>(<span style="color: rgb(184, 191, 198);">intx</span>, <span style="color: rgb(184, 191, 198);">ThreadStackSize</span>,&nbsp;<span style="color: rgb(210, 107, 107);">"Thread Stack Size (in Kbytes)"</span>)&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// java 线程栈大小</span></p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">product_pd</span>(<span style="color: rgb(184, 191, 198);">intx</span>, <span style="color: rgb(184, 191, 198);">VMThreadStackSize</span>,&nbsp;<span style="color: rgb(210, 107, 107);">"Non-Java Thread Stack Size (in Kbytes)"</span>)&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// vmthread线程栈大小&nbsp;&nbsp;</span></p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">product_pd</span>(<span style="color: rgb(184, 191, 198);">intx</span>, <span style="color: rgb(184, 191, 198);">CompilerThreadStackSize</span>,<span style="color: rgb(210, 107, 107);">"Compiler Thread Stack Size (in Kbytes)"</span>) <span style="color: rgb(218, 146, 74);">// 编译线程栈大小</span></p>
+<p>&nbsp;</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">// x86 平台上，上述参数定义如下，0表示使用操作系统默认的线程栈大小</span></p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">define_pd_global</span>(<span style="color: rgb(184, 191, 198);">intx</span>, <span style="color: rgb(184, 191, 198);">ThreadStackSize</span>,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">1024</span>);</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">define_pd_global</span>(<span style="color: rgb(184, 191, 198);">intx</span>, <span style="color: rgb(184, 191, 198);">VMThreadStackSize</span>,&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">1024</span>);</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">define_pd_global</span>(<span style="color: rgb(184, 191, 198);">intx</span>, <span style="color: rgb(184, 191, 198);">CompilerThreadStackSize</span>,&nbsp;<span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>以下代码为Thread的初始化和启动代码，我们看到在Thread类中包含stackSize栈大小属性，通常我们设置其为0，让虚拟机来设置它的大小。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">Thread</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Runnable</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">stackSize</span>; <span style="color: rgb(218, 146, 74);">// 设置当前线程栈的大小，注意：只是给JVM一个提示，JVM可以选择使用或者忽略该参数</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Thread</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">target</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">init</span>(<span style="color: rgb(132, 182, 203);">null</span>, <span style="color: rgb(184, 191, 198);">target</span>, <span style="color: rgb(210, 107, 107);">"Thread-"</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">nextThreadNum</span>(), <span style="color: rgb(100, 171, 143);">0</span>); <span style="color: rgb(218, 146, 74);">// 使用默认线程栈大小为0</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">init</span>(<span style="color: rgb(184, 191, 198);">ThreadGroup</span> <span style="color: rgb(184, 191, 198);">g</span>, <span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">target</span>, <span style="color: rgb(28, 198, 133);">String</span> <span style="color: rgb(184, 191, 198);">name</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">stackSize</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">init</span>(<span style="color: rgb(184, 191, 198);">g</span>, <span style="color: rgb(184, 191, 198);">target</span>, <span style="color: rgb(184, 191, 198);">name</span>, <span style="color: rgb(184, 191, 198);">stackSize</span>, <span style="color: rgb(132, 182, 203);">null</span>, <span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">native</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">start0</span>(); <span style="color: rgb(218, 146, 74);">// JNI 启动当前线程</span></p>
+<p>}</p>
+<p>我们这里主要关心start0 JNI方法即可，因为线程将会通过其创建OS的线程，然后设置其参数。通过源码我们看到：在JVM层面Java的Thread将由C++的JavaThread类来表示，同时将stackSize的值传入到JavaThread的构造器中创建线程，该值默认为0。</p>
+<p><span style="color: rgb(184, 191, 198);">JVM_ENTRY</span>(<span style="color: rgb(28, 198, 133);">void</span>, <span style="color: rgb(184, 191, 198);">JVM_StartThread</span>(<span style="color: rgb(184, 191, 198);">JNIEnv*</span> <span style="color: rgb(184, 191, 198);">env</span>, <span style="color: rgb(184, 191, 198);">jobject</span> <span style="color: rgb(184, 191, 198);">jthread</span>))</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">JavaThread</span> <span style="color: rgb(184, 191, 198);">*native_thread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>; <span style="color: rgb(218, 146, 74);">// 保存表示Thread的JavaThread C++对象</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">java_lang_Thread::thread</span>(<span style="color: rgb(184, 191, 198);">JNIHandles::resolve_non_null</span>(<span style="color: rgb(184, 191, 198);">jthread</span>)) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span>) { <span style="color: rgb(218, 146, 74);">// 检测线程当前状态</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">throw_illegal_thread_state</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">jlong</span> <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">java_lang_Thread::stackSize</span>(<span style="color: rgb(184, 191, 198);">JNIHandles::resolve_non_null</span>(<span style="color: rgb(184, 191, 198);">jthread</span>)); <span style="color: rgb(218, 146, 74);">// 获取Thread类中stackSize变量值</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">size_t</span> <span style="color: rgb(184, 191, 198);">sz</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">?</span> (<span style="color: rgb(28, 198, 133);">size_t</span>) <span style="color: rgb(184, 191, 198);">size</span> : <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(218, 146, 74);">// 若为0或者负数，那么取默认值0</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">native_thread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">JavaThread</span>(<span style="color: rgb(184, 191, 198);">&amp;thread_entry</span>, <span style="color: rgb(184, 191, 198);">sz</span>); <span style="color: rgb(218, 146, 74);">// 创建JavaThread对象，thread_entry为启动函数入口，线程创建后将会调用该函数指针的代码，这里了解即可，注意：我们在分析Xss的作用</span></p>
+<p>&nbsp;&nbsp;...</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">JVM_END</span></p>
+<p>这里我们继续跟进JavaThread的创建过程，读者注意：不需要看懂C++语法，跟着注释走即可。通过源码我们得知：</p>
+<ol>
+ <li>JavaThread仅仅表示JVM中的线程数据，而对于实际操作来说，需要创建操作系统级别的线程（LWP轻量级进程）来实现，所以这里使用os::create_thread来创建OS的线程</li>
+ <li>OSThread C++对象用于表示操作系统线程的属性</li>
+ <li>我们使用pthread线程库来创建线程，Java线程在64位机上的默认值为1M，而对与Java线程来说，还可以 通过JavaThread::stack_size_at_create()来改变默认值</li>
+</ol>
+<p><span style="color: rgb(141, 141, 240);">JavaThread::JavaThread</span>(<span style="color: rgb(184, 191, 198);">ThreadFunction</span> <span style="color: rgb(184, 191, 198);">entry_point</span>, <span style="color: rgb(28, 198, 133);">size_t</span> <span style="color: rgb(184, 191, 198);">stack_sz</span>) :<span style="color: rgb(184, 191, 198);">Thread</span>(){</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">os::create_thread</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">thr_type</span>, <span style="color: rgb(184, 191, 198);">stack_sz</span>);</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">bool</span> <span style="color: rgb(141, 141, 240);">os::create_thread</span>(<span style="color: rgb(184, 191, 198);">Thread*</span> <span style="color: rgb(184, 191, 198);">thread</span>, <span style="color: rgb(184, 191, 198);">ThreadType</span> <span style="color: rgb(184, 191, 198);">thr_type</span>, <span style="color: rgb(28, 198, 133);">size_t</span> <span style="color: rgb(184, 191, 198);">stack_size</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">OSThread*</span> <span style="color: rgb(184, 191, 198);">osthread</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">OSThread</span>(<span style="color: rgb(184, 191, 198);">NULL</span>, <span style="color: rgb(184, 191, 198);">NULL</span>); <span style="color: rgb(218, 146, 74);">// 创建OSThread，表示一个操作系统级别的线程属性</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// pthread线程库中用于设置线程属性的结构体，这里将其初始化</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_attr_t</span> <span style="color: rgb(184, 191, 198);">attr</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_attr_init</span>(<span style="color: rgb(184, 191, 198);">&amp;attr</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">os::Linux::supports_variable_stack_size</span>()) { <span style="color: rgb(218, 146, 74);">// 判断OS是否支持可变栈大小（OS可以对栈进行扩容），现在的Linux内核都支持该属性，所以看该分支即可</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">stack_size</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 若栈大小为0，那么使用操作系统默认的栈大小作为默认值（size_t s = (thr_type == os::compiler_thread ? 4 * M : 1 * M)，编译线程默认为4M，Java线程默认为1M）</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">stack_size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">os::Linux::default_stack_size</span>(<span style="color: rgb(184, 191, 198);">thr_type</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">switch</span> (<span style="color: rgb(184, 191, 198);">thr_type</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">os::java_thread</span>: <span style="color: rgb(218, 146, 74);">// 这里我们关注Java线程即可，上面我们看到设置了默认值1M，但这里，我们可以使用stack_size_at_create方法来看看Xss设置的值，该方法将返回：_stack_size_at_create的值</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">stack_size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">JavaThread::stack_size_at_create</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">os::compiler_thread</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">os::vm_thread</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">os::pgc_thread</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">os::cgc_thread</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">os::watcher_thread</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将计算好的栈大小放入pthread_attr中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">stack_size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">MAX2</span>(<span style="color: rgb(184, 191, 198);">stack_size</span>, <span style="color: rgb(184, 191, 198);">os::Linux::min_stack_allowed</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pthread_attr_setstacksize</span>(<span style="color: rgb(184, 191, 198);">&amp;attr</span>, <span style="color: rgb(184, 191, 198);">stack_size</span>);</p>
+<p>} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 若不支持可变栈大小，那么让 pthread_create() 使用其默认固定值</span></p>
+<p>}</p>
+<p>...</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">pthread_create</span>(<span style="color: rgb(184, 191, 198);">&amp;tid</span>, <span style="color: rgb(184, 191, 198);">&amp;attr</span>, (<span style="color: rgb(28, 198, 133);">void*</span> (<span style="color: rgb(184, 191, 198);">*</span>)(<span style="color: rgb(28, 198, 133);">void*</span>)) <span style="color: rgb(184, 191, 198);">java_start</span>, <span style="color: rgb(184, 191, 198);">thread</span>); <span style="color: rgb(218, 146, 74);">// 调用pthread线程库创建线程，java_start为线程启动后执行的函数入口</span></p>
+<p>...</p>
+<p>}</p>
+<p>那么，现在问题的关键就是_stack_size_at_create的值由谁来设置的。我们来看过程：由ThreadStackSize计算的栈大小，然后将其对齐到最近的操作系统页大小，设置即可。</p>
+<p><span style="color: rgb(28, 198, 133);">size_t</span> <span style="color: rgb(184, 191, 198);">threadStackSizeInBytes</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ThreadStackSize</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">K</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">JavaThread::set_stack_size_at_create</span>(<span style="color: rgb(184, 191, 198);">round_to</span>(<span style="color: rgb(184, 191, 198);">threadStackSizeInBytes</span>,<span style="color: rgb(184, 191, 198);">vm_page_size</span>()));</p>
+<p>那么又来一个问题：Xss什么时候被转换设置的呢？来看代码。这下很明了了，Xss的值最终设置为ThreadStackSize变量即可。</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">match_option</span>(<span style="color: rgb(184, 191, 198);">option</span>, <span style="color: rgb(210, 107, 107);">"-Xss"</span>, <span style="color: rgb(184, 191, 198);">&amp;tail</span>)) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">julong</span> <span style="color: rgb(184, 191, 198);">long_ThreadStackSize</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ArgsRange</span> <span style="color: rgb(184, 191, 198);">errcode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">parse_memory_size</span>(<span style="color: rgb(184, 191, 198);">tail</span>, <span style="color: rgb(184, 191, 198);">&amp;long_ThreadStackSize</span>, <span style="color: rgb(100, 171, 143);">1000</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">errcode</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">arg_in_range</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">jio_fprintf</span>(<span style="color: rgb(184, 191, 198);">defaultStream::error_stream</span>(),</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"Invalid thread stack size: %s\n"</span>, <span style="color: rgb(184, 191, 198);">option-&gt;optionString</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">describe_range_error</span>(<span style="color: rgb(184, 191, 198);">errcode</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">JNI_EINVAL</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将xss后面设置的值设置为ThreadStackSize</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">FLAG_SET_CMDLINE</span>(<span style="color: rgb(184, 191, 198);">intx</span>, <span style="color: rgb(184, 191, 198);">ThreadStackSize</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">round_to</span>((<span style="color: rgb(28, 198, 133);">int</span>)<span style="color: rgb(184, 191, 198);">long_ThreadStackSize</span>, <span style="color: rgb(184, 191, 198);">K</span>) <span style="color: rgb(184, 191, 198);">/</span> <span style="color: rgb(184, 191, 198);">K</span>);</p>
+<p>}</p>
+<p><strong>小结</strong></p>
+<p>至此，我们看到在Java层面Xss最终设置为ThreadStackSize全局变量，随后，栈的大小将会通过pthread线程库的pthread_attr_t结构传入到pthread线程库中创建线程。【作者：黄俊，微信联系：bx_java】</p>
+<p><strong>Pthread_Create 栈设置</strong></p>
+<p>通过pthread的线程创建源码我们看到：若调用方没有在pthread_attr_t中设置线程栈大小，那么将会取默认值，该值默认为rlimit中设置的值，比如：8M，若设置了线程栈，那么将取该线程栈大小。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">__pthread_create_2_1</span> (<span style="color: rgb(184, 191, 198);">pthread_t</span> <span style="color: rgb(184, 191, 198);">*newthread</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(184, 191, 198);">pthread_attr_t</span> <span style="color: rgb(184, 191, 198);">*attr</span>, <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span>(<span style="color: rgb(184, 191, 198);">*start_routine</span>) (<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span>), <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">arg</span>){</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pthread_attr</span> <span style="color: rgb(184, 191, 198);">*iattr</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pthread_attr</span> <span style="color: rgb(184, 191, 198);">*</span>) <span style="color: rgb(184, 191, 198);">attr</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ALLOCATE_STACK</span> (<span style="color: rgb(184, 191, 198);">iattr</span>, <span style="color: rgb(184, 191, 198);">&amp;pd</span>); <span style="color: rgb(218, 146, 74);">// 分配线程栈</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">create_thread</span> (<span style="color: rgb(184, 191, 198);">pd</span>, <span style="color: rgb(184, 191, 198);">iattr</span>, <span style="color: rgb(184, 191, 198);">&amp;stopped_start</span>,<span style="color: rgb(184, 191, 198);">STACK_VARIABLES_ARGS</span>, <span style="color: rgb(184, 191, 198);">&amp;thread_ran</span>); <span style="color: rgb(218, 146, 74);">// 创建线程</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(183, 179, 179);"># define ALLOCATE_STACK(attr, pd) allocate_stack (attr, pd, &amp;stackaddr) </span><span style="color: rgb(218, 146, 74);">// 创建线程栈</span></p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">allocate_stack</span> (<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pthread_attr</span> <span style="color: rgb(184, 191, 198);">*attr</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pthread</span> <span style="color: rgb(184, 191, 198);">**pdp</span>, <span style="color: rgb(184, 191, 198);">ALLOCATE_STACK_PARMS</span>) {</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">attr-&gt;stacksize</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(218, 146, 74);">// 线程栈不为0，那么取设置过后的线程栈大小</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">attr-&gt;stacksize</span>;</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">else</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">__default_pthread_attr</span>.<span style="color: rgb(184, 191, 198);">stacksize</span>; <span style="color: rgb(218, 146, 74);">// 若为0，那么取默认值</span></p>
+<p>...</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">// 检查栈大小，若栈太小，那么返回EINVAL</span></p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">guardsize</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">attr-&gt;guardsize</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">pagesize_m1</span>) <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">~pagesize_m1</span>;</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">guardsize</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">attr-&gt;guardsize</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">guardsize</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">guardsize</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">EINVAL</span>;</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">+=</span> <span style="color: rgb(184, 191, 198);">guardsize</span>;</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">__builtin_expect</span> (<span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">&lt;</span> ((<span style="color: rgb(184, 191, 198);">guardsize</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">__static_tls_size</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">MINIMAL_REST_STACK</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">pagesize_m1</span>)</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">~pagesize_m1</span>),<span style="color: rgb(100, 171, 143);">0</span>))</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">/* The stack is too small (or the guard too large). */</span></p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">EINVAL</span>;</p>
+<p>...</p>
+<p>&nbsp;<span style="color: rgb(218, 146, 74);">// 通过mmap创建线程栈(读者考虑下:如果线程栈设置过大怎么办？超过了rlimit，毕竟我们这里没有检测，答案必然是在内核中检测咯：if (address - vma-&gt;vm_start &gt; current-&gt;rlim[RLIMIT_STACK].rlim_cur) return -ENOMEM )</span></p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">mem</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">__mmap</span> (<span style="color: rgb(184, 191, 198);">NULL</span>, <span style="color: rgb(184, 191, 198);">size</span>, (<span style="color: rgb(184, 191, 198);">guardsize</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">prot</span> : <span style="color: rgb(184, 191, 198);">PROT_NONE</span>,<span style="color: rgb(184, 191, 198);">MAP_PRIVATE</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">MAP_ANONYMOUS</span> <span style="color: rgb(184, 191, 198);">|</span> <span style="color: rgb(184, 191, 198);">MAP_STACK</span>, <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 初始化默认线程属性</span></p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">__pthread_initialize_minimal_internal</span> (<span style="color: rgb(28, 198, 133);">void</span>){</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">rlimit</span> <span style="color: rgb(141, 141, 240);">limit</span>; <span style="color: rgb(218, 146, 74);">// 获取OS的限制值</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">__getrlimit</span> (<span style="color: rgb(184, 191, 198);">RLIMIT_STACK</span>, <span style="color: rgb(184, 191, 198);">&amp;limit</span>) <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">limit</span>.<span style="color: rgb(184, 191, 198);">rlim_cur</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">RLIM_INFINITY</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">limit</span>.<span style="color: rgb(184, 191, 198);">rlim_cur</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ARCH_STACK_DEFAULT_SIZE</span>;&nbsp;<span style="color: rgb(218, 146, 74);">// 没有限制，那么取默认值：(2 * 1024 * 1024) 2MB</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">limit</span>.<span style="color: rgb(184, 191, 198);">rlim_cur</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">PTHREAD_STACK_MIN</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">limit</span>.<span style="color: rgb(184, 191, 198);">rlim_cur</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">PTHREAD_STACK_MIN</span>;&nbsp;<span style="color: rgb(218, 146, 74);">// 限制过小，那么取最小值：PTHREAD_STACK_MIN 16384 K</span></p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">__default_pthread_attr</span>.<span style="color: rgb(184, 191, 198);">stacksize</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">limit</span>.<span style="color: rgb(184, 191, 198);">rlim_cur</span>; <span style="color: rgb(218, 146, 74);">// 设置pthread线程的默认栈大小</span></p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>总结</strong></p>
+<p>Xss和rlimit RLIMIT_STACK的关系：</p>
+<ol>
+ <li>Xss为JVM自身的设置属性（对于JVM而言，栈也是按需分配的，只不过最大为Xss指定值）</li>
+ <li>RLIMIT_STACK为Linux对于线程栈的最大限制（对于Linux而言，线程栈是可以自动浮动扩容的，最大值为RLIMIT_STACK）</li>
+ <li>所以得出结论：Xss是在操作系统的rlimit上的进一步约束</li>
+</ol>
+<p><br></p></p>
+</body>
+</html>

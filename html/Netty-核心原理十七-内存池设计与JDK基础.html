@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理十七 内存池设计与JDK基础</h1>
+<p>2022-04-09T18:32:05.536+0800</p>
+<p><p>本节将详细描述如下原理：</p>
+<ol>
+ <li>内存类型</li>
+ <li>Buffer原理</li>
+ <li>ByteBuffer原理</li>
+ <li>ByteBuf原理</li>
+</ol>
+<p><strong>内存类型</strong></p>
+<p>在Java中，我们知道：</p>
+<ol>
+ <li>JVM属于运行在OS上的一个进程</li>
+ <li>进程拥有自己的：代码段、数据段、堆、堆栈</li>
+ <li>这时我们称JVM的堆为C-Heap（C堆），注意：这是JVM进程的原生堆内存</li>
+ <li>为了满足JVM对自身对象的支持，这时我们从JVM原生的C-Heap（C堆）中创建一片内存Java-Heap（Java堆），用于存放Java的对象Oop（普通对象指针，在研究JVM时，我们看到Oop就是Java的对象，了解即可）</li>
+ <li>这时，我们就可以定义：堆外内存（C-Heap）、堆内内存（Java-Heap）</li>
+</ol>
+<p>在Java中我们可以使用byte[]数组来表示堆内内存，使用DirectByteBuffer来表示堆外内存，为了满足Java NIO模型，那么这时，那么这时我们使用Buffer作为NIO 缓冲区的根类来包装byte[]数组与DirectByteBuffer，事实上读者可以在后面看到，实际对于堆外内存的控制，将通过Unsafe类来完成操作，因为对于堆外内存来说，不属于Java-Heap部分，与GC无关，将会存在内存泄漏的风险，所以将其定义到Unsafe类中。</p>
+<p><strong>Buffer原理</strong></p>
+<p>我们说在NIO模型中，使用Buffer抽象类来包装堆内内存byte[]数组和堆外内存Unsafe类分配的C-Heap内存。那么本节来看下Buffer类及其子类如何包装这两个不同的内存，同时又是如何调用Unsafe类来完成C-Heap的分配。</p>
+<p><strong>Buffer原理</strong></p>
+<p>通过源码我们得知如下信息：</p>
+<ol>
+ <li>使用capacity表示实际内存（读者注意：不管是堆外内存和堆内内存，他们有一个共同点，那就是均为数组，所以我们这里将其作为数组看待）的容量</li>
+ <li>使用position表示当前操作的实际内存的数组下标</li>
+ <li>使用limit表示当前操作的下标限制，比如：我们可以定义position为0，limit为5，限制当前读取或者写入操作最大下标</li>
+ <li>使用mark标记当前处理的position位置，便于在后面我们可以通过mark标记位将position的位置还原</li>
+ <li>使用address表示在使用C-Heap时保存数组的首地址</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">Buffer</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 关系: mark &lt;= position &lt;= limit &lt;= capacity</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mark</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">position</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">limit</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">capacity</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">address</span>; <span style="color: rgb(218, 146, 74);">// 包装C-Heap时使用</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 反转position与limit：将position置0，然后将当前position的位置设置为limit的值。如何用？初始时：limit等于capacity，position为0，那么我可以从0下标开始写，然后写入的最大长度为capacity，比如我们写了5，那么这时，我想要读取其中的数据，那么我就可以调用该方法，将position置0，然后limit置为5，这时我就可以读取写入的数据~</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Buffer</span> <span style="color: rgb(184, 191, 198);">flip</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">limit</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">position</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">position</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">mark</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">this</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>ByteBuffer原理</strong></p>
+<p>通过源码我们得知如下信息：</p>
+<ol>
+ <li>定义byte[] hb 用于存储实际堆内内存的数组</li>
+ <li>封装了创建堆内内存 HeapByteBuffer 和 堆外内存 DirectByteBuffer的变量</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ByteBuffer</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Buffer</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Comparable&lt;ByteBuffer&gt;</span>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">byte</span>[] <span style="color: rgb(184, 191, 198);">hb</span>; <span style="color: rgb(218, 146, 74);">// 实际保存数据的堆内内存数组（读者考虑下：如果是CharBuffer呢？很明显，变味了char[]数组）</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">ByteBuffer</span> <span style="color: rgb(184, 191, 198);">allocateDirect</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">capacity</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">DirectByteBuffer</span>(<span style="color: rgb(184, 191, 198);">capacity</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">ByteBuffer</span> <span style="color: rgb(184, 191, 198);">allocate</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">capacity</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">capacity</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">HeapByteBuffer</span>(<span style="color: rgb(184, 191, 198);">capacity</span>, <span style="color: rgb(184, 191, 198);">capacity</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>HeapByteBuffer</strong></p>
+<p>没什么特殊的，由于是堆内内存，所以直接创建数组对象即可。</p>
+<p><span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">HeapByteBuffer</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ByteBuffer</span>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">HeapByteBuffer</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">cap</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">lim</span>) {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// package-private</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">lim</span>, <span style="color: rgb(184, 191, 198);">cap</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(28, 198, 133);">byte</span>[<span style="color: rgb(184, 191, 198);">cap</span>], <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>DirectByteBuffer</strong></p>
+<p>该类继承自MappedByteBuffer，基础好的读者应该知道，该MappedByteBuffer用于支持文件与进程的映射，底层通过mmap函数来实现，这里由于我们只关注C-Heap和Java-Heap，所以以后再展开讲解。通过源码我们得知：</p>
+<ol>
+ <li>DirectByteBuffer在创建时，将会调用Unsafe来开辟C-Heap内存</li>
+ <li>同时创建Cleaner对象，该对象为虚引用对象，将会包装DirectByteBuffer对象，当DirectByteBuffer对象被GC时，释放堆外内存，保证不会发生内存泄漏</li>
+ <li>同时通过源码我们得知：可以通过反射获取到内部的Cleaner对象来手动释放内存</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">DirectByteBuffer</span>&nbsp;<span style="color: rgb(200, 143, 208);">extends</span>&nbsp;<span style="color: rgb(184, 191, 198);">MappedByteBuffer</span>&nbsp;<span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">DirectBuffer</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Unsafe</span> <span style="color: rgb(184, 191, 198);">unsafe</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Bits</span>.<span style="color: rgb(184, 191, 198);">unsafe</span>(); <span style="color: rgb(218, 146, 74);">// 获取Unsafe对象</span></p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 用于在DirectByteBuffer对象被GC后，在虚引用中Cleaner中调用，释放堆外内存，这样就避免了内存泄漏，读者注意：这里有一个前提条件：DirectByteBuffer对象被GC后，如果没有被GC，那么堆外内存将不会被释放。</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">Deallocator</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Runnable</span>{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">Unsafe</span> <span style="color: rgb(184, 191, 198);">unsafe</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Unsafe</span>.<span style="color: rgb(184, 191, 198);">getUnsafe</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">address</span>; <span style="color: rgb(218, 146, 74);">// 保存堆外内存的地址</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">size</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">capacity</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">Deallocator</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">address</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">size</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">capacity</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">assert</span> (<span style="color: rgb(184, 191, 198);">address</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">address</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">address</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">size</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">capacity</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">capacity</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() { <span style="color: rgb(218, 146, 74);">// 由ReferenceHandler线程调用Cleaner，然后Cleaner调用该方法完成释放</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">address</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unsafe</span>.<span style="color: rgb(184, 191, 198);">freeMemory</span>(<span style="color: rgb(184, 191, 198);">address</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">address</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Bits</span>.<span style="color: rgb(184, 191, 198);">unreserveMemory</span>(<span style="color: rgb(184, 191, 198);">size</span>, <span style="color: rgb(184, 191, 198);">capacity</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Cleaner</span> <span style="color: rgb(184, 191, 198);">cleaner</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Cleaner</span> <span style="color: rgb(184, 191, 198);">cleaner</span>() { <span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">cleaner</span>; }</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">DirectByteBuffer</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">cap</span>) {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// package-private</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">cap</span>, <span style="color: rgb(184, 191, 198);">cap</span>); <span style="color: rgb(218, 146, 74);">// 初始mark、position、limit、capacity</span></p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">base</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">base</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unsafe</span>.<span style="color: rgb(184, 191, 198);">allocateMemory</span>(<span style="color: rgb(184, 191, 198);">size</span>); <span style="color: rgb(218, 146, 74);">// 分配C-Heap内存</span></p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">OutOfMemoryError</span> <span style="color: rgb(184, 191, 198);">x</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Bits</span>.<span style="color: rgb(184, 191, 198);">unreserveMemory</span>(<span style="color: rgb(184, 191, 198);">size</span>, <span style="color: rgb(184, 191, 198);">cap</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(184, 191, 198);">x</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">unsafe</span>.<span style="color: rgb(184, 191, 198);">setMemory</span>(<span style="color: rgb(184, 191, 198);">base</span>, <span style="color: rgb(184, 191, 198);">size</span>, (<span style="color: rgb(28, 198, 133);">byte</span>) <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cleaner</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">Cleaner</span>.<span style="color: rgb(184, 191, 198);">create</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Deallocator</span>(<span style="color: rgb(184, 191, 198);">base</span>, <span style="color: rgb(184, 191, 198);">size</span>, <span style="color: rgb(184, 191, 198);">cap</span>)); <span style="color: rgb(218, 146, 74);">// 创建Cleaner对象，当该对象被移除时调用Deallocator的run方法完成堆外内存释放</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">att</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><span style="color: rgb(218, 146, 74);">// 了解下即可，虚引用，当关联的对象 DirectByteBuffer 被释放时 由ReferenceHandler线程调用，后面笔者会专门写一篇强、软、弱、虚的文章来解释</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">Cleaner</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">PhantomReference&lt;</span><span style="color: rgb(28, 198, 133);">Object</span><span style="color: rgb(184, 191, 198);">&gt;</span> {}</p>
+<p><strong>ByteBuf原理</strong></p>
+<p>通过前面对于JDK的Buffer及其子类的学习，不难看到，异常复杂，需要用户感知这四个标记位，学习成本较高，所以Netty对ByteBuffer进行了重新设计，提供了ByteBuf 类：</p>
+<ol>
+ <li>该类代表了一个随机和顺序的字节数组</li>
+ <li>封装了对于堆内内存byte[]数组和原生JDK ByteBuffer（堆外内存）的操作</li>
+ <li>提供了两个索引下标来支持顺序读和写操作：readerIndex（读操作下标）、writerIndex（写操作下标）</li>
+ <li>使用capacity变量和maxCapacity作为容量限制</li>
+ <li>这两个下标满足：0 &lt;= readerIndex &lt;= writerIndex &lt;= capacity</li>
+ <li>当ByteBuf实际存放信息的对象为byte[]字节数组时，我们可以直接通过array()方法来获取该数组</li>
+ <li>当ByteBuf实际存放信息的对象为ByteBuffer对象时，我们可以直接通过nioBuffer()方法来获取该对象</li>
+ <li>实现ReferenceCounted 接口，定义了使用引用计数来对池化的ByteBuf对象执行回收操作</li>
+ <li>Netty的ByteBuf分为池化与非池化，对于非池化而言，同Buffer一样，内部保存byte[]数组或者DirectByteBuffer。对于池化而言，PooledHeapByteBuf类和PooledDirectByteBuf类两者定义的泛型类型不一样，同时，在其中执行的操作也不一样，因为对于堆内内存而言，直接使用数组下标，而对于堆外内存而言，需要调用DirectByteBuffer或者Unsafe的方法来操作（如果我们使用Unsafe自己分配堆外内存时）</li>
+</ol>
+<p>对于PoolArea、PoolChunk内存池的对象，将在下一篇进行讲解，读者这里了解整体框架即可。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">ReferenceCounted</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 返回当前引用计数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">refCnt</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 当前引用计数 + 1</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ReferenceCounted</span> <span style="color: rgb(184, 191, 198);">retain</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 当前引用计数 + increment</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ReferenceCounted</span> <span style="color: rgb(184, 191, 198);">retain</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">increment</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 记录该节点当前的访问位置，用于调试。如果确定该对象为内存泄露对象，则将该操作记录的信息提供给用户</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ReferenceCounted</span> <span style="color: rgb(184, 191, 198);">touch</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 同touch()，只不过这里记录了hint对象，该对象同样用于记录信息，用于在发生内存泄漏时给用户提示</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ReferenceCounted</span> <span style="color: rgb(184, 191, 198);">touch</span>(<span style="color: rgb(28, 198, 133);">Object</span> <span style="color: rgb(184, 191, 198);">hint</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 当前引用计数 - 1</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">release</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 当前引用计数 - decrement</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">release</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">decrement</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 同Buffer类一样，定义父类支持方法</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ByteBuf</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">ReferenceCounted</span>, <span style="color: rgb(184, 191, 198);">Comparable&lt;ByteBuf&gt;</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(28, 198, 133);">byte</span>[] <span style="color: rgb(184, 191, 198);">array</span>();&nbsp;<span style="color: rgb(218, 146, 74);">// 当包装对象为byte数组时获取该数组本身</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(184, 191, 198);">ByteBuffer</span> <span style="color: rgb(184, 191, 198);">nioBuffer</span>(); <span style="color: rgb(218, 146, 74);">// 当包装对象为ByteBuffer对象时获取该对象本身</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">writableBytes</span>(); <span style="color: rgb(218, 146, 74);">// 获取当前可写的字节数：this.capacity - this.writerIndex</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">readableBytes</span>(); <span style="color: rgb(218, 146, 74);">// 获取当前可读的字节数：this.writerIndex - this.readerIndex</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">writerIndex</span>(); <span style="color: rgb(218, 146, 74);">// 获取当前写下标</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(184, 191, 198);">ByteBuf</span> <span style="color: rgb(184, 191, 198);">writerIndex</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">writerIndex</span>); <span style="color: rgb(218, 146, 74);">// 设置当前写下标</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">readerIndex</span>(); <span style="color: rgb(218, 146, 74);">// 获取当前读下标</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(184, 191, 198);">ByteBuf</span> <span style="color: rgb(184, 191, 198);">readerIndex</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">readerIndex</span>); <span style="color: rgb(218, 146, 74);">// 获取当前写下标</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">capacity</span>(); <span style="color: rgb(218, 146, 74);">// 获取当前容量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(184, 191, 198);">ByteBuf</span> <span style="color: rgb(184, 191, 198);">capacity</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">newCapacity</span>); <span style="color: rgb(218, 146, 74);">// 设置当前容量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxCapacity</span>(); <span style="color: rgb(218, 146, 74);">// 获取最大容量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(184, 191, 198);">ByteBuf</span> <span style="color: rgb(184, 191, 198);">discardReadBytes</span>(); <span style="color: rgb(218, 146, 74);">// 丢弃已经读取的字节</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 抽象类，用于实现ByteBuf中定义的方法支撑变量</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">AbstractByteBuf</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ByteBuf</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ResourceLeakDetector&lt;ByteBuf&gt;</span> <span style="color: rgb(184, 191, 198);">leakDetector</span> <span style="color: rgb(184, 191, 198);">=</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ResourceLeakDetectorFactory</span>.<span style="color: rgb(184, 191, 198);">instance</span>().<span style="color: rgb(184, 191, 198);">newResourceLeakDetector</span>(<span style="color: rgb(184, 191, 198);">ByteBuf</span>.<span style="color: rgb(200, 143, 208);">class</span>); <span style="color: rgb(218, 146, 74);">// 全局静态常量对象，用于监测内存泄漏，我们稍后就会讲解</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">readerIndex</span>; <span style="color: rgb(218, 146, 74);">// 读下标</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">writerIndex</span>; <span style="color: rgb(218, 146, 74);">// 写下标</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">markedReaderIndex</span>; <span style="color: rgb(218, 146, 74);">// 标记读下标，方便回退</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">markedWriterIndex</span>; <span style="color: rgb(218, 146, 74);">// 标记写下标，方便回退</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">maxCapacity</span>; <span style="color: rgb(218, 146, 74);">// 数组容量</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 非池化堆内内存</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">UnpooledHeapByteBuf</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractReferenceCountedByteBuf</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ByteBufAllocator</span> <span style="color: rgb(184, 191, 198);">alloc</span>; <span style="color: rgb(218, 146, 74);">// 内存分配器。表明当前ByteBuf所属分配器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">byte</span>[] <span style="color: rgb(184, 191, 198);">array</span>; <span style="color: rgb(218, 146, 74);">// 保存数据的内存数组</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 非池化堆外内存</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">UnpooledDirectByteBuf</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractReferenceCountedByteBuf</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ByteBufAllocator</span> <span style="color: rgb(184, 191, 198);">alloc</span>; <span style="color: rgb(218, 146, 74);">// 所属内存分配器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">ByteBuffer</span> <span style="color: rgb(184, 191, 198);">buffer</span>; <span style="color: rgb(218, 146, 74);">// 存放数据的DirectByteBuffer对象</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 池化内存的父类，这里读者只需要知道：不管是堆内内存byte[]和堆外内存DirectByteBuffer或者自己使用Unsafe分配的堆外内存，都是使用内存池来管理，这里只需要持有内存池的引用即可，也即 long handle 与 T memory</span></p>
+<p><span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">PooledByteBuf</span><span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">AbstractReferenceCountedByteBuf</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">Recycler</span>.<span style="color: rgb(184, 191, 198);">Handle&lt;PooledByteBuf&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">recyclerHandle</span>; <span style="color: rgb(218, 146, 74);">// 用于回收PooledByteBuf的对象池</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">PoolChunk&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">chunk</span>; <span style="color: rgb(218, 146, 74);">// 当前所属内存池，这里了解即可，我们在后面会详细讲解</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">handle</span>; <span style="color: rgb(218, 146, 74);">// 用于指向PoolChunk内存池中的分配空间数据，同样了解即可</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">T</span> <span style="color: rgb(184, 191, 198);">memory</span>; <span style="color: rgb(218, 146, 74);">// 数据保存数据的内存</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 池化堆内内存</span></p>
+<p><span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">PooledHeapByteBuf</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">PooledByteBuf&lt;</span><span style="color: rgb(28, 198, 133);">byte</span>[]<span style="color: rgb(184, 191, 198);">&gt;</span> {}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 池化堆外内存</span></p>
+<p><span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">PooledDirectByteBuf</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">PooledByteBuf&lt;ByteBuffer&gt;</span> {}</p>
+<p><strong>总结</strong></p>
+<p>对于NIO来说，使用Buffer抽象类来定义四个变量来完成对Java-Heap和C-Heap的操作，对于Netty而言，使用ByteBuf定义readIndex和writeIndex来简化Buffer中四个变量的操作，同时实现了unpool非池化的两种类型ByteBuf和pooled池化的两种类型ByteBuf，而对于如何池化，我们在下一篇讲解，总之，读者只需要掌握到：ByteBuf及其子类只是封装CRUD内存的操作和变量，而具体的内存将会在PoolArea和PoolChunk中管理。</p>
+<p><br></p></p>
+</body>
+</html>

@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理一 基础复习</h1>
+<p>2022-01-28T06:58:55.141+0800</p>
+<p><p><br></p>
+<p><strong>Executor 原理</strong></p>
+<p>该接口为JDK的JUC顶层接口。定义了一个用于执行提交的Runnable接口实例的执行器对象。该接口的主要目的用于解耦需要执行的Runnable任务与调用者之间的关联，子类将负责处理Runnable的执行方式：单线程执行、多线程执行、周期性调度执行等待。通常我们使用该接口的实例来执行任务，而不是直接创建线程来处理：</p>
+<p><span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">Thread</span>(<span style="color: rgb(200, 143, 208);">new</span>(<span style="color: rgb(184, 191, 198);">RunnableTask</span>())).<span style="color: rgb(184, 191, 198);">start</span>();&nbsp;<span style="color: rgb(218, 146, 74);">// 不推荐</span></p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 推荐方式</span></p>
+<p><span style="color: rgb(184, 191, 198);">Executor</span> <span style="color: rgb(184, 191, 198);">executor</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">anExecutor</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">executor</span>.<span style="color: rgb(184, 191, 198);">execute</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">RunnableTask1</span>());</p>
+<p><span style="color: rgb(184, 191, 198);">executor</span>.<span style="color: rgb(184, 191, 198);">execute</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">RunnableTask2</span>());</p>
+<p>接口定义源码如下所示。读者可以想想，为何不直接使用线程的方式启动？我们可以从接口的定义出发考虑这个问题：</p>
+<ol>
+ <li>接口本身是为了解耦，那么我们将需要解耦的方法定义在接口中</li>
+ <li>我们现在的目的是为了执行一个任务：实现了Runnable接口的RunnableTask，至于怎么执行我不知道。我可以开启一个线程来执行，我也可以同步执行</li>
+ <li>那么这时，如果某时我觉得启动一个线程执行该任务较好，那么我写上了new Thread(new(RunnableTask())).start()，某时我觉得还是在当前线程执行比较好，那么如果我没有抽取该接口，那么执行该方法的逻辑将会耦合在业务代码中。到时候到处找该代码进行修改</li>
+ <li>这时，顺理成章的我们定义了一个接口，将封装的变化放到Executor接口的实现类中执行，我们只需要定义多个Executor的子类，完成自己的逻辑，在需要时我们可以通过类似Spring的IOC方式，来修改，而不需要改动源码</li>
+ <li>这时我们称：接口解耦合</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">Executor</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">execute</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">command</span>);</p>
+<p>}</p>
+<p><strong>ExecutorService 原理</strong></p>
+<p>ExecutorService接口是Executor接口的次一级接口，读者可以看到：在Executor接口中定义一个执行方法，而在ExecutorService接口中需要定义一些用于服务执行器的方法。读者可以这么想：Executor接口用于抽象任务执行，ExecutorService接口用于抽象在执行任务时的一些功能函数。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">ExecutorService</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Executor</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 关闭服务</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">shutdown</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 立刻关闭服务</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">List&lt;Runnable&gt;</span> <span style="color: rgb(184, 191, 198);">shutdownNow</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 判断服务是否调用了shutdown</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isShutdown</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 判断服务是否完全终止</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isTerminated</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 等待当前服务停止</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">awaitTermination</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout，</span> <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 提交一个任务Callable task，返回一个存根stub</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">Future&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">submit</span>(<span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">task</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 提交一个任务Runnable task，返回一个存根stub</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">submit</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 提交一组callable任务执行，返回所有任务的存根stub</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">List&lt;Future&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">invokeAll</span>(<span style="color: rgb(184, 191, 198);">Collection&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">tasks</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 提交一组任务Callable task，返回所有任务的存根stub。注意，这个包含了等待执行的时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">List&lt;Future&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">invokeAll</span>(<span style="color: rgb(184, 191, 198);">Collection&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">tasks，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout，</span> <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 提交一组任务，等待其中任何一个任务完成后返回</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">T</span> <span style="color: rgb(184, 191, 198);">invokeAny</span>(<span style="color: rgb(184, 191, 198);">Collection&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">tasks</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException，</span> <span style="color: rgb(184, 191, 198);">ExecutionException</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 提交一组任务，等待其中任何一个任务完成后返回。注意，这个包含了等待执行的时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">T</span> <span style="color: rgb(184, 191, 198);">invokeAny</span>(<span style="color: rgb(184, 191, 198);">Collection&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">tasks，long</span> <span style="color: rgb(184, 191, 198);">timeout，TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException，</span> <span style="color: rgb(184, 191, 198);">ExecutionException，</span> <span style="color: rgb(184, 191, 198);">TimeoutException</span>;</p>
+<p>}</p>
+<p><strong>AbstractExecutorService 原理</strong></p>
+<p>对于面向对象的设计模式来说，这种又长又多的接口，怎样能够让子类轻松继承呢？使用模板方法设计模式。我们可以通过抽象类来实现部分公用算法，这样子类，即线程池的实现就会轻松些了，毕竟不用自己再写一遍这些算法了，AbstractExecutorService抽象类的作用便是如此。可以看到该类实现了大部分的ExecutorService定义的功能方法，将核心的execute方法放到子类实现。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">AbstractExecutorService</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">ExecutorService</span> {</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将Runnable对象封装为FutureTask</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">RunnableFuture&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">newTaskFor</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">runnable，</span> <span style="color: rgb(184, 191, 198);">T</span> <span style="color: rgb(184, 191, 198);">value</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">FutureTask&lt;T&gt;</span>(<span style="color: rgb(184, 191, 198);">runnable，</span> <span style="color: rgb(184, 191, 198);">value</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将Callable对象封装为FutureTask</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">RunnableFuture&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">newTaskFor</span>(<span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">callable</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">FutureTask&lt;T&gt;</span>(<span style="color: rgb(184, 191, 198);">callable</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 封装Runnable task，然后调用execute执行</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">submit</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) <span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">RunnableFuture&lt;</span><span style="color: rgb(28, 198, 133);">Void</span><span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">ftask</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newTaskFor</span>(<span style="color: rgb(184, 191, 198);">task，</span> <span style="color: rgb(132, 182, 203);">null</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">execute</span>(<span style="color: rgb(184, 191, 198);">ftask</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ftask</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 封装Runnable task，然后调用execute执行。注意，这里还封装了结果</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">Future&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">submit</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task，</span> <span style="color: rgb(184, 191, 198);">T</span> <span style="color: rgb(184, 191, 198);">result</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) <span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">RunnableFuture&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">ftask</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newTaskFor</span>(<span style="color: rgb(184, 191, 198);">task，</span> <span style="color: rgb(184, 191, 198);">result</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">execute</span>(<span style="color: rgb(184, 191, 198);">ftask</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ftask</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 封装Callable task，然后调用execute执行</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">Future&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">submit</span>(<span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">task</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) <span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">RunnableFuture&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">ftask</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newTaskFor</span>(<span style="color: rgb(184, 191, 198);">task</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">execute</span>(<span style="color: rgb(184, 191, 198);">ftask</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ftask</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/* 执行传入的任务，只要任何一个任务被执行完成就返回，然后取消其他任务，这里Any指</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">任何一个tasks中的任务执行完成，timed和nanos用来表明执行超时时间 */</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">T</span> <span style="color: rgb(184, 191, 198);">doInvokeAny</span>(<span style="color: rgb(184, 191, 198);">Collection&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">tasks，boolean</span> <span style="color: rgb(184, 191, 198);">timed，</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">nanos</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException，</span> <span style="color: rgb(184, 191, 198);">ExecutionException，</span> <span style="color: rgb(184, 191, 198);">TimeoutException</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 任务判空</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">tasks</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) <span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">ntasks</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tasks</span>.<span style="color: rgb(184, 191, 198);">size</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ntasks</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建用于保存执行stub的future对象的集合</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ArrayList&lt;Future&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">futures</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ArrayList&lt;Future&lt;T&gt;&gt;</span>(<span style="color: rgb(184, 191, 198);">ntasks</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 创建ExecutorCompletionService用于执行任务</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ExecutorCompletionService&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">ecs</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ExecutorCompletionService&lt;T&gt;</span>(<span style="color: rgb(200, 143, 208);">this</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 记录异常，这样如果我们不能获得任何result，可以抛出最后一个异常。</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ExecutionException</span> <span style="color: rgb(184, 191, 198);">ee</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">deadline</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">timed</span> <span style="color: rgb(184, 191, 198);">?</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">nanos</span> <span style="color: rgb(184, 191, 198);">：</span> <span style="color: rgb(100, 171, 143);">0L</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取集合的迭代器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Iterator&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">it</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tasks</span>.<span style="color: rgb(184, 191, 198);">iterator</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 先开始一项任务，其余的增量执行</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">ecs</span>.<span style="color: rgb(184, 191, 198);">submit</span>(<span style="color: rgb(184, 191, 198);">it</span>.<span style="color: rgb(184, 191, 198);">next</span>()));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 任务数减1</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">--ntasks</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 正在执行的任务为1</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">active</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/* 从ExecutorCompletionService中获取一个执行任务的future，如果future为空，判</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">断任务数量是否大于0，如果还有下一个任务，继续递交执行。如果future不为空，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">直接调用 f.get()返回执行结果，然后在finally中取消所有任务。读者可能会问，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">ExecutorCompletionService是什么？很简单，看看它的构造器：</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">ExecutorCompletionService(Executor executor，BlockingQueue&lt;Future&lt;V&gt;&gt; </span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">completionQueue)，一个执行器，一个阻塞队列，功能是在执行器executor</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">中执行任务，任务完成后将结果放入completionQueue队列中，然后生产端从这个</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">队列中获取结果。这就是生产者消费者模型 */</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">f</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ecs</span>.<span style="color: rgb(184, 191, 198);">poll</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">f</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ntasks</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">--ntasks</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">ecs</span>.<span style="color: rgb(184, 191, 198);">submit</span>(<span style="color: rgb(184, 191, 198);">it</span>.<span style="color: rgb(184, 191, 198);">next</span>()));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">++active</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">active</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">timed</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/* 如果指定了超时时间，等待nanos纳秒后如果future还是为空，则</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">抛出超时异常 */</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">f</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ecs</span>.<span style="color: rgb(184, 191, 198);">poll</span>(<span style="color: rgb(184, 191, 198);">nanos，</span> <span style="color: rgb(184, 191, 198);">TimeUnit</span>.<span style="color: rgb(184, 191, 198);">NANOSECONDS</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">f</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">TimeoutException</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nanos</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">deadline</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/* 当然，如果所有任务都放到线程池里执行了，那么直接调用take方法</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">阻塞当前线程，等待任务执行完成后返回。poll方法非阻塞或者带超时</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">时间的阻塞，take方法阻塞直到队列里放入结果，这里是future */</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">f</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ecs</span>.<span style="color: rgb(184, 191, 198);">take</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">f</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">--active</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">f</span>.<span style="color: rgb(184, 191, 198);">get</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">ExecutionException</span> <span style="color: rgb(184, 191, 198);">eex</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ee</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eex</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">RuntimeException</span> <span style="color: rgb(184, 191, 198);">rex</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ee</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ExecutionException</span>(<span style="color: rgb(184, 191, 198);">rex</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ee</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ee</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ExecutionException</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(184, 191, 198);">ee</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span><span style="color: rgb(184, 191, 198);">，</span> <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">size</span>(); <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">size</span>; <span style="color: rgb(184, 191, 198);">i++</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 传入true表明中断执行线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">i</span>).<span style="color: rgb(184, 191, 198);">cancel</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 间接调用doInvokeAny</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">T</span> <span style="color: rgb(184, 191, 198);">invokeAny</span>(<span style="color: rgb(184, 191, 198);">Collection&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">tasks</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException，</span> <span style="color: rgb(184, 191, 198);">ExecutionException</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">doInvokeAny</span>(<span style="color: rgb(184, 191, 198);">tasks，</span> <span style="color: rgb(184, 191, 198);">false，</span> <span style="color: rgb(100, 171, 143);">0</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">TimeoutException</span> <span style="color: rgb(184, 191, 198);">cannotHappen</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 带超时时间的间接调用doInvokeAny</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">T</span> <span style="color: rgb(184, 191, 198);">invokeAny</span>(<span style="color: rgb(184, 191, 198);">Collection&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">tasks，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout，</span> <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException，</span> <span style="color: rgb(184, 191, 198);">ExecutionException，</span> <span style="color: rgb(184, 191, 198);">TimeoutException</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">doInvokeAny</span>(<span style="color: rgb(184, 191, 198);">tasks，</span> <span style="color: rgb(184, 191, 198);">true，</span> <span style="color: rgb(184, 191, 198);">unit</span>.<span style="color: rgb(184, 191, 198);">toNanos</span>(<span style="color: rgb(184, 191, 198);">timeout</span>));</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/* 上面的invokeAny为其中一个任务执行完成后返回，这里的invokeAll和大家想的一样，直接</span></p>
+<p>&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">翻译All就行，就是执行所有传入的任务，然后等待所有任务执行完毕后返回 */</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">List&lt;Future&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">invokeAll</span>(<span style="color: rgb(184, 191, 198);">Collection&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">tasks</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">tasks</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) <span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 同样先来一个保存future对象的arraylist</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ArrayList&lt;Future&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">futures</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ArrayList&lt;Future&lt;T&gt;&gt;</span>(<span style="color: rgb(184, 191, 198);">tasks</span>.<span style="color: rgb(184, 191, 198);">size</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">done</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 直接遍历所有tasks来调用execute，以将其放到线程池中全部执行，将future放入集合中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">t</span> <span style="color: rgb(184, 191, 198);">：</span> <span style="color: rgb(184, 191, 198);">tasks</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">RunnableFuture&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">f</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">newTaskFor</span>(<span style="color: rgb(184, 191, 198);">t</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">f</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">execute</span>(<span style="color: rgb(184, 191, 198);">f</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/* 然后遍历future，等待每一个任务执行。注意这里的异常处理，当其中一个future</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">发生执行异常时则直接忽略掉，还是会设置done为true表明完成执行，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">最后返回future，所以调用者应自行检查future是否发生了异常 */</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span><span style="color: rgb(184, 191, 198);">，</span> <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">size</span>(); <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">size</span>; <span style="color: rgb(184, 191, 198);">i++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">f</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">i</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!f</span>.<span style="color: rgb(184, 191, 198);">isDone</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">f</span>.<span style="color: rgb(184, 191, 198);">get</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">CancellationException</span> <span style="color: rgb(184, 191, 198);">ignore</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">ExecutionException</span> <span style="color: rgb(184, 191, 198);">ignore</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">done</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">futures</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/* 如果发生异常导致任务执行失败，即不属于CancellationException和</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">ExecutionException，那么取消所有的任务 */</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!done</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span><span style="color: rgb(184, 191, 198);">，</span> <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">size</span>(); <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">size</span>; <span style="color: rgb(184, 191, 198);">i++</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">i</span>).<span style="color: rgb(184, 191, 198);">cancel</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 带超时时间的执行所有任务</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">List&lt;Future&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">invokeAll</span>(<span style="color: rgb(184, 191, 198);">Collection&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">tasks，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout，</span> <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">tasks</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) <span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将超时时间转为纳秒</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">nanos</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unit</span>.<span style="color: rgb(184, 191, 198);">toNanos</span>(<span style="color: rgb(184, 191, 198);">timeout</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ArrayList&lt;Future&lt;T&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">futures</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ArrayList&lt;Future&lt;T&gt;&gt;</span>(<span style="color: rgb(184, 191, 198);">tasks</span>.<span style="color: rgb(184, 191, 198);">size</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">done</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/* 遍历执行所有任务，将其转变为FutureTask放入future集合中，然后计算deadline</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">超时时间 */</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">Callable&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">t</span> <span style="color: rgb(184, 191, 198);">：</span> <span style="color: rgb(184, 191, 198);">tasks</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(184, 191, 198);">newTaskFor</span>(<span style="color: rgb(184, 191, 198);">t</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">deadline</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>() <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">nanos</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">size</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/* 遍历所有的任务，开始执行。如果达到超时时间，直接返回futures。可以看到，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">超时时间设置过短，会导致任务未开始执行就返回，而且没有取消任务，这时</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">返回的futures中有可能还在线程池中执行。这点在使用时务必小心 */</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">size</span>; <span style="color: rgb(184, 191, 198);">i++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">execute</span>((<span style="color: rgb(184, 191, 198);">Runnable</span>)<span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">i</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nanos</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">deadline</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">nanos</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(100, 171, 143);">0L</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">futures</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/* 到这里，所有任务都放到了线程池中执行。遍历所有的future，根据超时时间选择</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">返回或者等待 */</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">size</span>; <span style="color: rgb(184, 191, 198);">i++</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;T&gt;</span> <span style="color: rgb(184, 191, 198);">f</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">i</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!f</span>.<span style="color: rgb(184, 191, 198);">isDone</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">nanos</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(100, 171, 143);">0L</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">futures</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">f</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">nanos，</span> <span style="color: rgb(184, 191, 198);">TimeUnit</span>.<span style="color: rgb(184, 191, 198);">NANOSECONDS</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">CancellationException</span> <span style="color: rgb(184, 191, 198);">ignore</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">ExecutionException</span> <span style="color: rgb(184, 191, 198);">ignore</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">TimeoutException</span> <span style="color: rgb(184, 191, 198);">toe</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">futures</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nanos</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">deadline</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">System</span>.<span style="color: rgb(184, 191, 198);">nanoTime</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">done</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">futures</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">finally</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 同样，如果出现未知异常，那么直接取消所有任务</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!done</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span><span style="color: rgb(184, 191, 198);">，</span> <span style="color: rgb(184, 191, 198);">size</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">size</span>(); <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">size</span>; <span style="color: rgb(184, 191, 198);">i++</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">futures</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(184, 191, 198);">i</span>).<span style="color: rgb(184, 191, 198);">cancel</span>(<span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>ScheduledExecutorService 原理</strong></p>
+<p>ScheduledExecutorService 接口定义了任务周期性调度或者延迟调度的方法，我们说接口的继承等同于功能的扩展，而我们知道ExecutorService定义了执行器的服务方法，而ScheduledExecutorService继承自ExecutorService，那就等同于扩展了ExecutorService的方法，那么这些方法我们可以从源码中看到，可以对提交的Runnable command执行周期性调度。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">ScheduledExecutorService</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">ExecutorService</span> {</p>
+<p>&nbsp;&nbsp;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 在延迟delay时间后执行command。unit为时间单位。只调度一次</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ScheduledFuture&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">schedule</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">command，long</span> <span style="color: rgb(184, 191, 198);">delay，</span> <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 在延迟delay时间后执行callable。unit为时间单位。只调度一次</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">ScheduledFuture&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">schedule</span>(<span style="color: rgb(184, 191, 198);">Callable&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">callable，long</span> <span style="color: rgb(184, 191, 198);">delay，</span> <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 周期性调度command，在延迟initialDelay时间后执行command。period为周期时间，unit为时间单位。每次任务基于“上一次开始时间”来决定下次启动的时间， 如果一次任务执行时间大于间隔时间,会导致下一次延缓执行，不会有两次任务并行执行（也即：任务M在A时间开始执行，执行了B时间，那么这时任务M的下一次执行事件为A时间+周期时间）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ScheduledFuture&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">scheduleAtFixedRate</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">command，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">initialDelay，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">period，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 周期性调度command，在延迟initialDelay时间后执行command。period为周期时间，unit为时间单位。每次任务基于“上一次结束时间”来延迟固定时间后执行下一次任务（也即：任务M在A时间开始执行，执行了B时间，那么这时任务M的下一次执行事件为A时间+B时间+周期时间）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ScheduledFuture&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">scheduleWithFixedDelay</span>(<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">command，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">initialDelay，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">delay，</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>);</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

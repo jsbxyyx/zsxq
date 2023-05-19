@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理八 SingleThreadEventExecutor 原理三</h1>
+<p>2022-03-01T12:52:47.729+0800</p>
+<p><p><br></p>
+<p><strong>核心方法awaitTermination实现原理</strong></p>
+<p>该方法用于外部线程等待当前执行器关闭，timeout指定等待超时时间。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(141, 141, 240);">awaitTermination</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span> {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">unit</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"unit"</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">inEventLoop</span>()) { <span style="color: rgb(218, 146, 74);">// 不能自己等待自己完成(也即当前线程是当前事件执行器的执行线程)</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalStateException</span>(<span style="color: rgb(210, 107, 107);">"cannot await termination of the current thread"</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">threadLock</span>.<span style="color: rgb(184, 191, 198);">tryAcquire</span>(<span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">unit</span>)) { <span style="color: rgb(218, 146, 74);">// 通过线程信号量完成等待（Semaphore threadLock = new Semaphore(0)，由于信号量初始化为0，那么当执行线程调用release时将会唤醒等待线程）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">threadLock</span>.<span style="color: rgb(184, 191, 198);">release</span>(); <span style="color: rgb(218, 146, 74);">// 成功后需要释放信号量，此时如果还有别的线程正在等待信号量，那么将会被唤醒</span></p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">isTerminated</span>(); <span style="color: rgb(218, 146, 74);">// 检测是否处于ST_TERMINATED终止状态（我们在前面doStartThread方法中看到：将会在finally块中将state转变为ST_TERMINATED）</span></p>
+<p>}</p>
+<p><strong>核心方法takeTask实现原理</strong></p>
+<p>可以看到该方法的权限修饰符为protected，所以必然是子类进行调用，通过方法名也很容易知道该方法的作用：从任务队列中获取待执行的任务。流程如下：</p>
+<ol>
+ <li>检测任务队列必须为阻塞队列，因为保证线程安全，同时可以在没有任务可获取时阻塞等待任务</li>
+ <li>调用peekScheduledTask方法，查看周期性任务调度队列的第一个待执行任务</li>
+ <li>如果周期性任务不存在，那么从普通任务队列中获取任务执行。此时调用taskQueue.take()，所以当不存在任务时会阻塞。如果存在任务，那么如果任务为唤醒任务，那么直接设置为空返回即可</li>
+ <li>如果周期性任务存在，那么获取等待时间。如果等待时间大于0，那么此时在等待期间去普通任务队列里获取任务执行。否则，此时等待时间小于等于0，表明周期性任务已经可以执行了，那么此时将周期性任务调度队列中已经达到执行时间的任务放入普通任务队列，然后从队列中获取任务，然后返回</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(141, 141, 240);">takeTask</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">assert</span> <span style="color: rgb(184, 191, 198);">inEventLoop</span>();</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">taskQueue</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">BlockingQueue</span>)) { <span style="color: rgb(218, 146, 74);">// 任务队列必须为阻塞队列，因为保证线程安全，同时可以在没有任务可获取时阻塞等待任务</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">UnsupportedOperationException</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">BlockingQueue&lt;Runnable&gt;</span> <span style="color: rgb(184, 191, 198);">taskQueue</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">BlockingQueue&lt;Runnable&gt;</span>) <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">taskQueue</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 查看周期性任务调度队列的第一个待执行任务</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ScheduledFutureTask&lt;?&gt;</span> <span style="color: rgb(184, 191, 198);">scheduledTask</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">peekScheduledTask</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">scheduledTask</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 如果周期性任务不存在，那么从普通任务队列中获取任务执行</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">taskQueue</span>.<span style="color: rgb(184, 191, 198);">take</span>(); <span style="color: rgb(218, 146, 74);">// 获取普通任务队列中的任务，我们看到这里为take方法，所以当不存在任务时会阻塞</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">WAKEUP_TASK</span>) { <span style="color: rgb(218, 146, 74);">// 如果任务为唤醒任务，那么直接设置为空返回即可</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">InterruptedException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// Ignore</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">task</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 周期性任务存在，那么获取等待时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">delayNanos</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">scheduledTask</span>.<span style="color: rgb(184, 191, 198);">delayNanos</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">delayNanos</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 等待时间大于0，那么此时在等待期间去普通任务队列里获取任务执行</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">try</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">taskQueue</span>.<span style="color: rgb(184, 191, 198);">poll</span>(<span style="color: rgb(184, 191, 198);">delayNanos</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span>.<span style="color: rgb(184, 191, 198);">NANOSECONDS</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">catch</span> (<span style="color: rgb(184, 191, 198);">InterruptedException</span> <span style="color: rgb(184, 191, 198);">e</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(132, 182, 203);">null</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 如果此时任务为空，表明在等待的时间段内，没有新任务放入或者周期性任务已经可以执行。那么此时将周期性任务调度队列中已经达到执行时间的任务放入普通任务队列，然后从队列中获取放入的任务执行（注意：这里是netty修复的一个bug，读者可以考虑下如果不移动周期性任务到普通任务队列，那么当taskqueue中总是存在一个任务执行时，周期性任务将永远得不到执行）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/** 这时没修复前的逻辑，可以看到不管delayNanos的值如何，这里都将从taskQueue队列中获取任务，如果该队列中始终存在一个任务，那么这个达到执行时间的周期性任务将不会得到执行</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">Runnable task;</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">if (delayNanos &gt; 0) {</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">try {</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">task = taskQueue.poll(delayNanos, TimeUnit.NANOSECONDS);</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">} catch (InterruptedException e) {</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// Waken up.</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">return null;</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">}</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">} else { // 这里是关键（必须去掉，因为此时delayNanos&lt;=0，已经可以执行了）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">task = taskQueue.poll();</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">}</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">if (task == null) {</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">fetchFromScheduledTaskQueue();</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">task = taskQueue.poll();</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">}</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">**/</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fetchFromScheduledTaskQueue</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">taskQueue</span>.<span style="color: rgb(184, 191, 198);">poll</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 任务存在，那么直接返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">task</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>核心方法shutdownGracefully实现原理</strong></p>
+<p>shutdownGracefully方法用于关闭事件执行器。当然，我们知道事件执行器最终是通过封装Runnable对象放入到Executor中执行，这时Executor将启动一个线程来执行事件执行器中的run方法。我们来看看该方法如何关闭执行器，流程如下：</p>
+<ol>
+ <li>对静默期持续时间、等待关闭超时时间、超时时间单位进行参数校验</li>
+ <li>如果已经处于关闭中状态，那么直接返回terminationFuture</li>
+ <li>循环等待状态变为关闭中状态。在循环中执行以下操作：</li>
+ <li class="ql-indent-1">判断已经处于关闭中，那么返回terminationFuture</li>
+ <li class="ql-indent-1">如果当前执行器线程为事件执行线程，那么直接修改newState状态为ST_SHUTTING_DOWN，否则根据当前状态来修改，可以看到此时如果处于ST_NOT_STARTED（未启动）、ST_STARTED（已经启动）那么直接修改为ST_SHUTTING_DOWN，其他状态均不变</li>
+ <li class="ql-indent-1">原子性更新状态</li>
+ <li>将静默期，超时时间转为实例变量</li>
+ <li>如果之前的状态如果为未启动状态，那么这里启动线程处理关闭状态</li>
+ <li>如果线程已经处于关闭状态，那么不需要唤醒，其他时候需要唤醒线程来处理关闭状态</li>
+ <li>返回terminationFuture</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;</span> <span style="color: rgb(141, 141, 240);">shutdownGracefully</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">quietPeriod</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 参数校验</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">quietPeriod</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(<span style="color: rgb(210, 107, 107);">"quietPeriod: "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">quietPeriod</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">" (expected &gt;= 0)"</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">timeout</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">quietPeriod</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">IllegalArgumentException</span>(</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(210, 107, 107);">"timeout: "</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">timeout</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">" (expected &gt;= quietPeriod ("</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">quietPeriod</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(210, 107, 107);">"))"</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">unit</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">NullPointerException</span>(<span style="color: rgb(210, 107, 107);">"unit"</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 已经处于关闭中状态，那么直接返回terminationFuture，调用方可以使用该Future来等待状态转为TS_TERMINATE</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isShuttingDown</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">terminationFuture</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">inEventLoop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">inEventLoop</span>(); <span style="color: rgb(218, 146, 74);">// 判断当前调用线程是否为事件执行器的执行线程</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">wakeup</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">oldState</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) { <span style="color: rgb(218, 146, 74);">// 循环等待关闭</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isShuttingDown</span>()) {&nbsp;<span style="color: rgb(218, 146, 74);">// 已经处于关闭中，那么返回Future</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">terminationFuture</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">newState</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wakeup</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">true</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">oldState</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">STATE_UPDATER</span>.<span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(200, 143, 208);">this</span>); <span style="color: rgb(218, 146, 74);">// 获取当前状态</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">inEventLoop</span>) { <span style="color: rgb(218, 146, 74);">// 如果当前执行器线程为事件执行线程，那么直接修改newState状态为ST_SHUTTING_DOWN表明处于关闭状态（注意：这里能直接修改，因为当前为执行线程，既然执行到该方法，那么肯定当前状态为ST_STARTED，所以直接修改即可）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newState</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ST_SHUTTING_DOWN</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 否则根据当前状态来修改，可以看到此时如果处于ST_NOT_STARTED（未启动）、ST_STARTED（已经启动）那么直接修改为ST_SHUTTING_DOWN，其他状态均不变（读者可以想想为何？如果状态已经处于关闭中、关闭、终止，那么不需要修改）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">switch</span> (<span style="color: rgb(184, 191, 198);">oldState</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">ST_NOT_STARTED</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(184, 191, 198);">ST_STARTED</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newState</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">ST_SHUTTING_DOWN</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">default</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">newState</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">oldState</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wakeup</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">false</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">STATE_UPDATER</span>.<span style="color: rgb(184, 191, 198);">compareAndSet</span>(<span style="color: rgb(200, 143, 208);">this</span>, <span style="color: rgb(184, 191, 198);">oldState</span>, <span style="color: rgb(184, 191, 198);">newState</span>)) { <span style="color: rgb(218, 146, 74);">// 原子性更新状态</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将静默期，超时时间转为实例变量</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">gracefulShutdownQuietPeriod</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unit</span>.<span style="color: rgb(184, 191, 198);">toNanos</span>(<span style="color: rgb(184, 191, 198);">quietPeriod</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">gracefulShutdownTimeout</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">unit</span>.<span style="color: rgb(184, 191, 198);">toNanos</span>(<span style="color: rgb(184, 191, 198);">timeout</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">oldState</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">ST_NOT_STARTED</span>) { <span style="color: rgb(218, 146, 74);">// 之前的状态如果为未启动状态，那么这里启动线程</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">doStartThread</span>();</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">wakeup</span>) { <span style="color: rgb(218, 146, 74);">// 如果线程已经处于关闭状态，那么不需要唤醒，其他时候需要唤醒线程来处理关闭状态</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">wakeup</span>(<span style="color: rgb(184, 191, 198);">inEventLoop</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">terminationFuture</span>();</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Redis 深度分析系列四</h1>
+<p>2022-06-23T10:30:01.974+0800</p>
+<p><p>前面我们详细分析了Redis 通过 ae 模型 实现了基于 Linux 中的两大多路选择器的事件驱动模型，但是我们仅仅看到了在 ae.h 中定义的结构体和函数指针 和 ae_epoll.c 、ae_select.c 对操作系统提供的函数库的调用，那么本节我们将详细介绍Redis 中对于 这些函数指针的实现，以及Redis如何根据 所处 OS 不同选择系统提供的多路选择器。</p>
+<p><strong>如何根据环境选择多路复用器</strong></p>
+<p>先复习下C语言的基础：条件宏定义、.h和.c 文件的区别（详细可参考：混沌学堂描述）。我们先来看redis.h文件的文件引入。</p>
+<p><span style="color: rgb(183, 179, 179);">#include "ae.h"&nbsp;&nbsp;&nbsp;</span><span style="color: rgb(218, 146, 74);">/* 事件驱动函数库 */</span></p>
+<p>然后我们来看redis.c 中对事件驱动函数库的调用。通过我们在混沌学堂学习的ELF原理，很明显，当汇编器生成redis.o和ae.o 时，由于redis .h 中引入了ae.h，此时将会和ae.o进行静态链接，所以此时我们只需要关注ae.c即可。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">initServer</span>() {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">el</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">aeCreateEventLoop</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">maxclients+</span><span style="color: rgb(100, 171, 143);">1024</span>);</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeCreateTimeEvent</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">el</span>, <span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(184, 191, 198);">serverCron</span>, <span style="color: rgb(184, 191, 198);">NULL</span>, <span style="color: rgb(184, 191, 198);">NULL</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">ipfd</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">aeCreateFileEvent</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">el</span>,<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">ipfd</span>,<span style="color: rgb(184, 191, 198);">AE_READABLE</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">acceptTcpHandler</span>,<span style="color: rgb(184, 191, 198);">NULL</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AE_ERR</span>) <span style="color: rgb(184, 191, 198);">redisPanic</span>(<span style="color: rgb(210, 107, 107);">"Unrecoverable error creating </span><a href="http://server.ipfd" target="_blank" style="color: rgb(210, 107, 107);">server.ipfd</a><span style="color: rgb(210, 107, 107);"> file event."</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">sofd</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">aeCreateFileEvent</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">el</span>,<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">sofd</span>,<span style="color: rgb(184, 191, 198);">AE_READABLE</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">acceptUnixHandler</span>,<span style="color: rgb(184, 191, 198);">NULL</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AE_ERR</span>) <span style="color: rgb(184, 191, 198);">redisPanic</span>(<span style="color: rgb(210, 107, 107);">"Unrecoverable error creating </span><a href="http://server.sofd" target="_blank" style="color: rgb(210, 107, 107);">server.sofd</a><span style="color: rgb(210, 107, 107);"> file event."</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">main</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">argc</span>, <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">**</span><span style="color: rgb(184, 191, 198);">argv</span>) {</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeMain</span>(<span style="color: rgb(184, 191, 198);">server</span>.<span style="color: rgb(184, 191, 198);">el</span>);</p>
+<p>}</p>
+<p>我们来看ae.c中的宏定义。很明显，redis 将根据 OS 的不同自动通过条件宏选择合适的高性能多路复用器使用，而又由于在ae.h中定义了函数指针和公用结构体，所以每个实现都包含了相同的结构和函数实现，所以我们可以说Redis通过指针和结构体实现了面向对象语言中的接口和实现。</p>
+<p><span style="color: rgb(183, 179, 179);">#ifdef HAVE_EVPORT </span><span style="color: rgb(218, 146, 74);">// solaris 的多路复用器</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include "ae_evport.c"</span></p>
+<p><span style="color: rgb(183, 179, 179);">#else</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">#ifdef HAVE_EPOLL </span><span style="color: rgb(218, 146, 74);">// linux 的多路复用器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">#include "ae_epoll.c"</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">#else</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">#ifdef HAVE_KQUEUE&nbsp;</span><span style="color: rgb(218, 146, 74);">// macos 的多路复用器</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">#include "ae_kqueue.c"</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">#else</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">#include "ae_select.c" </span><span style="color: rgb(218, 146, 74);">// 类Unix都实现的多路复用器性能较差</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">#endif</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">#endif</span></p>
+<p><span style="color: rgb(183, 179, 179);">#endif</span></p>
+<p>那么我们继续跟进：Redis 又是在哪里 定义这些宏的呢：HAVE_EVPORT、HAVE_EPOLL、HAVE_KQUEUE，很明显：一看就是配置文件中定义的，来看config.h。那么，我们可以看到，将根据OS 的类型来定义上述宏，于是在ae.c中将自动引入对应事件驱动的实现，然后与ae.c中的其他函数共同汇编成静态链接库：ae.o（详细参考混沌学堂对于ELF的详细描述）。</p>
+<p><span style="color: rgb(183, 179, 179);">#ifdef __linux__</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define HAVE_EPOLL 1</span></p>
+<p><span style="color: rgb(183, 179, 179);">#endif</span></p>
+<p>​</p>
+<p><span style="color: rgb(183, 179, 179);">#if (defined(__APPLE__) &amp;&amp; defined(MAC_OS_X_VERSION_10_6)) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined (__NetBSD__)</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define HAVE_KQUEUE 1</span></p>
+<p><span style="color: rgb(183, 179, 179);">#endif</span></p>
+<p>​</p>
+<p><span style="color: rgb(183, 179, 179);">#ifdef __sun</span></p>
+<p><span style="color: rgb(183, 179, 179);">#include &lt;sys/feature_tests.h&gt;</span></p>
+<p><span style="color: rgb(183, 179, 179);">#ifdef _DTRACE_VERSION</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define HAVE_EVPORT 1</span></p>
+<p><span style="color: rgb(183, 179, 179);">#endif</span></p>
+<p>可能读者又会存在疑惑：<strong style="color: rgb(222, 222, 222);">linux </strong>宏又是怎么定义的呢？通常我们会在MakeFile文件中定义： CFLAGS += -D<strong style="color: rgb(222, 222, 222);">linux</strong>。</p>
+<p><strong>ae.c 函数实现</strong></p>
+<p><strong>aeCreateEventLoop </strong></p>
+<p>该函数用于根据设置的setsize创建事件循环。可以看到这里首先分配aeEventLoop结构的空间，然后设置属性，随后调用aeApiCreate 函数，该函数将完成实际与OS相关的多路复用函数完成对aeEventLoop的进一步初始化。源码如下。</p>
+<p><span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">aeCreateEventLoop</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">setsize</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">i</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">eventLoop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">zmalloc</span>(<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">*eventLoop</span>))) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>) <span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;events</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">zmalloc</span>(<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">aeFileEvent</span>)<span style="color: rgb(184, 191, 198);">*setsize</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;fired</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">zmalloc</span>(<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">aeFiredEvent</span>)<span style="color: rgb(184, 191, 198);">*setsize</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">eventLoop-&gt;events</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;fired</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>) <span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;setsize</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">setsize</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;lastTime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">time</span>(<span style="color: rgb(184, 191, 198);">NULL</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;timeEventHead</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;timeEventNextId</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;stop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;maxfd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;beforesleep</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">aeApiCreate</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>) <span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">i</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">setsize</span>; <span style="color: rgb(184, 191, 198);">i++</span>) <span style="color: rgb(218, 146, 74);">// 初始化所有事件结构的感兴趣事件为AE_NONE</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;events</span>[<span style="color: rgb(184, 191, 198);">i</span>].<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">AE_NONE</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">eventLoop</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">err</span>: <span style="color: rgb(218, 146, 74);">// 发生错误，释放分配内存</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">eventLoop</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">zfree</span>(<span style="color: rgb(184, 191, 198);">eventLoop-&gt;events</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">zfree</span>(<span style="color: rgb(184, 191, 198);">eventLoop-&gt;fired</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">zfree</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>}</p>
+<p><strong>aeCreateFileEvent</strong></p>
+<p>该函数用于向事件循环中添加fd，而对于Linux而言，一切皆文件，所以这里fd指的是socket fd，也即客户端连接。我们可以看到这里首先调用 aeApiAddEvent 操作实际的多路复用器，然后根据感兴趣事件：读或者写，设置 rfileProc 或者 wfileProc函数指针，当监听的fd的对应事件发生时，将会回调该函数指针，随后将客户端与fd绑定的数据指针 clientData 保存在 aeFileEvent 的 clientData 成员中。源码如下。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">aeCreateFileEvent</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mask</span>,<span style="color: rgb(184, 191, 198);">aeFileProc</span> <span style="color: rgb(184, 191, 198);">*proc</span>, <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">clientData</span>){</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;setsize</span>) <span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">AE_ERR</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeFileEvent</span> <span style="color: rgb(184, 191, 198);">*fe</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;eventLoop-&gt;events</span>[<span style="color: rgb(184, 191, 198);">fd</span>];</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">aeApiAddEvent</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(184, 191, 198);">mask</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">AE_ERR</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fe-&gt;mask</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">mask</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_READABLE</span>) <span style="color: rgb(184, 191, 198);">fe-&gt;rfileProc</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">proc</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE</span>) <span style="color: rgb(184, 191, 198);">fe-&gt;wfileProc</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">proc</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fe-&gt;clientData</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">clientData</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;maxfd</span>) <span style="color: rgb(218, 146, 74);">// 保存最后的fd，fd为file打开文件的下标，所以这里保存最大值即可</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;maxfd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">AE_OK</span>;</p>
+<p>}</p>
+<p><strong>aeDeleteFileEvent</strong></p>
+<p>该函数将操作实际多路选择器删除监听的fd。首先获取 fd 对应的 aeFileEvent结构，然后取消该fd的感兴趣事件集合，由 mask 变量指定，如果当前fd为最大fd且感兴趣事件集为AE_NONE，那么当调用aeApiDelEvent函数后，将会从多路复用器中解除监听，此时需要更新maxfd，如果不是 最大fd，那么直接删除即可。源码如下。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">aeDeleteFileEvent</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mask</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;setsize</span>) <span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeFileEvent</span> <span style="color: rgb(184, 191, 198);">*fe</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;eventLoop-&gt;events</span>[<span style="color: rgb(184, 191, 198);">fd</span>];</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fe-&gt;mask</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AE_NONE</span>) <span style="color: rgb(200, 143, 208);">return</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fe-&gt;mask</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fe-&gt;mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> (<span style="color: rgb(184, 191, 198);">~mask</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;maxfd</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">fe-&gt;mask</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">AE_NONE</span>) { <span style="color: rgb(218, 146, 74);">// 更新 maxfd</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">j</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;maxfd-</span><span style="color: rgb(100, 171, 143);">1</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">j--</span>) <span style="color: rgb(218, 146, 74);">// 从后往前遍历，找到最后一个感兴趣事件集合（监听事件集合）不为空的fd</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">eventLoop-&gt;events</span>[<span style="color: rgb(184, 191, 198);">j</span>].<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">AE_NONE</span>) <span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;maxfd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">j</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeApiDelEvent</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(184, 191, 198);">mask</span>);</p>
+<p>}</p>
+<p><strong>aeCreateTimeEvent</strong></p>
+<p>该函数用于向事件循环添加时间事件，注意：操作系统提供的多路复用将不涉及到时间事件的处理，所以对于该事件需要Redis自身完成处理。我们可以看到首先 创建 aeTimeEvent 结构，随后调用 aeAddMillisecondsToNow 计算时间到期时间，然后将 aeTimeEvent 结构采用头插法放入到 eventLoop-&gt;timeEventHead 中，其他 aeTimeEvent 将通过 当前 aeTimeEvent 的 next 变量关联。源码如下。</p>
+<p><span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">aeCreateTimeEvent</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">milliseconds</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeTimeProc</span> <span style="color: rgb(184, 191, 198);">*proc</span>, <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">clientData</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeEventFinalizerProc</span> <span style="color: rgb(184, 191, 198);">*finalizerProc</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">id</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;timeEventNextId++</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeTimeEvent</span> <span style="color: rgb(184, 191, 198);">*te</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">zmalloc</span>(<span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">*te</span>));</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">te</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>) <span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">AE_ERR</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te-&gt;id</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">id</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeAddMillisecondsToNow</span>(<span style="color: rgb(184, 191, 198);">milliseconds</span>,<span style="color: rgb(184, 191, 198);">&amp;te-&gt;when_sec</span>,<span style="color: rgb(184, 191, 198);">&amp;te-&gt;when_ms</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te-&gt;timeProc</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">proc</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te-&gt;finalizerProc</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">finalizerProc</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te-&gt;clientData</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">clientData</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 头插法</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te-&gt;next</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;timeEventHead</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;timeEventHead</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">te</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">id</span>;</p>
+<p>}</p>
+<p><strong>aeDeleteTimeEvent</strong></p>
+<p>该方法用于从时间事件链表中删除 指定 timeEventNextId 的事件，我们看到 该方法将会便利整个链表（通过头节点遍历），找到对应id的事件时，将其从链表中摘除，同时看看是否存在finalizerProc，调用该函数完成清理。源码如下。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">aeDeleteTimeEvent</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">id</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeTimeEvent</span> <span style="color: rgb(184, 191, 198);">*te</span>, <span style="color: rgb(184, 191, 198);">*prev</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;timeEventHead</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(184, 191, 198);">te</span>) { <span style="color: rgb(218, 146, 74);">// 遍历链表找到 timeEventNextId 为 id 的事件删除</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">te-&gt;id</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">id</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">prev</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">NULL</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;timeEventHead</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">te-&gt;next</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">prev-&gt;next</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">te-&gt;next</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">te-&gt;finalizerProc</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te-&gt;finalizerProc</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(184, 191, 198);">te-&gt;clientData</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">zfree</span>(<span style="color: rgb(184, 191, 198);">te</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">AE_OK</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">prev</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">te</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">te-&gt;next</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">AE_ERR</span>; <span style="color: rgb(218, 146, 74);">/* NO event with the specified ID found */</span></p>
+<p>}</p>
+<p><strong>aeMain</strong></p>
+<p>该函数之前我们看到过，将会检测多路复用器完成事件的处理。源码如下。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">aeMain</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;stop</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">!eventLoop-&gt;stop</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">eventLoop-&gt;beforesleep</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;beforesleep</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeProcessEvents</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(184, 191, 198);">AE_ALL_EVENTS</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>aeProcessEvents</strong></p>
+<p>该函数为事件处理的主要函数。详细描述如下。</p>
+<p><span style="color: rgb(218, 146, 74);">// 执行事件时的标识宏</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define AE_FILE_EVENTS 1</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define AE_TIME_EVENTS 2</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define AE_ALL_EVENTS (AE_FILE_EVENTS|AE_TIME_EVENTS) </span><span style="color: rgb(218, 146, 74);">// 同时执行文件和时间事件</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define AE_DONT_WAIT 4</span></p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">aeProcessEvents</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">processed</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">numevents</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 若不处理任何事件，那么直接返回</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_TIME_EVENTS</span>) <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_FILE_EVENTS</span>)) <span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">eventLoop-&gt;maxfd</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">-</span><span style="color: rgb(100, 171, 143);">1</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(218, 146, 74);">// 存在监听的fd</span></p>
+<p>&nbsp;&nbsp;&nbsp;((<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_TIME_EVENTS</span>) <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_DONT_WAIT</span>))) {&nbsp;<span style="color: rgb(218, 146, 74);">// 执行时间事件且可以执行等待</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">j</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeTimeEvent</span> <span style="color: rgb(184, 191, 198);">*shortest</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">timeval</span> <span style="color: rgb(141, 141, 240);">tv</span>, <span style="color: rgb(184, 191, 198);">*tvp</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_TIME_EVENTS</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_DONT_WAIT</span>)) <span style="color: rgb(218, 146, 74);">// 找到最近需要执行的时间事件</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">shortest</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">aeSearchNearestTimer</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">shortest</span>) { <span style="color: rgb(218, 146, 74);">// 存在最近需要执行的时间时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">now_sec</span>, <span style="color: rgb(184, 191, 198);">now_ms</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeGetTime</span>(<span style="color: rgb(184, 191, 198);">&amp;now_sec</span>, <span style="color: rgb(184, 191, 198);">&amp;now_ms</span>);<span style="color: rgb(218, 146, 74);">// 获取当前时间（ 通过 gettimeofday(&amp;tv, NULL)函数 ）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tvp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;tv</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 计算需要执行的时间，保存在 tv_sec 与 tv_usec变量中</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tvp-&gt;tv_sec</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">shortest-&gt;when_sec</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">now_sec</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">shortest-&gt;when_ms</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">now_ms</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tvp-&gt;tv_usec</span> <span style="color: rgb(184, 191, 198);">=</span> ((<span style="color: rgb(184, 191, 198);">shortest-&gt;when_ms+</span><span style="color: rgb(100, 171, 143);">1000</span>) <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">now_ms</span>)<span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(100, 171, 143);">1000</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tvp-&gt;tv_sec</span> <span style="color: rgb(184, 191, 198);">--</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tvp-&gt;tv_usec</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(184, 191, 198);">shortest-&gt;when_ms</span> <span style="color: rgb(184, 191, 198);">-</span> <span style="color: rgb(184, 191, 198);">now_ms</span>)<span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(100, 171, 143);">1000</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 当前时间便是 shortest 时间事件的触发时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">tvp-&gt;tv_sec</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(184, 191, 198);">tvp-&gt;tv_sec</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">tvp-&gt;tv_usec</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>) <span style="color: rgb(184, 191, 198);">tvp-&gt;tv_usec</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 不存在需要执行的时间时间，且AE_DONT_WAIT 表示不需要等待，那么设置tv_sec与tv_usec为0，将不执行等待，否则 设置 timeval tvp 为空，此时将无限期等待</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_DONT_WAIT</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tv</span>.<span style="color: rgb(184, 191, 198);">tv_sec</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">tv</span>.<span style="color: rgb(184, 191, 198);">tv_usec</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tvp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;tv</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tvp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">numevents</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">aeApiPoll</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(184, 191, 198);">tvp</span>); <span style="color: rgb(218, 146, 74);">// 将计算好的tvp调用 多路复用器的封装函数，注意：tvp 包含 等待时间，考虑下：如果最近的时间事件在1s后发生，那么我们应该让 操作系统 在等待 1s 后 还没有事件发生 也需要返回，此时用tvp来表示这个时间</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">j</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">numevents</span>; <span style="color: rgb(184, 191, 198);">j++</span>) { <span style="color: rgb(218, 146, 74);">// 若存在触发的事件，那么遍历这些事件，根据事件类型调用rfileProc或者wfileProc函数完成处理</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeFileEvent</span> <span style="color: rgb(184, 191, 198);">*fe</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;eventLoop-&gt;events</span>[<span style="color: rgb(184, 191, 198);">eventLoop-&gt;fired</span>[<span style="color: rgb(184, 191, 198);">j</span>].<span style="color: rgb(184, 191, 198);">fd</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;fired</span>[<span style="color: rgb(184, 191, 198);">j</span>].<span style="color: rgb(184, 191, 198);">mask</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;fired</span>[<span style="color: rgb(184, 191, 198);">j</span>].<span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">rfired</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fe-&gt;mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_READABLE</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">rfired</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fe-&gt;rfileProc</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>,<span style="color: rgb(184, 191, 198);">fd</span>,<span style="color: rgb(184, 191, 198);">fe-&gt;clientData</span>,<span style="color: rgb(184, 191, 198);">mask</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fe-&gt;mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!rfired</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">fe-&gt;wfileProc</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">fe-&gt;rfileProc</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fe-&gt;wfileProc</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>,<span style="color: rgb(184, 191, 198);">fd</span>,<span style="color: rgb(184, 191, 198);">fe-&gt;clientData</span>,<span style="color: rgb(184, 191, 198);">mask</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processed++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 检测时间时间，完成时间时间的处理</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_TIME_EVENTS</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processed</span> <span style="color: rgb(184, 191, 198);">+=</span> <span style="color: rgb(184, 191, 198);">processTimeEvents</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">processed</span>;</p>
+<p>}</p>
+<p><strong>processTimeEvents</strong></p>
+<p>该函数用于执行时间事件。详细描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">processTimeEvents</span>(<span style="color: rgb(184, 191, 198);">aeEventLoop</span> <span style="color: rgb(184, 191, 198);">*eventLoop</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">processed</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeTimeEvent</span> <span style="color: rgb(184, 191, 198);">*te</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">maxId</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">time_t</span> <span style="color: rgb(184, 191, 198);">now</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">time</span>(<span style="color: rgb(184, 191, 198);">NULL</span>); <span style="color: rgb(218, 146, 74);">// 获取当前时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">now</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;lastTime</span>) { <span style="color: rgb(218, 146, 74);">// 发生时钟偏移，也即 系统时间回退到之前的时间，那么redis的作者认为需要：提前执行所有时间事件，也远比 时间事件滞后 合理。</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;timeEventHead</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(184, 191, 198);">te</span>) { <span style="color: rgb(218, 146, 74);">// 遍历所有时间事件，将它们的触发时间设置为0，表示立即触发</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te-&gt;when_sec</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">te-&gt;next</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">eventLoop-&gt;lastTime</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">now</span>; <span style="color: rgb(218, 146, 74);">// 记录当前执行时间</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;timeEventHead</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">maxId</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;timeEventNextId-</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">while</span>(<span style="color: rgb(184, 191, 198);">te</span>) { <span style="color: rgb(218, 146, 74);">// 循环遍历时间事件，找到可以执行的时间事件回调timeProc函数（是不是感觉贼蠢？但是你要考虑下这种时间事件很少，如果多了 优先级队列 用于增加插入时间，减少获取时间将比较合适~）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">now_sec</span>, <span style="color: rgb(184, 191, 198);">now_ms</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">id</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">te-&gt;id</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">maxId</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">te-&gt;next</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeGetTime</span>(<span style="color: rgb(184, 191, 198);">&amp;now_sec</span>, <span style="color: rgb(184, 191, 198);">&amp;now_ms</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">now_sec</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">te-&gt;when_sec</span> <span style="color: rgb(184, 191, 198);">||</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(<span style="color: rgb(184, 191, 198);">now_sec</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">te-&gt;when_sec</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">now_ms</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">te-&gt;when_ms</span>))</p>
+<p>&nbsp;&nbsp;&nbsp;{</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">retval</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">id</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">te-&gt;id</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">te-&gt;timeProc</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(184, 191, 198);">id</span>, <span style="color: rgb(184, 191, 198);">te-&gt;clientData</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">processed++</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 根据返回值决定是否继续执行</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">AE_NOMORE</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeAddMillisecondsToNow</span>(<span style="color: rgb(184, 191, 198);">retval</span>,<span style="color: rgb(184, 191, 198);">&amp;te-&gt;when_sec</span>,<span style="color: rgb(184, 191, 198);">&amp;te-&gt;when_ms</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">aeDeleteTimeEvent</span>(<span style="color: rgb(184, 191, 198);">eventLoop</span>, <span style="color: rgb(184, 191, 198);">id</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">eventLoop-&gt;timeEventHead</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">te</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">te-&gt;next</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">processed</span>;</p>
+<p>}</p>
+<p><strong>aeWait</strong></p>
+<p>该函数用于等待指定的fd发生事件：读、写、异常（通常用于 哨兵模式，slave 等待 master时使用）。源码描述如下。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">aeWait</span>(<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mask</span>, <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">milliseconds</span>) {</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">pollfd</span> <span style="color: rgb(141, 141, 240);">pfd</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">retmask</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(184, 191, 198);">retval</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">memset</span>(<span style="color: rgb(184, 191, 198);">&amp;pfd</span>, <span style="color: rgb(100, 171, 143);">0</span>, <span style="color: rgb(200, 143, 208);">sizeof</span>(<span style="color: rgb(184, 191, 198);">pfd</span>));</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">pfd</span>.<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 根据等待事件类型设置POLLIN或者POLLOUT</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_READABLE</span>) <span style="color: rgb(184, 191, 198);">pfd</span>.<span style="color: rgb(184, 191, 198);">events</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">POLLIN</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">mask</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE</span>) <span style="color: rgb(184, 191, 198);">pfd</span>.<span style="color: rgb(184, 191, 198);">events</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">POLLOUT</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 调用poll函数完成等待</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> ((<span style="color: rgb(184, 191, 198);">retval</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">poll</span>(<span style="color: rgb(184, 191, 198);">&amp;pfd</span>, <span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(184, 191, 198);">milliseconds</span>))<span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">1</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">pfd</span>.<span style="color: rgb(184, 191, 198);">revents</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">POLLIN</span>) <span style="color: rgb(184, 191, 198);">retmask</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">AE_READABLE</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">pfd</span>.<span style="color: rgb(184, 191, 198);">revents</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">POLLOUT</span>) <span style="color: rgb(184, 191, 198);">retmask</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">pfd</span>.<span style="color: rgb(184, 191, 198);">revents</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">POLLERR</span>) <span style="color: rgb(184, 191, 198);">retmask</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">pfd</span>.<span style="color: rgb(184, 191, 198);">revents</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">POLLHUP</span>) <span style="color: rgb(184, 191, 198);">retmask</span> <span style="color: rgb(184, 191, 198);">|=</span> <span style="color: rgb(184, 191, 198);">AE_WRITABLE</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">retmask</span>;</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">retval</span>;</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><br></p></p>
+</body>
+</html>

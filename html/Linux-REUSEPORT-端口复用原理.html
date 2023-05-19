@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux REUSEPORT 端口复用原理</h1>
+<p>2022-08-26T13:44:01.824+0800</p>
+<p><p><strong style="font-style;font-variant-ligatures;font-variant-caps; font-size: 1.5em; color: rgb(38, 38, 38);">观察现象</strong></p>
+<p><br></p>
+<p>看如下代码，分别编写了两个 server 服务端代码，均指定了 SO_REUSEPORT 标志位，两个 server 绑定了同一个端口，当我们使用 本地地址 和 其他地址 访问时，内核将会根据 访问地址来选择 server 来服务客户端（生成 client socket 放入 accept 队列），那么如果是两个相同的 外部地址呢？负载均衡 ------- 内核级别的。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// server 1</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">serverListen(char *serverIP, int serverPort)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">int</span> serverFD;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">int</span> opt = <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-class">struct sockaddr_in addr;</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;serverFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;setsockopt(serverFD, SOL_SOCKET, SO_REUSEPORT, &amp;opt, <span class="ql-token hljs-keyword">sizeof</span>(opt)); <span class="ql-token hljs-comment">// 这里设置了复用端口标志位</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;bzero(&amp;addr, <span class="ql-token hljs-keyword">sizeof</span>(addr));
+ </div>
+ <div class="ql-code-block">
+  &nbsp;addr.sin_family = AF_INET;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;addr.sin_addr.s_addr = inet_addr(serverIP);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;addr.sin_port = htons(serverPort);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">int</span> err = bind(serverFD, (<span class="ql-token hljs-keyword">struct</span> sockaddr *)&amp;addr, <span class="ql-token hljs-keyword">sizeof</span>(addr));
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (err) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">printf</span>(<span class="ql-token hljs-string">"error code: %d \n"</span>,errno);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;perror(<span class="ql-token hljs-literal">NULL</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">exit</span>(<span class="ql-token hljs-number">-1</span>);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp;listen(serverFD, <span class="ql-token hljs-number">0</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">return</span> serverFD;
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">main(int argc, char *argv[])</span> {
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">int</span> serverFD = serverListen(<span class="ql-token hljs-string">"127.0.0.1"</span>, <span class="ql-token hljs-number">8080</span>); <span class="ql-token hljs-comment">// 监听 本地回环 地址</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">int</span> clientFD = accept(serverFD,<span class="ql-token hljs-literal">NULL</span>,<span class="ql-token hljs-literal">NULL</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">printf</span>(<span class="ql-token hljs-string">"%s\n"</span>,<span class="ql-token hljs-string">"127.0.0.1"</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;close(clientFD);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;close(serverFD);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// server 1</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">serverListen(char *serverIP, int serverPort)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">int</span> serverFD;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">int</span> opt = <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-class">struct sockaddr_in addr;</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;serverFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;setsockopt(serverFD, SOL_SOCKET, SO_REUSEPORT, &amp;opt, <span class="ql-token hljs-keyword">sizeof</span>(opt)); <span class="ql-token hljs-comment">// 这里设置了复用端口标志位</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;bzero(&amp;addr, <span class="ql-token hljs-keyword">sizeof</span>(addr));
+ </div>
+ <div class="ql-code-block">
+  &nbsp;addr.sin_family = AF_INET;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;addr.sin_addr.s_addr = inet_addr(serverIP);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;addr.sin_port = htons(serverPort);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">int</span> err = bind(serverFD, (<span class="ql-token hljs-keyword">struct</span> sockaddr *)&amp;addr, <span class="ql-token hljs-keyword">sizeof</span>(addr));
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (err) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">printf</span>(<span class="ql-token hljs-string">"error code: %d \n"</span>,errno);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;perror(<span class="ql-token hljs-literal">NULL</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">exit</span>(<span class="ql-token hljs-number">-1</span>);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp;listen(serverFD, <span class="ql-token hljs-number">0</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">return</span> serverFD;
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">main(int argc, char *argv[])</span> {
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">int</span> serverFD = serverListen(<span class="ql-token hljs-string">"0.0.0.0"</span>, <span class="ql-token hljs-number">8080</span>); <span class="ql-token hljs-comment">// 监听 所有 地址</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">int</span> clientFD = accept(serverFD,<span class="ql-token hljs-literal">NULL</span>,<span class="ql-token hljs-literal">NULL</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">printf</span>(<span class="ql-token hljs-string">"%s\n"</span>,<span class="ql-token hljs-string">"0.0.0.0"</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;close(clientFD);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;close(serverFD);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">SO_REUSEPORT 设置原理</strong></h2>
+<p><br></p>
+<p>源码如下，很明显，直接设置 sk-&gt;sk_reuseport 为1。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  SYSCALL_DEFINE5(setsockopt, <span class="ql-token hljs-type">int</span>, fd, <span class="ql-token hljs-type">int</span>, level, <span class="ql-token hljs-type">int</span>, optname, <span class="ql-token hljs-type">char</span> __user *, optval, <span class="ql-token hljs-type">int</span>, optlen)
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> err, fput_needed;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct socket *sock;</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (optlen &lt; <span class="ql-token hljs-number">0</span>)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> -EINVAL;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;sock = sockfd_lookup_light(fd, &amp;err, &amp;fput_needed); <span class="ql-token hljs-comment">// 根据 fd 找到 socket 结构</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (sock != <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (level == SOL_SOCKET) <span class="ql-token hljs-comment">// 在socket级别设置socket属性</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;err =
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;sock_setsockopt(sock, level, optname, optval,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;optlen);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-comment">// 否则在 linux sock 层面设置</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;err =
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;sock-&gt;ops-&gt;setsockopt(sock, level, optname, optval,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;optlen);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;out_put:
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;fput_light(sock-&gt;file, fput_needed);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> err;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">sock_setsockopt(struct socket *sock, int level, int optname,char __user *optval, unsigned int optlen)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct sock *sk =</span> sock-&gt;sk;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> val;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> valbool;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (get_user(val, (<span class="ql-token hljs-type">int</span> __user *)optval)) <span class="ql-token hljs-comment">// 将用户态数据复制到内核中</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> -EFAULT;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;valbool = val ? <span class="ql-token hljs-number">1</span> : <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">switch</span> (optname) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-keyword">case</span> SO_REUSEPORT:
+ </div>
+ <div class="ql-code-block">
+  &nbsp; sk-&gt;sk_reuseport = valbool; <span class="ql-token hljs-comment">// 设置 socket 的 sk_reuseport 为 1</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><span style="color: rgb(38, 38, 38);">TCP 层处理端口复用</span></h2>
+<p><br></p>
+<p>我们从源码中看到，当 skb 传递到 TCP 层时，将会根据 四元组中 目的IP 和 目的端口 找到服务于 当前 skb 的server sock，至于流程，注释打的很详细了。我们这里通过源码来解释为何在例子中：localhost 访问 和 外部IP 访问 所唤醒的进程不一样？从得分情况看：当精确匹配 IP 时 得分加 4 ，所以 localhost 域名解析后 为 127.0.0.1 与绑定 ip相同，所以 将有监听该地址的 server sock 来服务。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">tcp_v4_rcv(struct sk_buff *skb)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct sock *sk;</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;sk = __inet_lookup_skb(&amp;tcp_hashinfo, skb, th-&gt;source, th-&gt;dest); <span class="ql-token hljs-comment">// 找到 当前 skb 所表示的 sock （监听状态的 server sock 或者已经建立链接的 sock，这里我们看 监听状态的 server sock 即可） 我们需要研究的REUSEPORT 的负载均衡 将会在该方法实现</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (!sock_owned_by_user(sk)) { <span class="ql-token hljs-comment">// sk 未被上锁，那么进入该分支（看这里即可）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!tcp_prequeue(sk, skb)) <span class="ql-token hljs-comment">// 我们不开启延迟放入预备队列，所以返回0，取反为 1 进入分支</span>
+ </div>
+ <div class="ql-code-block">
+  ret = tcp_v4_do_rcv(sk, skb);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-comment">// sk 被上锁，先放入backlog 队列，等待释放后处理</span>
+ </div>
+ <div class="ql-code-block">
+  sk_add_backlog(sk, skb);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-class">struct sock *__inet_lookup_skb(struct inet_hashinfo *hashinfo,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class"> &nbsp; &nbsp; struct sk_buff *skb,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class"> &nbsp; &nbsp; const __be16 sport,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class"> &nbsp; &nbsp; const __be16 dport)</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">{</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct sock *sk =</span> skb_steal_sock(skb); <span class="ql-token hljs-comment">// 复用当前 skb 未释放的 sock，若获取成功，那么直接返回（当然 我们不看它）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">const</span> <span class="ql-token hljs-class">struct iphdr *iph =</span> ip_hdr(skb);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (sk)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> sk;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">else</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> __inet_lookup(dev_net(skb_dst(skb)-&gt;dev), hashinfo,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; iph-&gt;saddr, sport,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; iph-&gt;daddr, dport, inet_iif(skb));
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-class">struct sock *__inet_lookup(struct net *net,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class"> struct inet_hashinfo *hashinfo,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class"> const __be32 saddr, const __be16 sport,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class"> const __be32 daddr, const __be16 dport,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class"> const int dif)</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">{</span>
+ </div>
+ <div class="ql-code-block">
+  u16 hnum = ntohs(dport); <span class="ql-token hljs-comment">// 当前 skb tcp 头部的目标端口，也即当前我们需要连接的 server fd 的端口（咳咳，连接的四元组，在混沌学堂中，一定要注意听哈）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct sock *sk =</span> __inet_lookup_established(net, hashinfo,
+ </div>
+ <div class="ql-code-block">
+  saddr, sport, daddr, hnum, dif); <span class="ql-token hljs-comment">// 已经建立连接</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> sk ? : __inet_lookup_listener(net, hashinfo, saddr, sport,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; daddr, hnum, dif); <span class="ql-token hljs-comment">// 看这里，注意：我们有多个server fd监听同一个端口，所以将会在这里面负载均衡</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct sock *__inet_lookup_listener(struct net *net,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class"> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;struct inet_hashinfo *hashinfo,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class"> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;const __be32 saddr, __be16 sport,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class"> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;const __be32 daddr, const unsigned short hnum,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class"> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;const int dif){</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct sock *sk, *result;</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct hlist_nulls_node *node;</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 根据设备和目的端口号计算hash值，找到hash entry 所在下标，也即server fd 所在链表（采用链地址法构建的hash表）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">int</span> hash = inet_lhashfn(net, hnum);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct inet_listen_hashbucket *ilb =</span> &amp;hashinfo-&gt;listening_hash[hash];
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> score, hiscore, matches = <span class="ql-token hljs-number">0</span>, reuseport = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;u32 phash = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;rcu_read_lock();
+ </div>
+ <div class="ql-code-block">
+  begin:
+ </div>
+ <div class="ql-code-block">
+  result = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  hiscore = <span class="ql-token hljs-number">0</span>; <span class="ql-token hljs-comment">// 初始化最高分</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;sk_nulls_for_each_rcu(sk, node, &amp;ilb-&gt;head) { <span class="ql-token hljs-comment">// 遍历链表</span>
+ </div>
+ <div class="ql-code-block">
+  score = compute_score(sk, net, hnum, daddr, dif); <span class="ql-token hljs-comment">// 计算当前 server sock 对 skb IP 和 TCP 头部的目标地址和端口的得分</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (score &gt; hiscore) { <span class="ql-token hljs-comment">// 当前得分大于之前的 计算得分</span>
+ </div>
+ <div class="ql-code-block">
+  result = sk; <span class="ql-token hljs-comment">// 保存当前sk 作为服务 当前 server sock</span>
+ </div>
+ <div class="ql-code-block">
+  hiscore = score;
+ </div>
+ <div class="ql-code-block">
+  reuseport = sk-&gt;sk_reuseport;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (reuseport) { &nbsp;<span class="ql-token hljs-comment">// 指定复用端口，那么需要保存hash值，以免下次TCP SYN 连接时为同一个 server sock</span>
+ </div>
+ <div class="ql-code-block">
+  phash = inet_ehashfn(net, daddr, hnum,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; saddr, sport);
+ </div>
+ <div class="ql-code-block">
+  matches = <span class="ql-token hljs-number">1</span>; <span class="ql-token hljs-comment">// 匹配成功</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (score == hiscore &amp;&amp; reuseport) { <span class="ql-token hljs-comment">// 相同得分，同时指定复用端口，那么根据 hash值与 matches 匹配值 的高 32为0，来决定是否使用当前 相同得分的 server sock</span>
+ </div>
+ <div class="ql-code-block">
+  matches++;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (((u64)phash * matches) &gt;&gt; <span class="ql-token hljs-number">32</span> == <span class="ql-token hljs-number">0</span>)
+ </div>
+ <div class="ql-code-block">
+  result = sk;
+ </div>
+ <div class="ql-code-block">
+  phash = next_pseudo_random32(phash);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 计算 目标IP 和 目标端口 计算当前 监听的 server sk 的得分</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">compute_score(struct sock *sk, struct net *net,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> const unsigned short hnum, const __be32 daddr,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> const int dif)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> score = <span class="ql-token hljs-number">-1</span>;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct inet_sock *inet =</span> inet_sk(sk);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (net_eq(sock_net(sk), net) &amp;&amp; <span class="ql-token hljs-comment">// 开启namespace 那么判断是否处于 统一个 ns 的net设备，若没有开启 为 1</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;inet-&gt;inet_num == hnum &amp;&amp; <span class="ql-token hljs-comment">// 目的端口与当前 server sock 监听的端口 必须相同</span>
+ </div>
+ <div class="ql-code-block">
+  !ipv6_only_sock(sk)) {
+ </div>
+ <div class="ql-code-block">
+  __be32 rcv_saddr = inet-&gt;inet_rcv_saddr;
+ </div>
+ <div class="ql-code-block">
+  score = sk-&gt;sk_family == PF_INET ? <span class="ql-token hljs-number">2</span> : <span class="ql-token hljs-number">1</span>; <span class="ql-token hljs-comment">// PF_INET协议簇 得分为 2 其他为 1</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (rcv_saddr) { <span class="ql-token hljs-comment">// 指定了监听IP地址，那么精确匹配 IP 地址，若匹配成功 得分加 4</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (rcv_saddr != daddr) <span class="ql-token hljs-comment">// 监听IP不匹配直接返回 -1 </span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">-1</span>;
+ </div>
+ <div class="ql-code-block">
+  score += <span class="ql-token hljs-number">4</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (sk-&gt;sk_bound_dev_if) { <span class="ql-token hljs-comment">// 若绑定了指定设备索引，那么比较当前 skb 进入的 设备索引号 dif， 匹配失败返回 -1 ，否则加分 4</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (sk-&gt;sk_bound_dev_if != dif)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">-1</span>;
+ </div>
+ <div class="ql-code-block">
+  score += <span class="ql-token hljs-number">4</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> score;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 随便看下就行，以下代码不重要</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)</span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (sk-&gt;sk_state == TCP_ESTABLISHED) { <span class="ql-token hljs-comment">// sock 已经处于链接状态（server fd 处于监听状态，我们不走该分支）</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (sk-&gt;sk_state == TCP_LISTEN) { <span class="ql-token hljs-comment">// server fd ，此时进入该分支，建立连接对端的socket</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct sock *nsk =</span> tcp_v4_hnd_req(sk, skb); <span class="ql-token hljs-comment">// 调用 syn_recv_sock 回调函数 创建 对等 sock</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!nsk)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> discard;
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span>
+ </div>
+ <div class="ql-code-block">
+  sock_rps_save_rxhash(sk, skb);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">绑定时 对于 REUSEPORT 的处理？</strong></h2>
+<p><br></p>
+<p>请读者根据上一篇对于 REUSEADDR 的解释和本文的解释，自行研究吧，真的很简单，培养下自我思考的能力吧。我写出来那终究是我的，不懂得可以在混沌学堂群里，给 StartSky 提问，他会给你画图！</p>
+<p><br></p></p>
+</body>
+</html>

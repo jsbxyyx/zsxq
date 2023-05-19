@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>JVM hashcode 与 对象锁</h1>
+<p>2023-02-21T10:52:15.290+0800</p>
+<p><p>本文将详细描述JVM 对于 hashcode 计算的处理过程，因为 锁升级的机制，导致我们需要某个载体来存储hashcode。读者考虑如下问题：</p>
+<p>1、偏向锁能保存hashcode吗？</p>
+<p>2、轻量级锁呢？</p>
+<p>3、重量级锁呢？</p>
+<p>来看如下方法，<a href="http://Object.java" target="_blank">Object.java</a> 启动时将会调用该方法向 JVM 注册JNI 的回调函数，我们看到hashcode 实际调用 JVM_IHashCode方法。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> JNINativeMethod methods[] = {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; {<span class="ql-token hljs-string">"hashCode"</span>, &nbsp; &nbsp;<span class="ql-token hljs-string">"()I"</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; (<span class="ql-token hljs-type">void</span> *)&amp;JVM_IHashCode},
+ </div>
+ <div class="ql-code-block">
+  &nbsp; {<span class="ql-token hljs-string">"wait"</span>, &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-string">"(J)V"</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; (<span class="ql-token hljs-type">void</span> *)&amp;JVM_MonitorWait},
+ </div>
+ <div class="ql-code-block">
+  &nbsp; {<span class="ql-token hljs-string">"notify"</span>, &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-string">"()V"</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; (<span class="ql-token hljs-type">void</span> *)&amp;JVM_MonitorNotify},
+ </div>
+ <div class="ql-code-block">
+  &nbsp; {<span class="ql-token hljs-string">"notifyAll"</span>, &nbsp; <span class="ql-token hljs-string">"()V"</span>, &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; (<span class="ql-token hljs-type">void</span> *)&amp;JVM_MonitorNotifyAll},
+ </div>
+ <div class="ql-code-block">
+  &nbsp; {<span class="ql-token hljs-string">"clone"</span>, &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-string">"()Ljava/lang/Object;"</span>, &nbsp; (<span class="ql-token hljs-type">void</span> *)&amp;JVM_Clone},
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+</div>
+<p>那么我们继续跟进。我们通过源码得出如下结论：</p>
+<p>1、若当前使用偏向锁，那么需要先将偏向锁撤销。为何？偏向锁将会在对象头部放置 JavaThread 的指针，而占用了hashcode 的存放位置，所以此时需要将其撤销</p>
+<p>2、若对象当前为自然对象（无锁对象），那么直接获取已经存在的 hashcode，若该值 不存在，那么生成新的 hashcode 并CAS 替换成功后返回该值</p>
+<p>3、若对象当前为轻量级锁对象，由于有 BasicObjectLock 对象来保存hash值，所以这里尝试获取被替换前的 对象头部 的hashcode，若存在那么直接返回</p>
+<p>4、若上述流程都失败，那么必须将对象膨胀为重量级锁，然后再创建新的hash值，然后CAS替换，若替换成功则返回生成的 hashcode，否则返回当前 对象的最新的 hashcode</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">JVM_ENTRY</span>(jint, <span class="ql-token hljs-built_in">JVM_IHashCode</span>(JNIEnv* env, jobject handle))
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> handle == <span class="ql-token hljs-literal">NULL</span> ? <span class="ql-token hljs-number">0</span> : ObjectSynchronizer::<span class="ql-token hljs-built_in">FastHashCode</span> (THREAD, JNIHandles::<span class="ql-token hljs-built_in">resolve_non_null</span>(handle)) ;
+ </div>
+ <div class="ql-code-block">
+  JVM_END
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 实际获取 hashcode 函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">intptr_t ObjectSynchronizer::FastHashCode (Thread * Self, oop obj) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (UseBiasedLocking) { <span class="ql-token hljs-comment">// 当前使用偏向锁，那么首先尝试撤销偏向锁</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (obj-&gt;<span class="ql-token hljs-built_in">mark</span>()-&gt;<span class="ql-token hljs-built_in">has_bias_pattern</span>()) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-function">Handle hobj (Self, obj) </span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;BiasedLocking::<span class="ql-token hljs-built_in">revoke_and_rebias</span>(hobj, <span class="ql-token hljs-literal">false</span>, JavaThread::<span class="ql-token hljs-built_in">current</span>()); <span class="ql-token hljs-comment">// 该函数我们在课上详细解释过，关键点在于这里的 false 参数</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;obj = <span class="ql-token hljs-built_in">hobj</span>() ;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ObjectMonitor* monitor = <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;markOop temp, test;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">intptr_t</span> hash;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;markOop mark = <span class="ql-token hljs-built_in">ReadStableMark</span> (obj);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (mark-&gt;<span class="ql-token hljs-built_in">is_neutral</span>()) { <span class="ql-token hljs-comment">// 若当前对象为普通对象，头部为：[header &nbsp; &nbsp; | 0 | 01] </span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;hash = mark-&gt;<span class="ql-token hljs-built_in">hash</span>(); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (hash) { &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">// 当前对象头部已经存在hashcode，直接返回 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; </span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> hash;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">// 否则创建一个新的 hashcode，然后将其与当前对象头部混合，然后使用 CAS 替换到对象头部，若成功直接返回计算后的hash值</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;hash = <span class="ql-token hljs-built_in">get_next_hash</span>(Self, obj);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;temp = mark-&gt;<span class="ql-token hljs-built_in">copy_set_hash</span>(hash);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;test = (markOop) Atomic::<span class="ql-token hljs-built_in">cmpxchg_ptr</span>(temp, obj-&gt;<span class="ql-token hljs-built_in">mark_addr</span>(), mark);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (test == mark) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> hash;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (mark-&gt;<span class="ql-token hljs-built_in">has_monitor</span>()) { &nbsp;<span class="ql-token hljs-comment">// 若对象存在监视器对象，那么从监视器对象中尝试获取保存原始对象头部的 hash值，若存在 hashcode 那么直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;monitor = mark-&gt;<span class="ql-token hljs-built_in">monitor</span>();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;temp = monitor-&gt;<span class="ql-token hljs-built_in">header</span>();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;hash = temp-&gt;<span class="ql-token hljs-built_in">hash</span>();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (hash) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> hash;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (Self-&gt;<span class="ql-token hljs-built_in">is_lock_owned</span>((address)mark-&gt;<span class="ql-token hljs-built_in">locker</span>())) { <span class="ql-token hljs-comment">// 轻量级锁，由于有 BasicObjectLock 对象来保存hash值，所以这里尝试获取被替换前的 对象头部 的hashcode，若存在那么直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;temp = mark-&gt;<span class="ql-token hljs-built_in">displaced_mark_helper</span>();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;hash = temp-&gt;<span class="ql-token hljs-built_in">hash</span>(); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (hash) { &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> hash;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 上述流程都失败，那么必须将对象膨胀为重量级锁，然后再创建新的hash值，然后CAS替换，若替换成功则返回生成的 hashcode，否则返回当前 对象的最新的 hashcode</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;monitor = ObjectSynchronizer::<span class="ql-token hljs-built_in">inflate</span>(Self, obj);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;mark = monitor-&gt;<span class="ql-token hljs-built_in">header</span>();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;hash = mark-&gt;<span class="ql-token hljs-built_in">hash</span>();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (hash == <span class="ql-token hljs-number">0</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;hash = <span class="ql-token hljs-built_in">get_next_hash</span>(Self, obj);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;temp = mark-&gt;<span class="ql-token hljs-built_in">copy_set_hash</span>(hash);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;test = (markOop) Atomic::<span class="ql-token hljs-built_in">cmpxchg_ptr</span>(temp, monitor, mark);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (test != mark) { <span class="ql-token hljs-comment">// CAS 失败，此时 cmpxchg_ptr 方法返回最新值 而非比较值，此时表名有别的线程已经设置了该对象的头部的hash值，那么直接返回</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;hash = test-&gt;<span class="ql-token hljs-built_in">hash</span>();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> hash;
+ </div>
+ <div class="ql-code-block">
+  } &nbsp;
+ </div>
+</div>
+<p>接下来我们来看 hashcode 的计算方法。可以看到 JVM 中计算 hashcode 的策略将会由 hashCode 变量值来决定，而该变量的默认值为： experimental(intx, hashCode, 5, "(Unstable) select hashCode generation algorithm") 为 Marsaglia's xor-shift 异或算法。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">static inline intptr_t get_next_hash(Thread * Self, oop obj) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">intptr_t</span> value = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (hashCode == <span class="ql-token hljs-number">0</span>) { <span class="ql-token hljs-comment">// 使用 OS 的随机数</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;value = os::<span class="ql-token hljs-built_in">random</span>();
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (hashCode == <span class="ql-token hljs-number">1</span>) { <span class="ql-token hljs-comment">// 使用地址异或</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">intptr_t</span> addrBits = <span class="ql-token hljs-built_in">cast_from_oop</span>&lt;<span class="ql-token hljs-type">intptr_t</span>&gt;(obj) &gt;&gt; <span class="ql-token hljs-number">3</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;value = addrBits ^ (addrBits &gt;&gt; <span class="ql-token hljs-number">5</span>) ^ GVars.stwRandom;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (hashCode == <span class="ql-token hljs-number">2</span>) { <span class="ql-token hljs-comment">// 用于测试使用，返回恒定值</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;value = <span class="ql-token hljs-number">1</span>; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (hashCode == <span class="ql-token hljs-number">3</span>) { <span class="ql-token hljs-comment">// 使用全局递增变量</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;value = ++GVars.hcSequence;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> <span class="ql-token hljs-keyword">if</span> (hashCode == <span class="ql-token hljs-number">4</span>) { <span class="ql-token hljs-comment">// 直接使用对象的地址值</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;value = <span class="ql-token hljs-built_in">cast_from_oop</span>&lt;<span class="ql-token hljs-type">intptr_t</span>&gt;(obj);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// Marsaglia's xor-shift 算法</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">unsigned</span> t = Self-&gt;_hashStateX;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;t ^= (t &lt;&lt; <span class="ql-token hljs-number">11</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;Self-&gt;_hashStateX = Self-&gt;_hashStateY;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;Self-&gt;_hashStateY = Self-&gt;_hashStateZ;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;Self-&gt;_hashStateZ = Self-&gt;_hashStateW;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">unsigned</span> v = Self-&gt;_hashStateW;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;v = (v ^ (v &gt;&gt; <span class="ql-token hljs-number">19</span>)) ^ (t ^ (t &gt;&gt; <span class="ql-token hljs-number">8</span>));
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;Self-&gt;_hashStateW = v;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;value = v;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp;value &amp;= markOopDesc::hash_mask;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (value == <span class="ql-token hljs-number">0</span>) value = <span class="ql-token hljs-number">0xBAD</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">return</span> value;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<p><br></p></p>
+</body>
+</html>

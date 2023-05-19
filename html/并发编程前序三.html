@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>并发编程前序三</h1>
+<p>2022-01-20T18:16:11.878+0800</p>
+<p><p>在《并发编程前序二》中，我们看到了在内核中进程如何切换：分为主动和被动切换，被动切换是通过设置NEED_RESCHED标志位，然后在合适地方对标志位进行检测，然后调用schedule函数完成进程切换。所以我们称被动切换也是主动切换。同时，我们也了解到了什么是协程，无外乎就是在用户态这一层的多个代码块，我们要做的就是在多个代码块中切换执行，而这些操作与内核无关，这时我们称之为协程。而我们说协程可以用状态机来实现：通过switch case + state来切换代码执行路径，同理我们也可以像go语言那样，直接对代码块当时的CPU状态信息来个快照，然后切换其他代码块执行，当需要恢复协程时，只需要还原保存的CPU快照即可。</p>
+<p>在了解以上的知识后，不免读者心中充满疑惑：</p>
+<ol>
+ <li>寄存器为何存在，它到底用来干嘛的？</li>
+ <li>C语言的方法调用过程是什么？</li>
+ <li>进程在从用户态到内核态的转变、进程的切换、协程的切换，都需要保存寄存器呢？</li>
+</ol>
+<p>那么，本文就以Intel CPU I386 这个32位机来解决这些问题（为何不用x86_64？因为随着位数增多，架构演变，寄存器个数变多，且较为复杂，所以用32位来描述。为何不用16位？原始老古董，跟32位机大相径庭，所以不了也罢（不过实模式倒是可以说说，不过那是另外一块内容了））。</p>
+<p><strong>寄存器的出现</strong></p>
+<p>先来看这样一个代码，极度简单，可以看出语言无关，你可以理解为：go、java、c等等，取决于你。那么我们来分析下，这干了什么？无外乎定义一个变量a，然后对a加1，很简单对吧。但是随着而来的问题：</p>
+<ol>
+ <li>a变量为4byte，保存在哪里？</li>
+ <li>这个1怎么放进去的？</li>
+ <li>a+1的动作是怎么做的？</li>
+ <li>a+1的值又是如何放到a的变量位置处的？</li>
+</ol>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a=</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">a=a+</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>带着以上问题，我们来看汇编，通过汇编我们能解决以上问题：</p>
+<ol>
+ <li>4byte的变量放在栈中（这样想：一个内存的基础单元时1byte，我有这么一个地址：aa，那么我只需要 aa+4 或者 aa-4 便可开辟一个空间对吧？那么为何这里是-4呢？因为，栈空间是从高到低的，为何？限制高地址，避免栈溢出去搞内核代码，因为内核代码在高地址处~（这里只聊虚拟内存分布，不是物理地址，他两是映射关系，不清楚也没关系哈，与这里无关，只是打上标注给喜欢钻牛角尖的，稍微懂一些的朋友，不喜勿怪，减少争论））。所以，movl $1, -4(%rbp)就等于：将1放入到a变量中，读者应该可以看到，汇编中可没有变量这么一说，只有内存，你写的变量只不过代表了一个大小的内存，瞧瞧这设计：很合理对吧</li>
+ <li>a+1 的动作，我们看到直接通过add指令，对这片地址+1即可：addl $1, -4(%rbp)</li>
+</ol>
+<p><span style="color: rgb(125, 244, 106);">main:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">#---分隔一下，打个todo吧，后面在分析C语言方法调用原理时再说以上的内容，现在你只需要关注分隔线以下的内容---</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $1, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">addl</span> $1, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p><span style="color: rgb(218, 146, 74);">#------分隔符-------</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $1, %<span style="color: rgb(159, 186, 213);">eax</span></p>
+<p><span style="color: rgb(200, 143, 208);">popq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p>那么我们用C语言，把源程序再完善一下，如下，我们用main函数包了一下，然后给出了一个返回值1，那么通过上面的汇编代码，我们看到返回值的1，存在那？eax寄存器：movl $1, %eax。嗯，现在我们解决了变量存储，变量加1，返回值存储的问题，那么还有如下问题没解决：</p>
+<ol>
+ <li>rbp、rsp、eax寄存器是啥？啥是寄存器？</li>
+ <li>pushq、popq、ret指令是啥？他们干了什么？</li>
+</ol>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">main</span>(<span style="color: rgb(28, 198, 133);">void</span>) {</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a=</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;<span style="color: rgb(184, 191, 198);">a=a+</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>}</p>
+<p>我们可不忙解决上面这两个问题，因为如果直接解决了本文也就直接写完了。我们再来看Java语言的该字节码原理（混沌一下）：</p>
+<ol>
+ <li>iconst_1：我们首先看到，现将1放入操作数栈（八股文：方法帧由哪几部分组成：局部变量表、操作数栈、常量池指针）</li>
+ <li>istore_1：然后将栈顶的1，放入局部变量表index为1处</li>
+ <li>iload_1：将局部变量下标为1处的值放入栈顶</li>
+ <li>iconst_1：再往栈里面放一个1（此时栈顶：a变量值 1，刚放入的加值 1）</li>
+ <li>iadd：对栈顶两个数相加</li>
+ <li>istore_1：将相加的值放入局部变量表下标为1处</li>
+</ol>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">demo</span>{</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">main</span>(<span style="color: rgb(28, 198, 133);">String</span>[] <span style="color: rgb(184, 191, 198);">args</span>){</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a=</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">a=a+</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 字节码描述</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">main</span>(<span style="color: rgb(184, 191, 198);">java</span>.<span style="color: rgb(184, 191, 198);">lang</span>.<span style="color: rgb(28, 198, 133);">String</span>[]);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">0</span>: <span style="color: rgb(184, 191, 198);">iconst_1</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">1</span>: <span style="color: rgb(184, 191, 198);">istore_1</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">2</span>: <span style="color: rgb(184, 191, 198);">iload_1</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">3</span>: <span style="color: rgb(184, 191, 198);">iconst_1</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">4</span>: <span style="color: rgb(184, 191, 198);">iadd</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">5</span>: <span style="color: rgb(184, 191, 198);">istore_1</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">6</span>: <span style="color: rgb(200, 143, 208);">return</span></p>
+<p>通过Java的字节码，是不是感觉和C语言的不太一样，明显感觉C语言的汇编非常简洁，不过有没有发现java的字节码非常和我们写的代码对应，int a= 1，就往局部变量表里放1，a =a+1，就是将a的值从局部变量表里取出来，然后加1后再放回。那么我们再来看以下代码和它的字节码，嗯，和C语言基本类似了，我们只不过是修改了一个++a，同样与a=a+1一样的效果，不过字节码的生成大相径庭（这也就是为了csapp中优化程序性能一篇说的，面向编译器编码）,为了方便读者观看，我直接将字节码的解释放在源码里了。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">demo</span>{</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">main</span>(<span style="color: rgb(28, 198, 133);">String</span>[] <span style="color: rgb(184, 191, 198);">args</span>){</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a=</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">++a</span>;</p>
+<p>}</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">main</span>(<span style="color: rgb(184, 191, 198);">java</span>.<span style="color: rgb(184, 191, 198);">lang</span>.<span style="color: rgb(28, 198, 133);">String</span>[]);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">0</span>: <span style="color: rgb(184, 191, 198);">iconst_1</span>&nbsp;<span style="color: rgb(218, 146, 74);">// 操作数栈顶放入1</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">1</span>: <span style="color: rgb(184, 191, 198);">istore_1</span> <span style="color: rgb(218, 146, 74);">// 将值存入局部变量表</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">2</span>: <span style="color: rgb(184, 191, 198);">iinc</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(100, 171, 143);">1</span>&nbsp;<span style="color: rgb(218, 146, 74);">// 对局部变量表index为1处自增1</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(100, 171, 143);">5</span>: <span style="color: rgb(200, 143, 208);">return</span></p>
+<p>​</p>
+<p>那么现在我们可以来定义下寄存器为何出现了。我们在C语言中看到，完全可以直接对内存进行操作，但是我们知道内存的速度慢于cpu，如果没有寄存器来作为内存中的值的副本，那么每次运算都需要操作内存，那将会是一种折磨。寄存器的访问几乎等同于CPU的运行速度，这时我们将需要计算的内存数据，暂时寄存在CPU中，用于加速运算，这就是寄存器出现的原因，以及它的命名。我们再看一个C语言的例子，很简单，我们使用一个变量来循环自增，循环1000次。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">main</span>(<span style="color: rgb(28, 198, 133);">void</span>) {</p>
+<p>&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">a=</span><span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">for</span>(;<span style="color: rgb(184, 191, 198);">a&lt;</span><span style="color: rgb(100, 171, 143);">1000</span>;){</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">a++</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>}</p>
+<p>我们来继续观察汇编代码，我们只需要看分隔符之间的内容就好。通过汇编代码我们看到，每一次我们都访问了-4(%rbp) 也即a变量的值，对他进行判断和计算。代码如下。</p>
+<p><span style="color: rgb(125, 244, 106);">main:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(218, 146, 74);">#------分隔符-------</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $1, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>)&nbsp;<span style="color: rgb(218, 146, 74);"># 将1放入栈中，也即int a=1;</span></p>
+<p><span style="color: rgb(200, 143, 208);">jmp</span> .L2 <span style="color: rgb(218, 146, 74);"># 让CPU 跳转到 标号为.L2处执行代码</span></p>
+<p>.L3:</p>
+<p><span style="color: rgb(200, 143, 208);">addl</span> $1, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>)</p>
+<p>.L2:</p>
+<p><span style="color: rgb(200, 143, 208);">cmpl</span> $999, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>) <span style="color: rgb(218, 146, 74);"># 看看a的值是否为999</span></p>
+<p><span style="color: rgb(200, 143, 208);">jle</span> .L3 <span style="color: rgb(218, 146, 74);"># 如果小于等于999，那么让CPU跳转到 标号.L3处执行指令</span></p>
+<p><span style="color: rgb(218, 146, 74);">#------分隔符-------</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $1, %<span style="color: rgb(159, 186, 213);">eax</span> <span style="color: rgb(218, 146, 74);"># 返回值</span></p>
+<p><span style="color: rgb(200, 143, 208);">popq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p>那么我们能不能写成如下操作，我们将1放入eax寄存器，然后对这个寄存器进行运算，将最终值写入变量a的地址处（ -4(%rbp)），这时读者可以对比下效率？这也是寄存器的妙用。那么为什么编译器不用我的这种方式呢？那是因为我没有开启优化，所以编译器生成的汇编会按照我编写的方式来生成。</p>
+<p><span style="color: rgb(125, 244, 106);">main:</span></p>
+<p><span style="color: rgb(200, 143, 208);">pushq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">movq</span> %<span style="color: rgb(28, 198, 133);">rsp</span>, %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(218, 146, 74);">#------分隔符-------</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span>&nbsp;$1, %<span style="color: rgb(159, 186, 213);">eax</span><span style="color: rgb(218, 146, 74);">; # 改变部分</span></p>
+<p><span style="color: rgb(200, 143, 208);">jmp</span> .L2 <span style="color: rgb(218, 146, 74);"># 让CPU 跳转到 标号为.L2处执行代码</span></p>
+<p>.L3:</p>
+<p><span style="color: rgb(200, 143, 208);">addl</span> $1, %<span style="color: rgb(159, 186, 213);">eax</span><span style="color: rgb(218, 146, 74);">; # 改变部分</span></p>
+<p>.L2:</p>
+<p><span style="color: rgb(200, 143, 208);">cmpl</span> $999, %<span style="color: rgb(159, 186, 213);">eax</span> <span style="color: rgb(218, 146, 74);"># 改变部分 ,看看eax的值是否为999</span></p>
+<p><span style="color: rgb(200, 143, 208);">jle</span> .L3 <span style="color: rgb(218, 146, 74);"># 如果小于等于999，那么让CPU跳转到 标号.L3处执行指令</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> %<span style="color: rgb(159, 186, 213);">eax</span>, -4(%<span style="color: rgb(28, 198, 133);">rbp</span>) <span style="color: rgb(218, 146, 74);"># 将计算好的值放入内存</span></p>
+<p><span style="color: rgb(218, 146, 74);">#------分隔符-------</span></p>
+<p><span style="color: rgb(200, 143, 208);">movl</span> $1, %<span style="color: rgb(159, 186, 213);">eax</span> <span style="color: rgb(218, 146, 74);"># 返回值</span></p>
+<p><span style="color: rgb(200, 143, 208);">popq</span> %<span style="color: rgb(28, 198, 133);">rbp</span></p>
+<p><span style="color: rgb(200, 143, 208);">ret</span></p>
+<p><strong>寄存器分类</strong></p>
+<p>前面我们知道，寄存器是用于减少对缓存、内存的访问，因为他的速度仅次于CPU。我们可以将需要计算的数据放入到寄存器中，然后对寄存器的数据直接操作，完毕后，将值写入内存（读者只需要知道，我们需要尽可能的减少对内存的访问，来混沌一下？我们为了提高性能，也需要减少进入内核态，也即上下文切换）。那么我们先来看看I386中的寄存器。</p>
+<ol>
+ <li>8个32位的通用寄存器：</li>
+ <li>何为通用寄存器？答案是可以保存任何数据。但是有没有一些特定用途呢？我们知道什么东西都得有一个规范定义，在某些场景我们需要使用某个寄存器完成特定操作，一般情况，那么你随意。是的必须的，必须定义，定义的用途如下：</li>
+ <li class="ql-indent-1">EAX ：特定场景用作累加器(Accumulate)</li>
+ <li class="ql-indent-1">EBX ：特定场景用作基址寄存器（Base）</li>
+ <li class="ql-indent-1">ECX ：特定场景用来计数（Count）</li>
+ <li class="ql-indent-1">EDX ：特定场景用来存放数据（Data）</li>
+ <li class="ql-indent-1">ESP ：特定场景用作堆栈指针（Stack Pointer）</li>
+ <li class="ql-indent-1">EBP ： 特定场景用作基址指针（Base Pointer）</li>
+ <li class="ql-indent-1">ESI ： 特定场景用作源变址（Source Index）</li>
+ <li class="ql-indent-1">EDI ： 特定场景用作目标变址（Destinatin Index）</li>
+ <li>6个16位的段寄存器：</li>
+ <li>何为段寄存器，考虑下，我管理了一个城市，那么我肯定想对这个城市规划为不同的区：一个城市由多个区组成，那么我需要找人时，只需要区号，然后加上街道名字就可以寻找。同理，我们可以将一段内存，切割为不同部分，每个部分保存进程的不同数据，那么我们就可以这么来访问，比如我们想访问某个数据：DS：IP（指令指针寄存器，用于指示内存的具体地址），那么我们称这种访问为：地址（段寄存器）+偏移量（IP），同理，我们也可以使用CS：IP访问某个代码。enjoy it~</li>
+ <li class="ql-indent-1">CS 代码段寄存器。保存进程代码。</li>
+ <li class="ql-indent-1">DS 数据段寄存器。保存进程数据。</li>
+ <li class="ql-indent-1">SS 堆栈段寄存器。保存进程堆栈。</li>
+ <li class="ql-indent-1">ES、FS及GS 附加数据段寄存器。用于特定场景的数据，我们在以后用到后再说。</li>
+ <li>特殊32位寄存器</li>
+ <li>EIP 用于保存指令的地址。该寄存器非常重要，CPU不是要执行指令？得知道指令在哪？这个寄存器就是这个作用。混沌一下：执行Java字节码的bcp 字节码指针？</li>
+ <li>Eflags 用于保存标志信息。考虑下，我们上面的cmp指令：cmpl $999, -4(%rbp)，我们对变量a的值进行判断，那么我们来看看cmp指令的含义：第一个操作减去第二个操作数，但不影响第两个操作数的值，它影响flag的CF，ZF，OF，AF，PF。那么这些XF标志位，就是放置在Eflags寄存器中。我们可以在后面紧跟着：jle .L3 ，这种比较跳转指令，来读取Eflags中对应的标志位，来决定是否跳转，比如jle就读取了CF标志位（Carray Flag 进位/借位标志位），如果CF位为1，那么表明$999 &lt; -4(%rbp)，那么将不会跳转到.L3处执行指令，而是执行jle指令后的指令。</li>
+</ol>
+<p>当然，还有其他寄存器，不过对于普通的程序研究，了解这些就可以了，我们在后面用到这些寄存器，或者其他的寄存器时再详细讲解，毕竟寄存器也是用多了就知道了，不用刻意去背，对于Eflags中的标志位不理解，也没关系，看看我上面的解释，然后我们在遇到对于其他标志位判断的指令时，根据对应的标志位查看即可。</p>
+<p><br></p>
+<p>对于寄存器相关的资料，可以在《intel开发手册》中获取。不过我相信了解了以上描述的这些就够用了，剩下的：CR控制寄存器、GDTR、IDTR、TR等等在描述实模式和保护模式时，我在一一讲解。</p></p>
+</body>
+</html>

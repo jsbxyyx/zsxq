@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Netty 核心原理十四 ThreadPerChannelEventLoop 原理与Future原理</h1>
+<p>2022-03-21T22:08:29.793+0800</p>
+<p><p><br></p>
+<p><strong>ThreadPerChannelEventLoop 原理</strong></p>
+<p>ThreadPerChannelEventLoop类用于处理OIO模型的Channel通道对象，也即一个Channel由一个ThreadPerChannelEventLoop对象来处理。该类较为简单，因为大部分方法都在SingleThreadEventLoop中实现。这里主要初始化父类，同时在run方法中不断地从队列中获取任务处理，直到通道被解除注册。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">ThreadPerChannelEventLoop</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">SingleThreadEventLoop</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(200, 143, 208);">final</span> <span style="color: rgb(184, 191, 198);">ThreadPerChannelEventLoopGroup</span> <span style="color: rgb(184, 191, 198);">parent</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">private</span> <span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">ch</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ThreadPerChannelEventLoop</span>(<span style="color: rgb(184, 191, 198);">ThreadPerChannelEventLoopGroup</span> <span style="color: rgb(184, 191, 198);">parent</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">super</span>(<span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">parent</span>.<span style="color: rgb(184, 191, 198);">executor</span>, <span style="color: rgb(132, 182, 203);">true</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">parent</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">parent</span>;</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 实现通道注册。通过父类super.register来进行注册，同时添加了监听器，当注册完成时回调获取当前Channel对象。当注册失败时，调用deregister方法，将自身从ThreadPerChannelEventLoopGroup中移除</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">ChannelPromise</span> <span style="color: rgb(184, 191, 198);">promise</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(200, 143, 208);">super</span>.<span style="color: rgb(184, 191, 198);">register</span>(<span style="color: rgb(184, 191, 198);">promise</span>).<span style="color: rgb(184, 191, 198);">addListener</span>(<span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ChannelFutureListener</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">operationComplete</span>(<span style="color: rgb(184, 191, 198);">ChannelFuture</span> <span style="color: rgb(184, 191, 198);">future</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">future</span>.<span style="color: rgb(184, 191, 198);">isSuccess</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ch</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">future</span>.<span style="color: rgb(184, 191, 198);">channel</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">deregister</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;});</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 主要事件函数</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">run</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (;;) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 获取任务执行（后面我们在说OioChannel时会看到该任务的提交）</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Runnable</span> <span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">takeTask</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">task</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">task</span>.<span style="color: rgb(184, 191, 198);">run</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">updateLastExecutionTime</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 检查通道是否关闭</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">ch</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(200, 143, 208);">this</span>.<span style="color: rgb(184, 191, 198);">ch</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">isShuttingDown</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ch</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">unsafe</span>().<span style="color: rgb(184, 191, 198);">close</span>(<span style="color: rgb(184, 191, 198);">ch</span>.<span style="color: rgb(184, 191, 198);">unsafe</span>().<span style="color: rgb(184, 191, 198);">voidPromise</span>());</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">confirmShutdown</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">ch</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 如果通道已经解除注册，那么执行队列中所有任务后，结束当前事件循环</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!ch</span>.<span style="color: rgb(184, 191, 198);">isRegistered</span>()) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">runAllTasks</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">deregister</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 将自身从父ThreadPerChannelEventLoopGroup中移除</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">protected</span> <span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">deregister</span>() {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ch</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(132, 182, 203);">null</span>; <span style="color: rgb(218, 146, 74);">// 通道对象不再使用，释放引用</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">parent</span>.<span style="color: rgb(184, 191, 198);">activeChildren</span>.<span style="color: rgb(184, 191, 198);">remove</span>(<span style="color: rgb(200, 143, 208);">this</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">parent</span>.<span style="color: rgb(184, 191, 198);">idleChildren</span>.<span style="color: rgb(184, 191, 198);">add</span>(<span style="color: rgb(200, 143, 208);">this</span>);</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><strong>Future 原理</strong></p>
+<p>Future我们在学习JUC时，可以看到，它代表了一个异步执行操作。我们可以通过Future来获取到异步执行的任务状态，也可以等待任务执行完成，获取任务执行结果。同理，在Netty中，该Future继承自JUC的Future，扩展了一些方法，可以看到该方法主要添加了监听器操作。可以想想这有何好处？原来的Future没有监听器模式，那么我们只能通过get来阻塞的等待任务结束，而有了监听器，我们只需要向Future异步执行任务中添加一个监听器即可，当任务执行完成将由执行线程来完成该回调任务。同时读者也可以从中抽取异同部分：响应中断等待、不可响应中断等待、超时等待、不超时等待。源码描述如下。【作者：黄俊，微信联系：bx_java】</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">Future</span><span style="color: rgb(184, 191, 198);">&lt;V&gt;</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">java</span>.<span style="color: rgb(184, 191, 198);">util</span>.<span style="color: rgb(184, 191, 198);">concurrent</span>.<span style="color: rgb(184, 191, 198);">Future&lt;V&gt;</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 判断当前IO操作是否已经执行完成</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isSuccess</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 判断我们是否能够通过cancel(boolean)方法结束任务执行</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isCancellable</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 获取导致IO操作失败的异常</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">向当前Future添加监听器，当Future代表的异步任务执行完成时，将会回调该监听器。当然，如果当前任务已经完&nbsp;成，那么将会直接执行该监听器。</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">addListener</span>(<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?</span> <span style="color: rgb(200, 143, 208);">super</span> <span style="color: rgb(184, 191, 198);">V&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">listener</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 添加一组监听器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">addListeners</span>(<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?</span> <span style="color: rgb(200, 143, 208);">super</span> <span style="color: rgb(184, 191, 198);">V&gt;&gt;</span>... <span style="color: rgb(184, 191, 198);">listeners</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 移除监听器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">removeListener</span>(<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?</span> <span style="color: rgb(200, 143, 208);">super</span> <span style="color: rgb(184, 191, 198);">V&gt;&gt;</span> <span style="color: rgb(184, 191, 198);">listener</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 移除一组监听器</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">removeListeners</span>(<span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;?</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?</span> <span style="color: rgb(200, 143, 208);">super</span> <span style="color: rgb(184, 191, 198);">V&gt;&gt;</span>... <span style="color: rgb(184, 191, 198);">listeners</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 等待当前Future代表的异步任务执行完成，当任务执行失败时，将会把异常信息抛出给调用方。可响应线程中断。</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">sync</span>() <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 等待当前Future代表的异步任务执行完成，当任务</span>（作者：黄俊，微信：bx_java）<span style="color: rgb(218, 146, 74);">执行失败时，将会把异常信息抛出给调用方。不响应线程中断。</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">syncUninterruptibly</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 等待当前Future代表的异步任务执行完成，但如果任务执行失败，将不会把异常信息抛出给调用方。可响应线程中断</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">await</span>() <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 等待当前Future代表的异步任务执行完成，但如果任务执行失败，将不会把异常信息抛出给调用方。不响应线程中断</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Future&lt;V&gt;</span> <span style="color: rgb(184, 191, 198);">awaitUninterruptibly</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 指定超时时间，等待当前Future代表的异步任务执行完成，但如果任务执行失败，将不会把异常信息抛出给调用方。可响应线程中断</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">await</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 指定超时时间单位为毫秒，为上一个方法的便捷版本。笔者认为：这里冗余了。等待当前Future代表的异步任务执行完成，但如果任务执行失败，将不会把异常信息抛出给调用方。可响应线程中断</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">await</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeoutMillis</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span>;</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 指定超时时间，等待当前Future代表的异步任务执行完成，但如果任务执行失败，将不会把异常信息抛出给调用方。不响应线程中断</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">awaitUninterruptibly</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 指定超时时间单位为毫秒，为上一个方法的便捷版本。笔者认为：这里冗余了。等待当前Future代表的异步任务执行完成，但如果任务执行失败，将不会把异常信息抛出给</span>（作者：黄俊，微信：bx_java）<span style="color: rgb(218, 146, 74);">调用方。不响应线程中断</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">awaitUninterruptibly</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeoutMillis</span>);</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 立即返回当前Future代表的异步任务的结果，如果还未完成，那么返回null</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">getNow</span>();</p>
+<p>}</p>
+<p><strong>GenericFutureListener 原理</strong></p>
+<p>GenericFutureListener 接口用于表示一个监听代表异步执行任务的Future监听器。当Future被标识完成时，将会立即回调该接口的operationComplete方法，可以看到在该方法参数中传入了Future，我们就可以通过该Future来获取异步任务的执行结果。源码描述如下。</p>
+<p><span style="color: rgb(218, 146, 74);">// JDK的标记接口。表明一个事件监听器</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">EventListener</span> {</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 通用监听器接口。读者需要注意这里的泛型定义：F extends Future&lt;?&gt;，表明只要是Future的子接口都可以传入</span></p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">GenericFutureListener</span><span style="color: rgb(184, 191, 198);">&lt;F</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;?&gt;&gt;</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">EventListener</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 当Future执行完成时，将回调该方法</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">operationComplete</span>(<span style="color: rgb(184, 191, 198);">F</span> <span style="color: rgb(184, 191, 198);">future</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">Exception</span>;</p>
+<p>}</p>
+<p><strong>FutureListener 原理</strong></p>
+<p>该接口较为简单，仅仅就是将通用的事件监听器GenericFutureListener的泛型，进行固定，固定为Future。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">FutureListener</span><span style="color: rgb(184, 191, 198);">&lt;V&gt;</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">GenericFutureListener&lt;Future&lt;V&gt;&gt;</span> { }</p>
+<p><strong>AbstractFuture 原理</strong></p>
+<p>该抽象类为Future的模板类。我们从源码中可以看到，该接口主要实现了原生JDK的Future中的get方法。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">abstract</span> <span style="color: rgb(200, 143, 208);">class</span> <span style="color: rgb(141, 141, 240);">AbstractFuture</span><span style="color: rgb(184, 191, 198);">&lt;V&gt;</span> <span style="color: rgb(200, 143, 208);">implements</span> <span style="color: rgb(184, 191, 198);">Future&lt;V&gt;</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 阻塞等待当前Future代表的异步任务完成</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">get</span>() <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span>, <span style="color: rgb(184, 191, 198);">ExecutionException</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">await</span>(); <span style="color: rgb(218, 146, 74);">// 等待任务执行完成</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">cause</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cause</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) { <span style="color: rgb(218, 146, 74);">// 没有发生异常，那么直接返回当前结果</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">getNow</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 执行异常，那么包装异常对象返回</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cause</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">CancellationException</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> (<span style="color: rgb(184, 191, 198);">CancellationException</span>) <span style="color: rgb(184, 191, 198);">cause</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ExecutionException</span>(<span style="color: rgb(184, 191, 198);">cause</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(183, 179, 179);">@Override</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(184, 191, 198);">V</span> <span style="color: rgb(184, 191, 198);">get</span>(<span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">TimeUnit</span> <span style="color: rgb(184, 191, 198);">unit</span>) <span style="color: rgb(200, 143, 208);">throws</span> <span style="color: rgb(184, 191, 198);">InterruptedException</span>, <span style="color: rgb(184, 191, 198);">ExecutionException</span>, <span style="color: rgb(184, 191, 198);">TimeoutException</span> {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 同get()方法，只不过这里进行了超时等待，同时在超时时间到达后，抛出TimeoutException</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">await</span>(<span style="color: rgb(184, 191, 198);">timeout</span>, <span style="color: rgb(184, 191, 198);">unit</span>)) {&nbsp;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Throwable</span> <span style="color: rgb(184, 191, 198);">cause</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">cause</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cause</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(132, 182, 203);">null</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">getNow</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">cause</span> <span style="color: rgb(200, 143, 208);">instanceof</span> <span style="color: rgb(184, 191, 198);">CancellationException</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> (<span style="color: rgb(184, 191, 198);">CancellationException</span>) <span style="color: rgb(184, 191, 198);">cause</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">ExecutionException</span>(<span style="color: rgb(184, 191, 198);">cause</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">throw</span> <span style="color: rgb(200, 143, 208);">new</span> <span style="color: rgb(184, 191, 198);">TimeoutException</span>();</p>
+<p>&nbsp;}</p>
+<p>}</p>
+<p><br></p>
+<p><strong>ChannelFuture 原理</strong></p>
+<p>ChannelFuture用于表示一个异步执行的Channel通道的IO操作。该接口较为简单，这里扩展的Future接口方法为 channel()，可用于获取与之关联的Channel通道对象。源码描述如下。</p>
+<p><span style="color: rgb(200, 143, 208);">public</span> <span style="color: rgb(200, 143, 208);">interface</span> <span style="color: rgb(141, 141, 240);">ChannelFuture</span> <span style="color: rgb(200, 143, 208);">extends</span> <span style="color: rgb(184, 191, 198);">Future&lt;</span><span style="color: rgb(28, 198, 133);">Void</span><span style="color: rgb(184, 191, 198);">&gt;</span> {</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 与当前Future关联的通道对象</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">Channel</span> <span style="color: rgb(184, 191, 198);">channel</span>();</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">/**</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">* 如果当前Future代表了一个空的Future，那么返回true。这时，将不允许调用以下方法：</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*&nbsp;&nbsp;addListener(GenericFutureListener)</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*&nbsp;&nbsp;addListeners(GenericFutureListener[])</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*&nbsp;&nbsp;await()}</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*&nbsp;&nbsp;await(long, TimeUnit)} ()</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*&nbsp;&nbsp;await(long)} ()</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*&nbsp;&nbsp;awaitUninterruptibly()</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*&nbsp;&nbsp;sync()</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*&nbsp;&nbsp;syncUninterruptibly()</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">*/</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">boolean</span> <span style="color: rgb(184, 191, 198);">isVoid</span>();</p>
+<p>}</p></p>
+</body>
+</html>

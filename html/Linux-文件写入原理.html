@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux 文件写入原理</h1>
+<p>2022-07-20T11:19:25.695+0800</p>
+<p><p>本文将详细研究Linux对于文件从用户空间写入到内核，然后到磁盘的整个过程。在混沌学堂中我们说过分为两步：</p>
+<ol>
+ <li>sys_open 打开一个文件，返回fd</li>
+ <li>sys_write 写入文件</li>
+</ol>
+<p>那么，我们首先来看 文件 打开的过程。</p>
+<p><strong>sys_open 函数</strong></p>
+<p><span style="color: rgb(184, 191, 198);">asmlinkage</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(141, 141, 240);">sys_open</span>(<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">filename</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mode</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span> <span style="color: rgb(184, 191, 198);">tmp</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(184, 191, 198);">error</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">tmp</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">getname</span>(<span style="color: rgb(184, 191, 198);">filename</span>); <span style="color: rgb(218, 146, 74);">// 将用户空间的filename 复制到内核空间，此时tmp指向的内存为内核内存</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">PTR_ERR</span>(<span style="color: rgb(184, 191, 198);">tmp</span>); <span style="color: rgb(218, 146, 74);">// 检查tmp 是否包含了错误码，因为错误码范围将会在：（0xffff f000，0xffff ffff)之间（注：在内核中，将最高地址的最后一页保留，用作错误码表示）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!IS_ERR</span>(<span style="color: rgb(184, 191, 198);">tmp</span>)) { <span style="color: rgb(218, 146, 74);">// 返回值为正常指针</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">get_unused_fd</span>();</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(100, 171, 143);">0</span>) { <span style="color: rgb(218, 146, 74);">// 成功获取fd，那么调用 filp_open 打开 文件 file</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*f</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">filp_open</span>(<span style="color: rgb(184, 191, 198);">tmp</span>, <span style="color: rgb(184, 191, 198);">flags</span>, <span style="color: rgb(184, 191, 198);">mode</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">PTR_ERR</span>(<span style="color: rgb(184, 191, 198);">f</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">IS_ERR</span>(<span style="color: rgb(184, 191, 198);">f</span>))</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_error</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fd_install</span>(<span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(184, 191, 198);">f</span>); <span style="color: rgb(218, 146, 74);">// 随后将fd与file文件关联</span></p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">out</span>:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">putname</span>(<span style="color: rgb(184, 191, 198);">tmp</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">fd</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">out_error</span>:</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">put_unused_fd</span>(<span style="color: rgb(184, 191, 198);">fd</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">error</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out</span>;</p>
+<p>}</p>
+<p><strong>filp_open 函数 </strong></p>
+<p>该函数用于打开文件。源码如下。</p>
+<p><span style="color: rgb(218, 146, 74);">/*</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 在sys_open函数时，flag 值的低两位表示:</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 00 - read-only 只读</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 01 - write-only 只写</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 10 - read-write 读写</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 11 - special 特殊值</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 将会被改变为如下含义：</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 00 - no permissions needed 不需要权限</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 01 - read-permission 只读权限</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 10 - write-permission 只写权限</span></p>
+<p><span style="color: rgb(218, 146, 74);">* 11 - read-write 读写权限</span></p>
+<p><span style="color: rgb(218, 146, 74);">*/</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">filp_open</span>(<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span> <span style="color: rgb(184, 191, 198);">filename</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mode</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">open_namei</span>(<span style="color: rgb(184, 191, 198);">filename</span>, <span style="color: rgb(184, 191, 198);">namei_flags</span>, <span style="color: rgb(184, 191, 198);">mode</span>, <span style="color: rgb(184, 191, 198);">&amp;nd</span>); <span style="color: rgb(218, 146, 74);">// 尝试直接通过文件名获取file 目录</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!error</span>) <span style="color: rgb(218, 146, 74);">// 目录获取成功，那么通过目录对象打开文件</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">dentry_open</span>(<span style="color: rgb(184, 191, 198);">nd</span>.<span style="color: rgb(184, 191, 198);">dentry</span>, <span style="color: rgb(184, 191, 198);">nd</span>.<span style="color: rgb(184, 191, 198);">mnt</span>, <span style="color: rgb(184, 191, 198);">flags</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ERR_PTR</span>(<span style="color: rgb(184, 191, 198);">error</span>);</p>
+<p>}</p>
+<p><strong>open_namei 函数</strong></p>
+<p>该函数用于根据pathname来查找文件，注意：有时候我们传入的filename可能携带路径，也可能不携带路径，该函数主要调用 path_lookup 函数来完成查找，由于Linux允许在文件不存在时，传入 O_CREAT 标志，可以自动创建文件，但是为了保证主流程顺畅，这里读者只需要观察文件存在情况即可。源码如下。</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">open_namei</span>(<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span> <span style="color: rgb(184, 191, 198);">pathname</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flag</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">mode</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">nameidata</span> <span style="color: rgb(184, 191, 198);">*nd</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">acc_mode</span>, <span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">dentry</span> <span style="color: rgb(184, 191, 198);">*dentry</span>; <span style="color: rgb(218, 146, 74);">// 文件目录</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">dentry</span> <span style="color: rgb(184, 191, 198);">*dir</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">count</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!</span>(<span style="color: rgb(184, 191, 198);">flag</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">O_CREAT</span>)) { <span style="color: rgb(218, 146, 74);">// 不需要创建文件,我们主要观察文件存在情况</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">path_lookup</span>(<span style="color: rgb(184, 191, 198);">pathname</span>, <span style="color: rgb(184, 191, 198);">lookup_flags</span>(<span style="color: rgb(184, 191, 198);">flag</span>)<span style="color: rgb(184, 191, 198);">|LOOKUP_OPEN</span>, <span style="color: rgb(184, 191, 198);">nd</span>); <span style="color: rgb(218, 146, 74);">// 根据路径查找</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">error</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">error</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 查找成功</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nd-&gt;dentry</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">ok</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 不存在该文件，那么创建（这里不考虑）</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">path_lookup</span>(<span style="color: rgb(184, 191, 198);">pathname</span>, <span style="color: rgb(184, 191, 198);">LOOKUP_PARENT|LOOKUP_OPEN|LOOKUP_CREATE</span>, <span style="color: rgb(184, 191, 198);">nd</span>);</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">error</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">error</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ok</span>:</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">may_open</span>(<span style="color: rgb(184, 191, 198);">nd</span>, <span style="color: rgb(184, 191, 198);">acc_mode</span>, <span style="color: rgb(184, 191, 198);">flag</span>); <span style="color: rgb(218, 146, 74);">// 检擦文件是否可以打开</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">error</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">exit</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 根据name查找文件，文件信息放入 nameidata *nd 中</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">path_lookup</span>(<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">name</span>, <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">nameidata</span> <span style="color: rgb(184, 191, 198);">*nd</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">*name==</span><span style="color: rgb(210, 107, 107);">'/'</span>) { <span style="color: rgb(218, 146, 74);">// 以路径符传入，说明此时打开的文件以绝对路径查找</span></p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 设置查找路径为根目录</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nd-&gt;mnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">mntget</span>(<span style="color: rgb(184, 191, 198);">current-&gt;fs-&gt;rootmnt</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nd-&gt;dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">dget</span>(<span style="color: rgb(184, 191, 198);">current-&gt;fs-&gt;root</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span>{ <span style="color: rgb(218, 146, 74);">// 否则设置当前进程所处的路径（pwd）为查找路径</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nd-&gt;mnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">mntget</span>(<span style="color: rgb(184, 191, 198);">current-&gt;fs-&gt;pwdmnt</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nd-&gt;dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">dget</span>(<span style="color: rgb(184, 191, 198);">current-&gt;fs-&gt;pwd</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">link_path_walk</span>(<span style="color: rgb(184, 191, 198);">name</span>, <span style="color: rgb(184, 191, 198);">nd</span>); <span style="color: rgb(218, 146, 74);">// 开始查找</span></p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 根据当前 nd 设置的 mnt 和 dentry 查找 name 文件的目录</span></p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">link_path_walk</span>(<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span> <span style="color: rgb(184, 191, 198);">name</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">nameidata</span> <span style="color: rgb(184, 191, 198);">*nd</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">path</span> <span style="color: rgb(141, 141, 240);">next</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*inode</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">lookup_flags</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nd-&gt;flags</span>;</p>
+<p></p>
+<p><span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">*name==</span><span style="color: rgb(210, 107, 107);">'/'</span>) <span style="color: rgb(218, 146, 74);">// 移动name指针到最后一个 / 分隔符，此时 name 指针指向文件名</span></p>
+<p><span style="color: rgb(184, 191, 198);">name++</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!*name</span>) <span style="color: rgb(218, 146, 74);">// 不存在文件名，直接退出</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">return_reval</span>;</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">inode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nd-&gt;dentry-&gt;d_inode</span>; <span style="color: rgb(218, 146, 74);">// 获取目录的inode</span></p>
+<p>...</p>
+<p><span style="color: rgb(200, 143, 208);">for</span>(;;) { <span style="color: rgb(218, 146, 74);">// 循环查找</span></p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">hash</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">qstr</span> <span style="color: rgb(141, 141, 240);">this</span>; <span style="color: rgb(218, 146, 74);">// 保存文件名信息</span></p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">c</span>;</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">this</span>.<span style="color: rgb(184, 191, 198);">name</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">name</span>; <span style="color: rgb(218, 146, 74);">// 保存文件名</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 根据文件名计算hash值 </span></p>
+<p><span style="color: rgb(184, 191, 198);">c</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">*</span>(<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span>)<span style="color: rgb(184, 191, 198);">name</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">hash</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">init_name_hash</span>();</p>
+<p><span style="color: rgb(200, 143, 208);">do</span> {</p>
+<p><span style="color: rgb(184, 191, 198);">name++</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">hash</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">partial_name_hash</span>(<span style="color: rgb(184, 191, 198);">c</span>, <span style="color: rgb(184, 191, 198);">hash</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">c</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">*</span>(<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span>)<span style="color: rgb(184, 191, 198);">name</span>;</p>
+<p>} <span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">c</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> (<span style="color: rgb(184, 191, 198);">c</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(210, 107, 107);">'/'</span>));</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 保存文件名长度与hash值</span></p>
+<p><span style="color: rgb(184, 191, 198);">this</span>.<span style="color: rgb(184, 191, 198);">len</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">name</span> <span style="color: rgb(184, 191, 198);">-</span> (<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span>) <span style="color: rgb(184, 191, 198);">this</span>.<span style="color: rgb(184, 191, 198);">name</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">this</span>.<span style="color: rgb(184, 191, 198);">hash</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">end_name_hash</span>(<span style="color: rgb(184, 191, 198);">hash</span>);</p>
+<p>...</p>
+<p><span style="color: rgb(218, 146, 74);">// 修正 "." 和 ".." 分别表示当前目录和上一级目录</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">this</span>.<span style="color: rgb(184, 191, 198);">name</span>[<span style="color: rgb(100, 171, 143);">0</span>] <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(210, 107, 107);">'.'</span>) <span style="color: rgb(200, 143, 208);">switch</span> (<span style="color: rgb(184, 191, 198);">this</span>.<span style="color: rgb(184, 191, 198);">len</span>) {</p>
+<p><span style="color: rgb(200, 143, 208);">default</span>:</p>
+<p><span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(100, 171, 143);">2</span>:</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">this</span>.<span style="color: rgb(184, 191, 198);">name</span>[<span style="color: rgb(100, 171, 143);">1</span>] <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(210, 107, 107);">'.'</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">follow_dotdot</span>(<span style="color: rgb(184, 191, 198);">&amp;nd-&gt;mnt</span>, <span style="color: rgb(184, 191, 198);">&amp;nd-&gt;dentry</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">inode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nd-&gt;dentry-&gt;d_inode</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">case</span> <span style="color: rgb(100, 171, 143);">1</span>:</p>
+<p><span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p>}</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">do_lookup</span>(<span style="color: rgb(184, 191, 198);">nd</span>, <span style="color: rgb(184, 191, 198);">&amp;this</span>, <span style="color: rgb(184, 191, 198);">&amp;next</span>); <span style="color: rgb(218, 146, 74);">// 执行实际搜索</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">err</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">inode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">next</span>.<span style="color: rgb(184, 191, 198);">dentry-&gt;d_inode</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!inode</span>) <span style="color: rgb(218, 146, 74);">// 找到目录（最后一个目录便是包含了所查找文件的inode）</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_dput</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-ENOTDIR</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!inode-&gt;i_op</span>) <span style="color: rgb(218, 146, 74);">// 查找到最后一个inode，但不是目录，所以没有 i_op 操作，直接退出</span></p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">out_dput</span>;</p>
+<p>...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 继续查找下一个目录</span></p>
+<p><span style="color: rgb(184, 191, 198);">dput</span>(<span style="color: rgb(184, 191, 198);">nd-&gt;dentry</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">nd-&gt;mnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">next</span>.<span style="color: rgb(184, 191, 198);">mnt</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">nd-&gt;dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">next</span>.<span style="color: rgb(184, 191, 198);">dentry</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-ENOTDIR</span>;</p>
+<p>...</p>
+<p>}</p>
+<p>...</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 实际查找过程</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">do_lookup</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">nameidata</span> <span style="color: rgb(184, 191, 198);">*nd</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">qstr</span> <span style="color: rgb(184, 191, 198);">*name</span>,</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">path</span> <span style="color: rgb(184, 191, 198);">*path</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">vfsmount</span> <span style="color: rgb(184, 191, 198);">*mnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">nd-&gt;mnt</span>; <span style="color: rgb(218, 146, 74);">// 获取挂载点</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">dentry</span> <span style="color: rgb(184, 191, 198);">*dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">__d_lookup</span>(<span style="color: rgb(184, 191, 198);">nd-&gt;dentry</span>, <span style="color: rgb(184, 191, 198);">name</span>); <span style="color: rgb(218, 146, 74);">// 从设置的目录 dentry 处查找</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!dentry</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">need_lookup</span>;</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">done</span>: <span style="color: rgb(218, 146, 74);">// 查找成功</span></p>
+<p><span style="color: rgb(184, 191, 198);">path-&gt;mnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">mnt</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">path-&gt;dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">dentry</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">need_lookup</span>: <span style="color: rgb(218, 146, 74);">// 注意：当内存中的dentry 不存在时，因为初始时 内存中将不会存在dentry，dentry 只是 对磁盘上的数据进行缓存优化，所以此时将会陷入到FS文件系统中读磁盘数据查找，这里太过繁琐，读者了解即可</span></p>
+<p><span style="color: rgb(184, 191, 198);">dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">real_lookup</span>(<span style="color: rgb(184, 191, 198);">nd-&gt;dentry</span>, <span style="color: rgb(184, 191, 198);">name</span>, <span style="color: rgb(184, 191, 198);">nd</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">IS_ERR</span>(<span style="color: rgb(184, 191, 198);">dentry</span>))</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">fail</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">done</span>;</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">fail</span>:</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">PTR_ERR</span>(<span style="color: rgb(184, 191, 198);">dentry</span>);</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 从parent目录处，查找 name 所述的 dentry</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">dentry</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">__d_lookup</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">dentry</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">qstr</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">name</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">len</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">name-&gt;len</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">hash</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">name-&gt;hash</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">str</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">name-&gt;name</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">hlist_head</span> <span style="color: rgb(184, 191, 198);">*head</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">d_hash</span>(<span style="color: rgb(184, 191, 198);">parent</span>,<span style="color: rgb(184, 191, 198);">hash</span>); <span style="color: rgb(218, 146, 74);">// 根据目录和文件名在hash表找到目录下的文件头部指针（读者考虑下：hash冲突？）</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">dentry</span> <span style="color: rgb(184, 191, 198);">*found</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">hlist_node</span> <span style="color: rgb(184, 191, 198);">*node</span>;</p>
+<p>&nbsp;...</p>
+<p><span style="color: rgb(184, 191, 198);">hlist_for_each</span> (<span style="color: rgb(184, 191, 198);">node</span>, <span style="color: rgb(184, 191, 198);">head</span>) {&nbsp;<span style="color: rgb(218, 146, 74);">// 遍历该链表</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">dentry</span> <span style="color: rgb(184, 191, 198);">*dentry</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">move_count</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">qstr</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">qstr</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">hlist_entry</span>(<span style="color: rgb(184, 191, 198);">node</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">dentry</span>, <span style="color: rgb(184, 191, 198);">d_hash</span>); <span style="color: rgb(218, 146, 74);">// 获取当前node处的dentry目录信息</span></p>
+<p>...</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">dentry-&gt;d_name</span>.<span style="color: rgb(184, 191, 198);">hash</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">hash</span>) <span style="color: rgb(218, 146, 74);">// hash 值不同继续查找</span></p>
+<p><span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">dentry-&gt;d_parent</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">parent</span>) <span style="color: rgb(218, 146, 74);">// 父目录不同继续查找</span></p>
+<p><span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">qstr</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">dentry-&gt;d_qstr</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 进行名字比较</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">parent-&gt;d_op</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">parent-&gt;d_op-&gt;d_compare</span>) {</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">parent-&gt;d_op-&gt;d_compare</span>(<span style="color: rgb(184, 191, 198);">parent</span>, <span style="color: rgb(184, 191, 198);">qstr</span>, <span style="color: rgb(184, 191, 198);">name</span>))</p>
+<p><span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p>} <span style="color: rgb(200, 143, 208);">else</span> {</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">qstr-&gt;len</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">len</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">memcmp</span>(<span style="color: rgb(184, 191, 198);">qstr-&gt;name</span>, <span style="color: rgb(184, 191, 198);">str</span>, <span style="color: rgb(184, 191, 198);">len</span>))</p>
+<p><span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p>}</p>
+<p>... <span style="color: rgb(218, 146, 74);">// 成功查找</span></p>
+<p><span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>}</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">found</span>;</p>
+<p>}</p>
+<p><strong>dentry_open 函数</strong></p>
+<p>在open_namei中，我们看到：通过dentry 遍历找到文件所述的目录dentry信息，那么dentry_open 函数将会根据 dentry 找到该目录下的 name 文件。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">dentry_open</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">dentry</span> <span style="color: rgb(184, 191, 198);">*dentry</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">vfsmount</span> <span style="color: rgb(184, 191, 198);">*mnt</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">flags</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">f</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*inode</span>;</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">error</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-ENFILE</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">f</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">get_empty_filp</span>(); <span style="color: rgb(218, 146, 74);">// 分配一个新的file结构，注意在该函数中将会检查打开的文件的计数，读者可以自行查看</span></p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">inode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">dentry-&gt;d_inode</span>; <span style="color: rgb(218, 146, 74);">// 获取目录inode信息</span></p>
+<p>...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 保存文件的元数据信息</span></p>
+<p><span style="color: rgb(184, 191, 198);">f-&gt;f_dentry</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">dentry</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">f-&gt;f_vfsmnt</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">mnt</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">f-&gt;f_pos</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(218, 146, 74);">// 初始文件操作点为从offset偏移量为0处开始</span></p>
+<p><span style="color: rgb(184, 191, 198);">f-&gt;f_op</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fops_get</span>(<span style="color: rgb(184, 191, 198);">inode-&gt;i_fop</span>); <span style="color: rgb(218, 146, 74);">// 从inode中获取操作文件的函数指针</span></p>
+<p><span style="color: rgb(184, 191, 198);">file_move</span>(<span style="color: rgb(184, 191, 198);">f</span>, <span style="color: rgb(184, 191, 198);">&amp;inode-&gt;i_sb-&gt;s_files</span>); <span style="color: rgb(218, 146, 74);">// 将打开文件信息绑定到super_block中，此时可以根据超级块看到该文件系统打开的所有文件</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">f-&gt;f_op</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">f-&gt;f_op-&gt;open</span>) { <span style="color: rgb(218, 146, 74);">// 若inode 操作存在 open函数，那么进行回调（对于ext2来说：这里对文件长度进行了校验）</span></p>
+<p><span style="color: rgb(184, 191, 198);">error</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">f-&gt;f_op-&gt;open</span>(<span style="color: rgb(184, 191, 198);">inode</span>,<span style="color: rgb(184, 191, 198);">f</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">error</span>)</p>
+<p><span style="color: rgb(200, 143, 208);">goto</span> <span style="color: rgb(184, 191, 198);">cleanup_all</span>;</p>
+<p>}</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>fd_install 函数</strong></p>
+<p>该函数用于将fd与打开文件file进行关联，我们看到这里就是将其放入当前进程 task_struct 的files数组对应 fd下标处。源码描述如下。</p>
+<p><span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(141, 141, 240);">fd_install</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">file</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">files_struct</span> <span style="color: rgb(184, 191, 198);">*files</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">current-&gt;files</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">spin_lock</span>(<span style="color: rgb(184, 191, 198);">&amp;files-&gt;file_lock</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">unlikely</span>(<span style="color: rgb(184, 191, 198);">files-&gt;fd</span>[<span style="color: rgb(184, 191, 198);">fd</span>] <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">NULL</span>))</p>
+<p><span style="color: rgb(184, 191, 198);">BUG</span>();</p>
+<p><span style="color: rgb(184, 191, 198);">files-&gt;fd</span>[<span style="color: rgb(184, 191, 198);">fd</span>] <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">file</span>; <span style="color: rgb(218, 146, 74);">// 在对应fd下标处放置file，将fd返回给用户</span></p>
+<p><span style="color: rgb(184, 191, 198);">spin_unlock</span>(<span style="color: rgb(184, 191, 198);">&amp;files-&gt;file_lock</span>);</p>
+<p>}</p>
+<p><strong>sys _write 函数</strong></p>
+<p>该系统调用将根据传入的fd下标，找到对应的file结构，然后执行写入操作。源码如下。</p>
+<p><span style="color: rgb(184, 191, 198);">asmlinkage</span> <span style="color: rgb(184, 191, 198);">ssize_t</span> <span style="color: rgb(141, 141, 240);">sys_write</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">buf</span>, <span style="color: rgb(28, 198, 133);">size_t</span> <span style="color: rgb(184, 191, 198);">count</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*file</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ssize_t</span> <span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">-EBADF</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fput_needed</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">file</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fget_light</span>(<span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(184, 191, 198);">&amp;fput_needed</span>); <span style="color: rgb(218, 146, 74);">// 根据fd 找到 file</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">file</span>) { <span style="color: rgb(218, 146, 74);">// 文件存在，那么 开始调用vfs 接口写入</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">vfs_write</span>(<span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(184, 191, 198);">buf</span>, <span style="color: rgb(184, 191, 198);">count</span>, <span style="color: rgb(184, 191, 198);">&amp;file-&gt;f_pos</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">fput_light</span>(<span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(184, 191, 198);">fput_needed</span>);</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ret</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*</span><span style="color: rgb(141, 141, 240);">fget_light</span>(<span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>, <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(28, 198, 133);">*</span><span style="color: rgb(184, 191, 198);">fput_needed</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*file</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">files_struct</span> <span style="color: rgb(184, 191, 198);">*files</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">current-&gt;files</span>; <span style="color: rgb(218, 146, 74);">// 获取进程打开文件结构</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">*fput_needed</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">likely</span>((<span style="color: rgb(184, 191, 198);">atomic_read</span>(<span style="color: rgb(184, 191, 198);">&amp;files-&gt;count</span>) <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">1</span>))) { <span style="color: rgb(218, 146, 74);">// 原子性增加file引用计数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">file</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fcheck</span>(<span style="color: rgb(184, 191, 198);">fd</span>); <span style="color: rgb(218, 146, 74);">// 从fd数组下标处获取file结构</span></p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// cas 失败，那么上锁获取</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">spin_lock</span>(<span style="color: rgb(184, 191, 198);">&amp;files-&gt;file_lock</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">file</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">fcheck</span>(<span style="color: rgb(184, 191, 198);">fd</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">file</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">get_file</span>(<span style="color: rgb(184, 191, 198);">file</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">*fput_needed</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">spin_unlock</span>(<span style="color: rgb(184, 191, 198);">&amp;files-&gt;file_lock</span>);</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">file</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(183, 179, 179);">#define fcheck(fd) fcheck_files(current-&gt;files, fd)</span></p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(184, 191, 198);">inline</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">fcheck_files</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">files_struct</span> <span style="color: rgb(184, 191, 198);">*files</span>, <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(184, 191, 198);">fd</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*</span> <span style="color: rgb(184, 191, 198);">file</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">NULL</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">fd</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">files-&gt;max_fds</span>) <span style="color: rgb(218, 146, 74);">// 直接从下标处获取即可</span></p>
+<p><span style="color: rgb(184, 191, 198);">file</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">files-&gt;fd</span>[<span style="color: rgb(184, 191, 198);">fd</span>];</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">file</span>;</p>
+<p>}</p>
+<p><strong>vfs_write 函数</strong></p>
+<p>该函数将会调用vfs接口向file文件中写入数据。我们看到首先根据file获取到inode，然后执行写入。源码如下。</p>
+<p><span style="color: rgb(184, 191, 198);">ssize_t</span> <span style="color: rgb(141, 141, 240);">vfs_write</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*file</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*buf</span>, <span style="color: rgb(28, 198, 133);">size_t</span> <span style="color: rgb(184, 191, 198);">count</span>, <span style="color: rgb(184, 191, 198);">loff_t</span> <span style="color: rgb(184, 191, 198);">*pos</span>)</p>
+<p>{</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*inode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">file-&gt;f_dentry-&gt;d_inode</span>; <span style="color: rgb(218, 146, 74);">// 通过file结构获取到文件inode节点</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ssize_t</span> <span style="color: rgb(184, 191, 198);">ret</span>;</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!ret</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">security_file_permission</span> (<span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(184, 191, 198);">MAY_WRITE</span>); <span style="color: rgb(218, 146, 74);">// 检测权限</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!ret</span>) {</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">file-&gt;f_op-&gt;write</span>) <span style="color: rgb(218, 146, 74);">// 若存在文件存在write 函数，那么直接调用</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">file-&gt;f_op-&gt;write</span>(<span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(184, 191, 198);">buf</span>, <span style="color: rgb(184, 191, 198);">count</span>, <span style="color: rgb(184, 191, 198);">pos</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span> <span style="color: rgb(218, 146, 74);">// 否则尝试使用aio_write 并等待完成 ,因为有些设备文件只支持异步写入</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">do_sync_write</span>(<span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(184, 191, 198);">buf</span>, <span style="color: rgb(184, 191, 198);">count</span>, <span style="color: rgb(184, 191, 198);">pos</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;}</p>
+<p>&nbsp;}</p>
+<p>​</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ret</span>;</p>
+<p>}</p>
+<p><strong>generic_file_write 函数实现</strong></p>
+<p>generic_file_write 函数将会作为write函数在ext2文件系统的实现，所以我们关注该函数的实现过程即可。</p>
+<p><span style="color: rgb(218, 146, 74);">// ext2 文件系统注册的文件写入操作</span></p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file_operations</span> <span style="color: rgb(141, 141, 240);">ext2_file_operations</span> <span style="color: rgb(184, 191, 198);">=</span> {</p>
+<p>...</p>
+<p>.<span style="color: rgb(184, 191, 198);">write</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">generic_file_write</span>,</p>
+<p>...</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">ssize_t</span> <span style="color: rgb(141, 141, 240);">generic_file_write</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*file</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(28, 198, 133);">char</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*buf</span>, <span style="color: rgb(28, 198, 133);">size_t</span> <span style="color: rgb(184, 191, 198);">count</span>, <span style="color: rgb(184, 191, 198);">loff_t</span> <span style="color: rgb(184, 191, 198);">*ppos</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*inode</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">file-&gt;f_dentry-&gt;d_inode-&gt;i_mapping-&gt;host</span>; <span style="color: rgb(218, 146, 74);">// 获取文件inode</span></p>
+<p><span style="color: rgb(184, 191, 198);">ssize_t</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">iovec</span> <span style="color: rgb(141, 141, 240);">local_iov</span> <span style="color: rgb(184, 191, 198);">=</span> { .<span style="color: rgb(184, 191, 198);">iov_base</span> <span style="color: rgb(184, 191, 198);">=</span> (<span style="color: rgb(28, 198, 133);">void</span> <span style="color: rgb(184, 191, 198);">__user</span> <span style="color: rgb(184, 191, 198);">*</span>)<span style="color: rgb(184, 191, 198);">buf</span>, .<span style="color: rgb(184, 191, 198);">iov_len</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">count</span> }; <span style="color: rgb(218, 146, 74);">// 构建写入向量信息</span></p>
+<p><span style="color: rgb(184, 191, 198);">down</span>(<span style="color: rgb(184, 191, 198);">&amp;inode-&gt;i_sem</span>); <span style="color: rgb(218, 146, 74);">// 上锁并开始写入</span></p>
+<p><span style="color: rgb(184, 191, 198);">err</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">generic_file_write_nolock</span>(<span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(184, 191, 198);">&amp;local_iov</span>, <span style="color: rgb(100, 171, 143);">1</span>, <span style="color: rgb(184, 191, 198);">ppos</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">up</span>(<span style="color: rgb(184, 191, 198);">&amp;inode-&gt;i_sem</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">err</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(184, 191, 198);">ssize_t</span> <span style="color: rgb(141, 141, 240);">generic_file_write_nolock</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*file</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">iovec</span> <span style="color: rgb(184, 191, 198);">*iov</span>,</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">nr_segs</span>, <span style="color: rgb(184, 191, 198);">loff_t</span> <span style="color: rgb(184, 191, 198);">*ppos</span>)</p>
+<p>{</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">kiocb</span> <span style="color: rgb(141, 141, 240);">kiocb</span>; <span style="color: rgb(218, 146, 74);">// io 控制块，用于表示一次IO操作</span></p>
+<p><span style="color: rgb(184, 191, 198);">ssize_t</span> <span style="color: rgb(184, 191, 198);">ret</span>;</p>
+<p><span style="color: rgb(184, 191, 198);">init_sync_kiocb</span>(<span style="color: rgb(184, 191, 198);">&amp;kiocb</span>, <span style="color: rgb(184, 191, 198);">file</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">generic_file_aio_write_nolock</span>(<span style="color: rgb(184, 191, 198);">&amp;kiocb</span>, <span style="color: rgb(184, 191, 198);">iov</span>, <span style="color: rgb(184, 191, 198);">nr_segs</span>, <span style="color: rgb(184, 191, 198);">ppos</span>); <span style="color: rgb(218, 146, 74);">// 调用该函数完成写入</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">-EIOCBQUEUED</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(184, 191, 198);">ret</span>) <span style="color: rgb(218, 146, 74);">// IOCB控制块已经进入调度队列，那么等待其执行完成</span></p>
+<p><span style="color: rgb(184, 191, 198);">ret</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">wait_on_sync_kiocb</span>(<span style="color: rgb(184, 191, 198);">&amp;kiocb</span>);</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">ret</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(218, 146, 74);">// 初始化io控制块</span></p>
+<p><span style="color: rgb(183, 179, 179);">#define init_sync_kiocb(x, filp) \</span></p>
+<p><span style="color: rgb(183, 179, 179);">do { \</span></p>
+<p><span style="color: rgb(183, 179, 179);">struct task_struct *tsk = current; \</span></p>
+<p><span style="color: rgb(183, 179, 179);">(x)-&gt;ki_flags = 0; \</span></p>
+<p><span style="color: rgb(183, 179, 179);">(x)-&gt;ki_users = 1; \</span></p>
+<p><span style="color: rgb(183, 179, 179);">(x)-&gt;ki_key = KIOCB_SYNC_KEY; \</span></p>
+<p><span style="color: rgb(183, 179, 179);">(x)-&gt;ki_filp = (filp); \</span></p>
+<p><span style="color: rgb(183, 179, 179);">(x)-&gt;ki_ctx = &amp;tsk-&gt;active_mm-&gt;default_kioctx; \</span></p>
+<p><span style="color: rgb(183, 179, 179);">(x)-&gt;ki_cancel = NULL; \</span></p>
+<p><span style="color: rgb(183, 179, 179);">(x)-&gt;ki_user_obj = tsk; \</span></p>
+<p><span style="color: rgb(183, 179, 179);">} while (0)</span></p>
+<p><strong>generic_file_aio_write_nolock 函数</strong></p>
+<p>该函数将实现真正文件数据写入流程。我们看到将会根据文件打开的类型来选择写入方式，如果是O_DIRECT 那么直接写入调度层，如果是 O_SYNC ，那么等待数据落盘，否则我们写入page cache，并且由于buffer_head 的数据区存在于page中，所以当函数 filemap_copy_from_user 复制成功时，表明写入完成。源码如下。（对于 O_DIRECT 和 O_SYNC 的原理，我们在后面再详细描述）</p>
+<p><span style="color: rgb(184, 191, 198);">ssize_t</span> <span style="color: rgb(141, 141, 240);">generic_file_aio_write_nolock</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">kiocb</span> <span style="color: rgb(184, 191, 198);">*iocb</span>, <span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">iovec</span> <span style="color: rgb(184, 191, 198);">*iov</span>, <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(28, 198, 133);">long</span> <span style="color: rgb(184, 191, 198);">nr_segs</span>, <span style="color: rgb(184, 191, 198);">loff_t</span> <span style="color: rgb(184, 191, 198);">*ppos</span>)</p>
+<p>{</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">for</span> (<span style="color: rgb(184, 191, 198);">seg</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(184, 191, 198);">seg</span> <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(184, 191, 198);">nr_segs</span>; <span style="color: rgb(184, 191, 198);">seg++</span>) { <span style="color: rgb(218, 146, 74);">// 循环计算写入数量，注意：这里由于是单次写入，所以在上述函数中nr_segs为1</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">const</span> <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">iovec</span> <span style="color: rgb(184, 191, 198);">*iv</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">&amp;iov</span>[<span style="color: rgb(184, 191, 198);">seg</span>];</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ocount</span> <span style="color: rgb(184, 191, 198);">+=</span> <span style="color: rgb(184, 191, 198);">iv-&gt;iov_len</span>; <span style="color: rgb(218, 146, 74);">// 增加计数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">unlikely</span>((<span style="color: rgb(184, 191, 198);">ssize_t</span>)(<span style="color: rgb(184, 191, 198);">ocount|iv-&gt;iov_len</span>) <span style="color: rgb(184, 191, 198);">&lt;</span> <span style="color: rgb(100, 171, 143);">0</span>))</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-EINVAL</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">access_ok</span>(<span style="color: rgb(184, 191, 198);">VERIFY_READ</span>, <span style="color: rgb(184, 191, 198);">iv-&gt;iov_base</span>, <span style="color: rgb(184, 191, 198);">iv-&gt;iov_len</span>)) <span style="color: rgb(218, 146, 74);">// 检测地址是否可读</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">continue</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">seg</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">0</span>)</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(184, 191, 198);">-EFAULT</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">nr_segs</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">seg</span>;</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">ocount</span> <span style="color: rgb(184, 191, 198);">-=</span> <span style="color: rgb(184, 191, 198);">iv-&gt;iov_len</span>; <span style="color: rgb(218, 146, 74);">// 当前写入段有误，那么减少增加的计数</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">break</span>;</p>
+<p>&nbsp;}</p>
+<p>&nbsp;...</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">unlikely</span>(<span style="color: rgb(184, 191, 198);">file-&gt;f_flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">O_DIRECT</span>)) { <span style="color: rgb(218, 146, 74);">// 文件打开类型为 O_DIRECT，那么不经过PAGE CACHE，直接写入</span></p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">written</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">generic_file_direct_IO</span>(<span style="color: rgb(184, 191, 198);">WRITE</span>, <span style="color: rgb(184, 191, 198);">iocb</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">iov</span>, <span style="color: rgb(184, 191, 198);">pos</span>, <span style="color: rgb(184, 191, 198);">nr_segs</span>); <span style="color: rgb(218, 146, 74);">// 直接写入</span></p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">written</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(100, 171, 143);">0</span> <span style="color: rgb(184, 191, 198);">&amp;&amp;</span> <span style="color: rgb(184, 191, 198);">file-&gt;f_flags</span> <span style="color: rgb(184, 191, 198);">&amp;</span> <span style="color: rgb(184, 191, 198);">O_SYNC</span>) <span style="color: rgb(218, 146, 74);">// 文件打开类型为 O_SYNC，那么将写入的文件数据落盘</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">status</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">generic_osync_inode</span>(<span style="color: rgb(184, 191, 198);">inode</span>, <span style="color: rgb(184, 191, 198);">OSYNC_METADATA</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;}</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(218, 146, 74);">// 否则执行数据写入到page cache中</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">buf</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">iov-&gt;iov_base</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">do</span> { <span style="color: rgb(218, 146, 74);">// 循环写入</span></p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">page</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">__grab_cache_page</span>(<span style="color: rgb(184, 191, 198);">mapping</span>,<span style="color: rgb(184, 191, 198);">index</span>,<span style="color: rgb(184, 191, 198);">&amp;cached_page</span>,<span style="color: rgb(184, 191, 198);">&amp;lru_pvec</span>); <span style="color: rgb(218, 146, 74);">// 获取当前写入文件的page页（过程暂时省略，又是一大堆内容~这里了解流程即可）</span></p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">status</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">a_ops-&gt;prepare_write</span>(<span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(184, 191, 198);">page</span>, <span style="color: rgb(184, 191, 198);">offset</span>, <span style="color: rgb(184, 191, 198);">offset+bytes</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">likely</span>(<span style="color: rgb(184, 191, 198);">nr_segs</span> <span style="color: rgb(184, 191, 198);">==</span> <span style="color: rgb(100, 171, 143);">1</span>)) <span style="color: rgb(218, 146, 74);">// 从用户空间buf中，将数据复制到 page 页中,由于buffer_head的数据便存在于page中，当该函数执行完成那么就完成了写入操作</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">copied</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">filemap_copy_from_user</span>(<span style="color: rgb(184, 191, 198);">page</span>, <span style="color: rgb(184, 191, 198);">offset</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">buf</span>, <span style="color: rgb(184, 191, 198);">bytes</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(200, 143, 208);">else</span></p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">copied</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">filemap_copy_from_user_iovec</span>(<span style="color: rgb(184, 191, 198);">page</span>, <span style="color: rgb(184, 191, 198);">offset</span>,</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">cur_iov</span>, <span style="color: rgb(184, 191, 198);">iov_base</span>, <span style="color: rgb(184, 191, 198);">bytes</span>);</p>
+<p>&nbsp;&nbsp;&nbsp;...</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">status</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">a_ops-&gt;commit_write</span>(<span style="color: rgb(184, 191, 198);">file</span>, <span style="color: rgb(184, 191, 198);">page</span>, <span style="color: rgb(184, 191, 198);">offset</span>, <span style="color: rgb(184, 191, 198);">offset+bytes</span>); <span style="color: rgb(218, 146, 74);">// 提交写入结果</span></p>
+<p>&nbsp;&nbsp;&nbsp;....</p>
+<p>&nbsp;} <span style="color: rgb(200, 143, 208);">while</span> (<span style="color: rgb(184, 191, 198);">count</span>);</p>
+<p>&nbsp;...</p>
+<p>}</p>
+<p><strong>generic_commit_write 函数</strong></p>
+<p>在ext2中，可以看到是该函数完成了提交写操作，所以我们分析即可，可以看到这里将会把映射到page中的buffer_head高速缓冲区设置为dirty。源码如下。</p>
+<p><span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">address_space_operations</span> <span style="color: rgb(141, 141, 240);">ext2_aops</span> <span style="color: rgb(184, 191, 198);">=</span> {</p>
+<p>...</p>
+<p>.<span style="color: rgb(184, 191, 198);">commit_write</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">generic_commit_write</span>,</p>
+<p>...</p>
+<p>};</p>
+<p>​</p>
+<p><span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">generic_commit_write</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">file</span> <span style="color: rgb(184, 191, 198);">*file</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">page</span> <span style="color: rgb(184, 191, 198);">*page</span>, <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(184, 191, 198);">from</span>, <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(184, 191, 198);">to</span>)</p>
+<p>{</p>
+<p>...</p>
+<p><span style="color: rgb(184, 191, 198);">__block_commit_write</span>(<span style="color: rgb(184, 191, 198);">inode</span>,<span style="color: rgb(184, 191, 198);">page</span>,<span style="color: rgb(184, 191, 198);">from</span>,<span style="color: rgb(184, 191, 198);">to</span>); <span style="color: rgb(218, 146, 74);">// 提交写</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">pos</span> <span style="color: rgb(184, 191, 198);">&gt;</span> <span style="color: rgb(184, 191, 198);">inode-&gt;i_size</span>) { <span style="color: rgb(218, 146, 74);">// 写入成功，那么标记inode为脏，表明内存中的数据尚未落盘</span></p>
+<p><span style="color: rgb(184, 191, 198);">i_size_write</span>(<span style="color: rgb(184, 191, 198);">inode</span>, <span style="color: rgb(184, 191, 198);">pos</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">mark_inode_dirty</span>(<span style="color: rgb(184, 191, 198);">inode</span>);</p>
+<p>}</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><span style="color: rgb(200, 143, 208);">static</span> <span style="color: rgb(28, 198, 133);">int</span> <span style="color: rgb(141, 141, 240);">__block_commit_write</span>(<span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">inode</span> <span style="color: rgb(184, 191, 198);">*inode</span>, <span style="color: rgb(200, 143, 208);">struct</span> <span style="color: rgb(141, 141, 240);">page</span> <span style="color: rgb(184, 191, 198);">*page</span>,</p>
+<p><span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(184, 191, 198);">from</span>, <span style="color: rgb(28, 198, 133);">unsigned</span> <span style="color: rgb(184, 191, 198);">to</span>)</p>
+<p>{</p>
+<p>...</p>
+<p><span style="color: rgb(200, 143, 208);">for</span>(<span style="color: rgb(184, 191, 198);">bh</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">head</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">page_buffers</span>(<span style="color: rgb(184, 191, 198);">page</span>), <span style="color: rgb(184, 191, 198);">block_start</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">0</span>; <span style="color: rgb(218, 146, 74);">// 从页结构中获取 buffer_head 高速缓冲区块，然后遍历写入</span></p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">bh</span> <span style="color: rgb(184, 191, 198);">!=</span> <span style="color: rgb(184, 191, 198);">head</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">!block_start</span>;</p>
+<p>&nbsp;&nbsp;<span style="color: rgb(184, 191, 198);">block_start=block_end</span>, <span style="color: rgb(184, 191, 198);">bh</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">bh-&gt;b_this_page</span>) {</p>
+<p><span style="color: rgb(184, 191, 198);">block_end</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(184, 191, 198);">block_start</span> <span style="color: rgb(184, 191, 198);">+</span> <span style="color: rgb(184, 191, 198);">blocksize</span>;</p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">block_end</span> <span style="color: rgb(184, 191, 198);">&lt;=</span> <span style="color: rgb(184, 191, 198);">from</span> <span style="color: rgb(184, 191, 198);">||</span> <span style="color: rgb(184, 191, 198);">block_start</span> <span style="color: rgb(184, 191, 198);">&gt;=</span> <span style="color: rgb(184, 191, 198);">to</span>) { <span style="color: rgb(218, 146, 74);">// 部分写入</span></p>
+<p><span style="color: rgb(200, 143, 208);">if</span> (<span style="color: rgb(184, 191, 198);">!buffer_uptodate</span>(<span style="color: rgb(184, 191, 198);">bh</span>))</p>
+<p><span style="color: rgb(184, 191, 198);">partial</span> <span style="color: rgb(184, 191, 198);">=</span> <span style="color: rgb(100, 171, 143);">1</span>;</p>
+<p>} <span style="color: rgb(200, 143, 208);">else</span> { <span style="color: rgb(218, 146, 74);">// 写入整个高速缓冲区块，那么标记为脏</span></p>
+<p><span style="color: rgb(184, 191, 198);">set_buffer_uptodate</span>(<span style="color: rgb(184, 191, 198);">bh</span>);</p>
+<p><span style="color: rgb(184, 191, 198);">mark_buffer_dirty</span>(<span style="color: rgb(184, 191, 198);">bh</span>);</p>
+<p>}</p>
+<p>}</p>
+<p>&nbsp;...</p>
+<p><span style="color: rgb(200, 143, 208);">return</span> <span style="color: rgb(100, 171, 143);">0</span>;</p>
+<p>}</p>
+<p>​</p>
+<p><br></p></p>
+</body>
+</html>

@@ -1,0 +1,1312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>Linux E 100 网卡 与 TCP 层原理 一</h1>
+<p>2022-11-07T09:33:19.917+0800</p>
+<p><p><br></p>
+<p>本文将详细解释从 e100 网卡驱动程序 到 TCP 层的数据处理过程。</p>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">e100_init_module 函数</strong></h2>
+<p><br></p>
+<p>我们看到该函数较为简单，将在内核启动时自动调用，然后在该函数中将自身注册到 PCI 驱动列表中，当内核检测到PCI网卡设备时，将会遍历列表查找 e100_id_table 看看当前驱动是否匹配网卡，若匹配，则执行 e100_found1 函数。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  module_init(e100_init_module); <span class="ql-token hljs-comment">// 当 e 100 模块初始化时调用该函数</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> __init <span class="ql-token hljs-title">e100_init_module(void)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> ret;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ret = pci_module_init(&amp;e100_driver); &nbsp;<span class="ql-token hljs-comment">// 将当前PCI 驱动结构指针注册到内核中</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> ret;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-class">struct pci_driver e100_driver =</span> {
+ </div>
+ <div class="ql-code-block">
+  .name &nbsp; &nbsp; &nbsp; &nbsp; = <span class="ql-token hljs-string">"e100"</span>,
+ </div>
+ <div class="ql-code-block">
+  .id_table &nbsp; &nbsp; = e100_id_table, <span class="ql-token hljs-comment">// 用于告诉内核当前驱动匹配哪些网卡信息</span>
+ </div>
+ <div class="ql-code-block">
+  .probe &nbsp; &nbsp; &nbsp; &nbsp;= e100_found1, <span class="ql-token hljs-comment">// 当内核匹配成功后，回调该函数</span>
+ </div>
+ <div class="ql-code-block">
+  .remove &nbsp; &nbsp; &nbsp; = __devexit_p(e100_remove1),
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 标识当前驱动支持的匹配网卡的 PCI 设备信息</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-class">struct pci_device_id e100_id_table[] =</span> {
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1229</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x2449</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1059</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1209</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1029</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1030</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1031</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1032</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1033</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1034</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1038</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1039</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x103A</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x103B</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x103C</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x103D</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x103E</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1050</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1051</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1052</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1053</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1054</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x1055</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x2459</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0x8086</span>, <span class="ql-token hljs-number">0x245D</span>, PCI_ANY_ID, PCI_ANY_ID, <span class="ql-token hljs-number">0</span>, <span class="ql-token hljs-number">0</span>, },
+ </div>
+ <div class="ql-code-block">
+  {<span class="ql-token hljs-number">0</span>,} <span class="ql-token hljs-comment">/* This has to be the last entry*/</span>
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">e100_found1 函数</strong><strong style="color: rgb(222, 222, 222);"> </strong></h2>
+<p><br></p>
+<p>该函数用于在e100 网卡被PCI设备检测到回调，在其中 创建网络设备 struct net_device，同时创建 e100 私有结构 struct e100_private，然后设置他们的成员变量并分配网卡使用内存，最后调用 e100_init 进一步初始化 struct e100_private 结构。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> __devinit <span class="ql-token hljs-title">e100_found1(struct pci_dev *pcid, const struct pci_device_id *ent)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct net_device *dev;</span> <span class="ql-token hljs-comment">// 代表 Linux 中的一个网络设备</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct e100_private *bdp =</span> <span class="ql-token hljs-literal">NULL</span>; <span class="ql-token hljs-comment">// 表示 e100 网卡自己的私有数据</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  dev = alloc_etherdev(<span class="ql-token hljs-keyword">sizeof</span> (<span class="ql-token hljs-keyword">struct</span> e100_private)); <span class="ql-token hljs-comment">// 分配代表 e100 的 struct net_device 结构，同时创建表示 e100 私有数据的 struct e100_private 结构，其中分配的内存空间包括 struct net_device 与 struct e100_private 结构，同时在 struct net_device 的 private 变量处 保留了指向 struct e100_private 的指针。同时该函数中将会初始化 以太网帧 的 mtu 以及 以太网头部长度 等等信息 （初始化代码在 ether_setup 函数中，这里了解即可）</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 初始化 e100 网卡私有数据变量</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  bdp-&gt;watchdog_timer.function = (<span class="ql-token hljs-type">void</span> *) &amp;e100_watchdog; <span class="ql-token hljs-comment">// 看门狗函数，每两秒执行一次，进行数据静态分析和处理</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((rc = e100_pci_setup(pcid, bdp)) != <span class="ql-token hljs-number">0</span>) { <span class="ql-token hljs-comment">// 安装 e100 PCI 适配器具体信息（比如：操作 PCI 的IO 映射等等）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> err_dev;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((rc = e100_alloc_space(bdp)) != <span class="ql-token hljs-number">0</span>) { <span class="ql-token hljs-comment">// 分配 e100 网卡的放置私有数据的内存空间</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> err_pci;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 初始化网络设备 net_dev 的回调函数，当发生对应事件时进行回调</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  dev-&gt;open = &amp;e100_open; <span class="ql-token hljs-comment">// 这里我们关注 e100 设备打开时的回调函数即可</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> ((rc = register_netdev(dev)) != <span class="ql-token hljs-number">0</span>) { <span class="ql-token hljs-comment">// 将网络设备注册到内核中（挂入内核设备链表）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> err_dealloc;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!e100_init(bdp)) { <span class="ql-token hljs-comment">// 执行 e100 的其他初始化</span>
+ </div>
+ <div class="ql-code-block">
+  printk(KERN_ERR <span class="ql-token hljs-string">"e100: Failed to initialize, instance #%d\n"</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; e100nics);
+ </div>
+ <div class="ql-code-block">
+  rc = -ENODEV;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> err_unregister_netdev;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">char</span> __devinit <span class="ql-token hljs-title">e100_alloc_space(struct e100_private *bdp)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> off;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(bdp-&gt;dma_able =
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;pci_alloc_consistent(bdp-&gt;pdev, <span class="ql-token hljs-keyword">sizeof</span> (<span class="ql-token hljs-type">bd_dma_able_t</span>),
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &amp;(bdp-&gt;dma_able_phys)))) { <span class="ql-token hljs-comment">// 分配 e100 使用的 DMA 的内存</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> err;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// E100 dma 表</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">typedef</span> <span class="ql-token hljs-class">struct _bd_dma_able_t {</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">char</span> selftest[E100_SIZE_64A(<span class="ql-token hljs-type">self_test_t</span>)];
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">char</span> stats_counters[E100_SIZE_64A(<span class="ql-token hljs-type">max_counters_t</span>)];
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-type">bd_dma_able_t</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 分配 DMA 使用的空间，返回虚拟地址</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> * <span class="ql-token hljs-title">pci_alloc_consistent(struct pci_dev *hwdev, size_t size,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-params"> &nbsp; dma_addr_t *dma_handle)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">void</span> *ret;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> gfp = GFP_ATOMIC;
+ </div>
+ <div class="ql-code-block">
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (hwdev == <span class="ql-token hljs-literal">NULL</span> ||
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;end_pfn &gt; (hwdev-&gt;dma_mask&gt;&gt;PAGE_SHIFT) || &nbsp;<span class="ql-token hljs-comment">/* XXX */</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; (u32)hwdev-&gt;dma_mask &lt; <span class="ql-token hljs-number">0xffffffff</span>)
+ </div>
+ <div class="ql-code-block">
+  gfp |= GFP_DMA; <span class="ql-token hljs-comment">// 标识优先分配 DMA 区域的内存</span>
+ </div>
+ <div class="ql-code-block">
+  ret = (<span class="ql-token hljs-type">void</span> *)__get_free_pages(gfp, get_order(size)); <span class="ql-token hljs-comment">// 分配内存</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (ret != <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">memset</span>(ret, <span class="ql-token hljs-number">0</span>, size);
+ </div>
+ <div class="ql-code-block">
+  *dma_handle = virt_to_bus(ret); <span class="ql-token hljs-comment">// 将虚拟内存映射为 PCI 总线地址</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> ret;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 我们看 Intel 的即可，Intel 中物理地址即是总线地址</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define virt_to_bus virt_to_phys</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> <span class="ql-token hljs-title">virt_to_phys(volatile void * address)</span>{
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> __pa(address);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 在 I386 中很是简单，因为虚拟地址的高 1GB 便是 内核地址，其映射到 物理地址 0处，所以我们直接用内核地址 - 3GB 便是物理地址</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define __pa(x) ((unsigned long)(x)-PAGE_OFFSET)</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define PAGE_OFFSET ((unsigned long)__PAGE_OFFSET)</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define __PAGE_OFFSET (0xC0000000UL) // 表示 3GB</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 进一步初始化 e100 私有数据</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">char</span> __devinit <span class="ql-token hljs-title">e100_init(struct e100_private *bdp)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  e100_sw_init(bdp); <span class="ql-token hljs-comment">// 初始化 e100 的内部结构（tx_thld 写阈值，e100 的 EPROM 大小信息，自旋锁等等信息）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!e100_selftest(bdp, &amp;st_timeout, &amp;st_result)) { <span class="ql-token hljs-comment">// 网卡自我检测，看看一切是否正常</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-keyword">if</span> (st_timeout) {
+ </div>
+ <div class="ql-code-block">
+  printk(KERN_ERR <span class="ql-token hljs-string">"e100: selftest timeout\n"</span>);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  printk(KERN_ERR <span class="ql-token hljs-string">"e100: selftest failed. Results: %x\n"</span>,
+ </div>
+ <div class="ql-code-block">
+  st_result);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">false</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">else</span>
+ </div>
+ <div class="ql-code-block">
+  printk(KERN_DEBUG <span class="ql-token hljs-string">"e100: selftest OK.\n"</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  e100_rd_eaddr(bdp); &nbsp;<span class="ql-token hljs-comment">// 从 e100 的 EPROM 中读取网卡的 mac 地址信息</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!is_valid_ether_addr(bdp-&gt;device-&gt;dev_addr)) {
+ </div>
+ <div class="ql-code-block">
+  printk(KERN_ERR <span class="ql-token hljs-string">"e100: Invalid Ethernet address\n"</span>);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">false</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 读取 e100 网卡的 PWA (printed wired assembly) 信息</span>
+ </div>
+ <div class="ql-code-block">
+  e100_rd_pwa_no(bdp);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!e100_hw_init(bdp)) <span class="ql-token hljs-comment">// 初始化 e100 网卡的硬件状态信息</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">false</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  e100_disable_clear_intr(bdp); <span class="ql-token hljs-comment">// 关闭 e100 的网卡中断 ，当 e100 打开后 将会重新开启中断</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">true</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">e100_open 函数</strong></h2>
+<p><br></p>
+<p>该函数我们前面看到通过注册到 struct net_device 结构的回调函数中，该函数将会由内核在 PCI 网络设备初始化后，网络设备注册到内核中时进行调用。在该函数中将进一步对 e100 网卡的数据结构和占用内存分配（这里特别注意：TCB 个 RFD 两个循环队列的创建），然后开启 e100 中断，至此 该网卡将正式接受外部数据。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">e100_open(struct net_device *dev)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct e100_private *bdp;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> rc = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  bdp = dev-&gt;priv;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!e100_alloc_tcb_pool(bdp)) { <span class="ql-token hljs-comment">// 分配 TCB 循环队列，该队列用于发送数据时使用，将用于 DMA 发送到网卡的数据传输（队列由 struct tcb_t 结构描述，队列头部保存在 struct e100_private 结构的 tcb_pool 变量中,这个我们后面再详细分析）</span>
+ </div>
+ <div class="ql-code-block">
+  rc = -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> err_exit;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  e100_setup_tcb_pool((<span class="ql-token hljs-type">tcb_t</span> *) bdp-&gt;tcb_pool.data,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;bdp-&gt;params.TxDescriptors, bdp); <span class="ql-token hljs-comment">// 将上述分配的 TCB 循环队列的物理地址安装到 struct e100_private 中</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!e100_alloc_rfd_pool(bdp)) { <span class="ql-token hljs-comment">// 分配 RFD 循环队列，该队列用于接受来自网卡的数据（队列由 struct rx_list_elem 结构描述，队列的头部保存在 struct e100_private 结构的 rx_struct_pool 变量中，这个我们后面再详细分析）</span>
+ </div>
+ <div class="ql-code-block">
+  rc = -ENOMEM;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> err_exit;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ... <span class="ql-token hljs-comment">// 启动 网卡 控制单元、接收单元，初始化看门狗时钟</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> ((rc = request_irq(dev-&gt;irq, &amp;e100intr, SA_SHIRQ, <span class="ql-token hljs-comment">// 向内核注册网卡中断处理操作，当网卡发生中断时，将会回调 e100intr 函数 ，SA_SHIRQ 标志表示e100网卡的中断使用常规的 共享中断线，发生中断时，内核会根据 第一个参数 dev-&gt;irq 匹配中断号，从而调用 e100intr 函数，这个我们在后文再详细描述</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;dev-&gt;name, dev)) != <span class="ql-token hljs-number">0</span>) {
+ </div>
+ <div class="ql-code-block">
+  del_timer_sync(&amp;bdp-&gt;watchdog_timer);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> err_exit;
+ </div>
+ <div class="ql-code-block">
+  } &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;e100_set_intr_mask(bdp); &nbsp;<span class="ql-token hljs-comment">// 开启 e100 中断，此时网卡正式进入运行状态</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> rc;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">e100_alloc_tcb_pool 函数</strong></h2>
+<p><br></p>
+<p>该函数用于创建网卡发送数据的循环队列。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">e100_alloc_tcb_pool(struct e100_private *bdp)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> stcb = <span class="ql-token hljs-keyword">sizeof</span> (<span class="ql-token hljs-type">tcb_t</span>) * bdp-&gt;params.TxDescriptors; <span class="ql-token hljs-comment">// 队列长度由配置的TX描述符个数来表示（在 e100_check_options 函数中设置 默认 #define E100_DEFAULT_TCB &nbsp; 64 个 ）</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(bdp-&gt;tcb_pool.data =
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;pci_alloc_consistent(bdp-&gt;pdev, stcb, &amp;bdp-&gt;tcb_phys))) <span class="ql-token hljs-comment">// 调用内核分配函数分配内存</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">memset</span>(bdp-&gt;tcb_pool.data, <span class="ql-token hljs-number">0x00</span>, stcb);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">e100_alloc_rfd_pool 函数</strong></h2>
+<p><br></p>
+<p>该函数用于创建网卡接收数据的循环队列。描述如下。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 链表描述结构</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rx_list_elem {</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct list_head list_elem;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">dma_addr_t</span> dma_addr;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct sk_buff *skb;</span>
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-type">int</span> <span class="ql-token hljs-title">e100_alloc_rfd_pool(struct e100_private *bdp)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rx_list_elem *rx_struct;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">int</span> i;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  INIT_LIST_HEAD(&amp;(bdp-&gt;active_rx_list));
+ </div>
+ <div class="ql-code-block">
+  INIT_LIST_HEAD(&amp;(bdp-&gt;rx_struct_pool));
+ </div>
+ <div class="ql-code-block">
+  bdp-&gt;skb_req = bdp-&gt;params.RxDescriptors; <span class="ql-token hljs-comment">// 同样在 e100_check_options 函数中配置 默认 #define E100_DEFAULT_RFD &nbsp; 64 个</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">for</span> (i = <span class="ql-token hljs-number">0</span>; i &lt; bdp-&gt;skb_req; i++) { <span class="ql-token hljs-comment">// 循环从 slab 分配器中分配 64个 struct rx_list_elem 结构放入 struct e100_private 的 rx_struct_pool 变量中</span>
+ </div>
+ <div class="ql-code-block">
+  rx_struct = kmalloc(<span class="ql-token hljs-keyword">sizeof</span> (<span class="ql-token hljs-keyword">struct</span> rx_list_elem), GFP_ATOMIC);
+ </div>
+ <div class="ql-code-block">
+  list_add(&amp;(rx_struct-&gt;list_elem), &amp;(bdp-&gt;rx_struct_pool));
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  e100_alloc_skbs(bdp); <span class="ql-token hljs-comment">// 然后分配skb用于保存网卡接收的数据</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> !list_empty(&amp;(bdp-&gt;active_rx_list));
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">e100_alloc_skbs(struct e100_private *bdp)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">for</span> (; bdp-&gt;skb_req &gt; <span class="ql-token hljs-number">0</span>; bdp-&gt;skb_req--) { <span class="ql-token hljs-comment">// 遍历所有上述函数分配的 struct rx_list_elem 队列，将它们从 rx_struct_pool 链表中摘除，设置好其中的 skb 后挂入 struct e100_private 的 active_rx_list 变量中，此时正是启用 该 rx_list_elem 结构来接收数据</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rx_list_elem *rx_struct;</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((rx_struct = e100_alloc_skb(bdp)) == <span class="ql-token hljs-literal">NULL</span>)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span>;
+ </div>
+ <div class="ql-code-block">
+  e100_add_skb_to_end(bdp, rx_struct);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-keyword">struct</span> rx_list_elem * <span class="ql-token hljs-title">e100_alloc_skb(struct e100_private *bdp)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct sk_buff *new_skb;</span>
+ </div>
+ <div class="ql-code-block">
+  u32 skb_size = <span class="ql-token hljs-keyword">sizeof</span> (<span class="ql-token hljs-type">rfd_t</span>); <span class="ql-token hljs-comment">// rfd 表示 Receive Frame Descriptor 接收帧描述符</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rx_list_elem *rx_struct;</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  new_skb = (<span class="ql-token hljs-keyword">struct</span> sk_buff *) dev_alloc_skb(skb_size); <span class="ql-token hljs-comment">// 首先分配一个 skb 结构（同时初始化其中的属性，这里了解即可），大小由 rfd_t 结构， 也即接收描述符 的大小来指定（读者可以看一下该方法：会将 rfd_t 的内容放置在 sk_buff 的数据指针（*data）指向的内存域中）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (new_skb) {
+ </div>
+ <div class="ql-code-block">
+  skb_reserve(new_skb, <span class="ql-token hljs-number">2</span>); <span class="ql-token hljs-comment">// 保留两个字节用于做IP数据对齐到 DWORD 四字，因为以太网头部 14byte，所以加上 两个 变为 16byte</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((rx_struct = e100_get_rx_struct(bdp)) == <span class="ql-token hljs-literal">NULL</span>) <span class="ql-token hljs-comment">// 从rx_struct_pool链表中移出一个分配好的 struct rx_list_elem 结构</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> err;
+ </div>
+ <div class="ql-code-block">
+  rx_struct-&gt;skb = new_skb; <span class="ql-token hljs-comment">// 保存 skb 引用</span>
+ </div>
+ <div class="ql-code-block">
+  rx_struct-&gt;dma_addr = pci_map_single(bdp-&gt;pdev, new_skb-&gt;data,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; <span class="ql-token hljs-keyword">sizeof</span> (<span class="ql-token hljs-type">rfd_t</span>),
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; PCI_DMA_FROMDEVICE); <span class="ql-token hljs-comment">// 将skb中用于存放数据的地址映射为 DMA 地址用于 DMA 传输（DMA 会将数据传输到 new_skb-&gt;data 中）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!rx_struct-&gt;dma_addr)
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> err;
+ </div>
+ <div class="ql-code-block">
+  skb_reserve(new_skb, bdp-&gt;rfd_size); <span class="ql-token hljs-comment">// 末尾保留 rfd 的大小，用于存放bdp设置的 rfd 描述符信息</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> rx_struct;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  err:
+ </div>
+ <div class="ql-code-block">
+  dev_kfree_skb_irq(new_skb);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 将分配好属性的 struct rx_list_elem 结构放入 active_rx_list 链表中</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">e100_add_skb_to_end(struct e100_private *bdp, struct rx_list_elem *rx_struct)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rx_list_elem *rx_struct_last;</span>
+ </div>
+ <div class="ql-code-block">
+  ... <span class="ql-token hljs-comment">// 设置 rfd_t 的属性</span>
+ </div>
+ <div class="ql-code-block">
+  list_add_tail(&amp;(rx_struct-&gt;list_elem), &amp;(bdp-&gt;active_rx_list));
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">e100 intr 函数</strong></h2>
+<p><br></p>
+<p>该函数将由CPU在检测到注册到中断线上的中断发生时调用，将负责处理 RX（接受队列） 和 TX（传输队列） 。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">irqreturn_t</span> <span class="ql-token hljs-title">e100intr(int irq, void *dev_inst, struct pt_regs *regs)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 处理接受队列</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (intr_status &amp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; (SCB_STATUS_ACK_FR | SCB_STATUS_ACK_RNR | SCB_STATUS_ACK_SWI))
+ </div>
+ <div class="ql-code-block">
+  bdp-&gt;drv_stats.rx_intr_pkts += e100_rx_srv(bdp);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 处理发送队列</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (intr_status &amp; (SCB_STATUS_ACK_CNA | SCB_STATUS_ACK_CX))
+ </div>
+ <div class="ql-code-block">
+  e100_tx_srv(bdp);
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> IRQ_HANDLED;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 处理接受队列函数</span>
+ </div>
+ <div class="ql-code-block">
+  u32 <span class="ql-token hljs-title">e100_rx_srv(struct e100_private *bdp)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-class">struct rx_list_elem *rx_struct;</span> <span class="ql-token hljs-comment">// 表示当前处理的读描述符</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">rfd_t</span> *rfd; <span class="ql-token hljs-comment">// 表示当前处理的接收帧描述符</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-class">struct sk_buff *skb;</span> <span class="ql-token hljs-comment">// 表示当前接收的数据描述块</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">for</span> (i = <span class="ql-token hljs-number">0</span>; i &lt; bdp-&gt;params.RxDescriptors; i++) { <span class="ql-token hljs-comment">// 遍历所有读描述符（ struct rx_list_elem）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (list_empty(&amp;(bdp-&gt;active_rx_list))) { <span class="ql-token hljs-comment">// 没有活动的读描述符，直接退出</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  rx_struct = list_entry(bdp-&gt;active_rx_list.next,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-keyword">struct</span> rx_list_elem, list_elem); <span class="ql-token hljs-comment">// 获取第一个读描述符</span>
+ </div>
+ <div class="ql-code-block">
+  skb = rx_struct-&gt;skb;
+ </div>
+ <div class="ql-code-block">
+  rfd = RFD_POINTER(skb, bdp); <span class="ql-token hljs-comment">// #define RFD_POINTER(skb,bdp) &nbsp; &nbsp; ((rfd_t *) (((unsigned char *)((skb)-&gt;data))-((bdp)-&gt;rfd_size))) 可以看到这里将 skb 的数据地址 - rfd 结构的大小即可获得其中的 rfd 读描述符，为何？因为 data 指针后面放置着 rfd 信息：rfd 信息 ----- data 指针</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 与 CPU 的高速缓存同步 RFD 信息，使得 CPU 当前 dma_addr 地址的缓存数据为最新值</span>
+ </div>
+ <div class="ql-code-block">
+  pci_dma_sync_single(bdp-&gt;pdev, rx_struct-&gt;dma_addr,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;bdp-&gt;rfd_size, PCI_DMA_FROMDEVICE);
+ </div>
+ <div class="ql-code-block">
+  rfd_status = le16_to_cpu(rfd-&gt;rfd_header.cb_status); <span class="ql-token hljs-comment">// 检查当前 rfd 状态，如果状态不为RFD_STATUS_COMPLETE，表示当前接受队列的 rfd 及其之后都没有数据，那么结束循环 </span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(rfd_status &amp; RFD_STATUS_COMPLETE))
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">break</span>;
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 将当前 rx_struct 读描述符结构从 active_rx_list 循环队列中移出，方便我们后续处理接收到的数据</span>
+ </div>
+ <div class="ql-code-block">
+  list_del(&amp;(rx_struct-&gt;list_elem));
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 若当前 rfd 的状态 不为 RFD_STATUS_OK ，那么保留当前接收到错误数据包的 rx_struct 读描述符，复用它，所以这里将它重新放入 active_rx_list 循环队列（为什么重新调用 e100_add_skb_to_end 方法，答案很明显：重置rx_struct 读描述符 内部的数据）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!(rfd_status &amp; RFD_STATUS_OK)) {
+ </div>
+ <div class="ql-code-block">
+  e100_add_skb_to_end(bdp, rx_struct);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">continue</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  data_sz = <span class="ql-token hljs-type">min_t</span>(u16, (le16_to_cpu(rfd-&gt;rfd_act_cnt) &amp; <span class="ql-token hljs-number">0x3fff</span>),
+ </div>
+ <div class="ql-code-block">
+  (<span class="ql-token hljs-keyword">sizeof</span> (<span class="ql-token hljs-type">rfd_t</span>) - bdp-&gt;rfd_size)); <span class="ql-token hljs-comment">// 获取接收到的数据长度（rfd-&gt;rfd_act_cnt 中保存着接受到的数据帧长度）</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">// 与 CPU 同步 所有DMA传输的数据</span>
+ </div>
+ <div class="ql-code-block">
+  pci_dma_sync_single(bdp-&gt;pdev, rx_struct-&gt;dma_addr,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; (data_sz + bdp-&gt;rfd_size),
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;PCI_DMA_FROMDEVICE);
+ </div>
+ <div class="ql-code-block">
+  pci_unmap_single(bdp-&gt;pdev, rx_struct-&gt;dma_addr,
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">sizeof</span> (<span class="ql-token hljs-type">rfd_t</span>), PCI_DMA_FROMDEVICE); <span class="ql-token hljs-comment">// 将 DMA 映射区域中 rfd_t 的信息解除映射，此时该区域的空间将不再为 DMA 使用</span>
+ </div>
+ <div class="ql-code-block">
+  list_add(&amp;(rx_struct-&gt;list_elem), &amp;(bdp-&gt;rx_struct_pool)); <span class="ql-token hljs-comment">// 将该 读描述符 struct rx_struct 放入struct rx_struct_pool 池中，在下一次调用 e100_get_rx_struct 函数时，复用该结构</span>
+ </div>
+ <div class="ql-code-block">
+  bdp-&gt;skb_req++; <span class="ql-token hljs-comment">// 增加 skb 请求数</span>
+ </div>
+ <div class="ql-code-block">
+  e100_alloc_skbs(bdp); <span class="ql-token hljs-comment">// 由于上面的 skb 已经取下来准备递交给上层协议栈，所以这里需要新分配一个新的 sk_buff 用于接受下一个数据帧，此时将会复用前面 放入 struct rx_struct_pool 池中的 struct rx_struct 结构</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 设置数据帧大小</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> ((bdp-&gt;flags &amp; DF_CSUM_OFFLOAD)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;&amp;&amp; (bdp-&gt;rev_id &lt; D102_REV_ID))
+ </div>
+ <div class="ql-code-block">
+  skb_put(skb, (<span class="ql-token hljs-type">int</span>) data_sz - <span class="ql-token hljs-number">2</span>); <span class="ql-token hljs-comment">// 如果存在校验和，那么去除末尾的 2字节 校验和数据</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">else</span>
+ </div>
+ <div class="ql-code-block">
+  skb_put(skb, (<span class="ql-token hljs-type">int</span>) data_sz); <span class="ql-token hljs-comment">// 将 skb 的 tail 指针向后移动到最后一个数据字节，同时增加数据长度 length 属性值，打开一看便知</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 设置当前数据帧的协议类型，通常来说我们用的都是 IP 协议</span>
+ </div>
+ <div class="ql-code-block">
+  skb-&gt;protocol = eth_type_trans(skb, dev);
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 设置校验和信息</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (bdp-&gt;flags &amp; DF_CSUM_OFFLOAD) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (bdp-&gt;rev_id &gt;= D102_REV_ID) {
+ </div>
+ <div class="ql-code-block">
+  skb-&gt;ip_summed = e100_D102_check_checksum(rfd);
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  skb-&gt;ip_summed = e100_D101M_checksum(bdp, skb);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  skb-&gt;ip_summed = CHECKSUM_NONE;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  bdp-&gt;drv_stats.net_stats.rx_bytes += skb-&gt;len;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span>(bdp-&gt;vlgrp &amp;&amp; (rfd_status &amp; CB_STATUS_VLAN)) { <span class="ql-token hljs-comment">// 处理vlan 虚拟局域网</span>
+ </div>
+ <div class="ql-code-block">
+  vlan_hwaccel_rx(skb, bdp-&gt;vlgrp, be16_to_cpu(rfd-&gt;vlanid));
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 我们这里 &nbsp; 看正常包逻辑即可</span>
+ </div>
+ <div class="ql-code-block">
+  netif_rx(skb); <span class="ql-token hljs-comment">// 将数据帧递交给上层协议</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  dev-&gt;last_rx = jiffies; <span class="ql-token hljs-comment">// 记录最后一次处理接受数据帧的时间</span>
+ </div>
+ <div class="ql-code-block">
+  rfd_cnt++;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">netif_rx 函数</strong></h2>
+<p><br></p>
+<p>该函数非常简单：将接收到的数据包放入 每 CPU 结构 struct softnet_data 的 input_pkt_queue 队列，等待中断下半部（软中断）处理。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  nt <span class="ql-token hljs-title">netif_rx(struct sk_buff *skb)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  local_irq_save(flags); <span class="ql-token hljs-comment">// 关闭当前 cpu 中断响应</span>
+ </div>
+ <div class="ql-code-block">
+  this_cpu = smp_processor_id();
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">queue</span> = &amp;__get_cpu_var(softnet_data); <span class="ql-token hljs-comment">// 获取当前 CPU 的 struct softnet_data 的结构，该结构每个CPU一个，用于存放 当前接收到的数据包</span>
+ </div>
+ <div class="ql-code-block">
+  __get_cpu_var(netdev_rx_stat).total++; <span class="ql-token hljs-comment">// 增加接受到的数据包计数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (<span class="ql-token hljs-built_in">queue</span>-&gt;input_pkt_queue.qlen &lt;= netdev_max_backlog) { <span class="ql-token hljs-comment">// int netdev_max_backlog = 300; 最大 300 个数据包</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (<span class="ql-token hljs-built_in">queue</span>-&gt;input_pkt_queue.qlen) { <span class="ql-token hljs-comment">// 当前输入队列中存在数据帧</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (<span class="ql-token hljs-built_in">queue</span>-&gt;throttle) <span class="ql-token hljs-comment">// 设置了不再接收任何数据帧，那么丢弃当前数据包</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> drop;
+ </div>
+ <div class="ql-code-block">
+  enqueue: <span class="ql-token hljs-comment">// 否则将其放入 input_pkt_queue 末尾</span>
+ </div>
+ <div class="ql-code-block">
+  dev_hold(skb-&gt;dev); <span class="ql-token hljs-comment">// 增加 dev 设备数 计数，因为当前已经传递给了上层协议</span>
+ </div>
+ <div class="ql-code-block">
+  __skb_queue_tail(&amp;<span class="ql-token hljs-built_in">queue</span>-&gt;input_pkt_queue, skb);
+ </div>
+ <div class="ql-code-block">
+  local_irq_restore(flags); <span class="ql-token hljs-comment">// 开启CPU的中断响应</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-built_in">queue</span>-&gt;cng_level;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; <span class="ql-token hljs-comment">// 执行到这里，说明输入队列中不存在任何数据，那么如果设置了不在接收任何数据帧，那么得将其打开 接收数据</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (<span class="ql-token hljs-built_in">queue</span>-&gt;throttle) {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">queue</span>-&gt;throttle = <span class="ql-token hljs-number">0</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  netif_rx_schedule(&amp;<span class="ql-token hljs-built_in">queue</span>-&gt;backlog_dev); <span class="ql-token hljs-comment">// 设置软中断标志位，通知当前已经收到数据包，等待硬中断处理完毕后，随后将会开启硬中断，然后执行软中断的中断下半部</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">goto</span> enqueue; <span class="ql-token hljs-comment">// 打开 throttle 后，将数据包丢到 input_pkt_queue 队列中</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (!<span class="ql-token hljs-built_in">queue</span>-&gt;throttle) { <span class="ql-token hljs-comment">// 若上述开启了 throttle ，那么得将其关闭，等待数据包被软中断处理</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">queue</span>-&gt;throttle = <span class="ql-token hljs-number">1</span>;
+ </div>
+ <div class="ql-code-block">
+  __get_cpu_var(netdev_rx_stat).throttled++;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  drop: <span class="ql-token hljs-comment">// 丢弃当前数据包的流程处理</span>
+ </div>
+ <div class="ql-code-block">
+  __get_cpu_var(netdev_rx_stat).dropped++;
+ </div>
+ <div class="ql-code-block">
+  local_irq_restore(flags);
+ </div>
+ <div class="ql-code-block">
+  kfree_skb(skb);
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">return</span> NET_RX_DROP;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">netif_rx_schedule 函数</strong></h2>
+<p><br></p>
+<p>这里使用了 NAPI 的方式来对网卡中的数据包进行处理，所以在前面需要使用 per cpu 的 struct softnet_data 结构中的 struct net_device backlog_dev 设备来兼容旧的API方式处理数据包，所以先将数据包放入 input_pkt_queue 队列，然后在这里把 这个 backlog_dev 设备链入 struct softnet_data 结构中 poll_list 列表，随后将由 软中断 来处理 input_pkt_queue 队列 中的数据包。</p>
+<p>同时如何保证进程与中断之间的操作安全？使用 local_irq_save 来关闭硬中断，此时不管是时钟还是网卡，都不响应中断，所以处理过程无需上锁，纯天然安全，处理完毕后使用 local_irq_restore 开启硬中断。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">void</span> <span class="ql-token hljs-title">netif_rx_schedule(struct net_device *dev)</span>
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (netif_rx_schedule_prep(dev)) <span class="ql-token hljs-comment">// 当前设备状态正常</span>
+ </div>
+ <div class="ql-code-block">
+  __netif_rx_schedule(dev);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">inline</span> <span class="ql-token hljs-type">void</span> __netif_rx_schedule(<span class="ql-token hljs-keyword">struct</span> net_device *dev)
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">unsigned</span> <span class="ql-token hljs-type">long</span> flags;
+ </div>
+ <div class="ql-code-block">
+  local_irq_save(flags);
+ </div>
+ <div class="ql-code-block">
+  dev_hold(dev);
+ </div>
+ <div class="ql-code-block">
+  list_add_tail(&amp;dev-&gt;poll_list, &amp;__get_cpu_var(softnet_data).poll_list); <span class="ql-token hljs-comment">// 将当前设备放入 poll 轮询列表等待处理</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 设置处理队列中数据包的限额，超出限额后释放 CPU 资源，避免CPU一直执行软中断处理数据包</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">if</span> (dev-&gt;quota &lt; <span class="ql-token hljs-number">0</span>)
+ </div>
+ <div class="ql-code-block">
+  dev-&gt;quota += dev-&gt;weight;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">else</span>
+ </div>
+ <div class="ql-code-block">
+  dev-&gt;quota = dev-&gt;weight;
+ </div>
+ <div class="ql-code-block">
+  __raise_softirq_irqoff(NET_RX_SOFTIRQ); <span class="ql-token hljs-comment">// 设置接受数据包软中断，等待中断下半部完成 input_pkt_queue 队列的处理</span>
+ </div>
+ <div class="ql-code-block">
+  local_irq_restore(flags);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p></p>
+</body>
+</html>

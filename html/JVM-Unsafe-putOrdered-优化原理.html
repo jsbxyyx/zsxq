@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<h1>JVM Unsafe putOrdered 优化原理</h1>
+<p>2022-10-03T22:49:42.234+0800</p>
+<p><p>我们通常在代码中使用 acquire 和 release 语义来解决多线程之间的类似乱序现象。本文将详细描述Hotspot JIT 对于该操作的优化过程。</p>
+<p><br></p>
+<p>我们先来看该方法的调用方式，以下代码摘自 doug lea 老爷子的 ForkJoinPool代码，因为Java除了他，还有谁的并发代码更值得阅读和深究呢？我们看到这里使用 putOrdered 来保证 数组项 和 top 变量的写入顺序，但并不具备volatile 语义，同时 top变量并未使用 volatile 修饰，那么语义何在？我们知道：只要 top 变量 和 数组项 按顺序写入，那么 top 变量 只要递进到下一个 数组下标成功，那么必然数组项一定已经放入成功，所以，当线程后续如果对其他 volatile 变量进行写入操作时，那么由于 volatile 语义保证了 top变量 一定会在 volatile 变量写入之前写入成功，同时 由于 putOrdered 保证了 数组项 与 top 变量的写入顺序，那么 此时 数组项也一定会写入成功，所以此时我们根本不需要 volatile 语义来强制使用全屏障来放大这种影响：别忘了 volatile 的写入 将会 写入操作后面增加一个 storeload 屏障。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-type">static</span> <span class="ql-token hljs-keyword">final</span> <span class="ql-token hljs-keyword">class</span> <span class="ql-token hljs-title">WorkQueue</span> {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> top;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 将任务放到array数组</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-function">final void push(ForkJoinTask&lt;?&gt; task) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> s = top;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> ((a = array) != null) { &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> m = a.length - <span class="ql-token hljs-number">1</span>; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;U.<span class="ql-token hljs-built_in">putOrderedObject</span>(a, ((m &amp; s) &lt;&lt; ASHIFT) + ABASE, task); <span class="ql-token hljs-comment">// 先放置任务 array 的 top 项</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;U.<span class="ql-token hljs-built_in">putOrderedInt</span>(<span class="ql-token hljs-keyword">this</span>, QTOP, s + <span class="ql-token hljs-number">1</span>); <span class="ql-token hljs-comment">// 然后对 top + 1 移动到 数组的下一个放置下标中</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">未经 JIT 优化的 putOrdered </strong></h2>
+<p><br></p>
+<p>通过源码我们看到，当 JIT 没有参与优化时， putOrdered 的写入操作等价于 volatile 的写入操作。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">UNSAFE_ENTRY</span>(<span class="ql-token hljs-type">void</span>, <span class="ql-token hljs-built_in">Unsafe_SetOrderedInt</span>(JNIEnv *env, jobject unsafe, jobject obj, jlong offset, jint x))
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">SET_FIELD_VOLATILE</span>(obj, offset, jint, x);
+ </div>
+ <div class="ql-code-block">
+  UNSAFE_END
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define SET_FIELD_VOLATILE(obj, offset, type_name, x) </span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;oop p = JNIHandles::<span class="ql-token hljs-built_in">resolve</span>(obj); &nbsp;<span class="ql-token hljs-comment">// 操作对象的首地址</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;OrderAccess::<span class="ql-token hljs-built_in">release_store_fence</span>((<span class="ql-token hljs-keyword">volatile</span> type_name*)<span class="ql-token hljs-built_in">index_oop_from_field_offset_long</span>(p, offset), x); <span class="ql-token hljs-comment">// 使用volatile 的语义完成写入</span>
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 我们知道 x86 的 xchg 指令自身会自动声明 lock 信号，所以该操作为全屏障操作，此时等价于同时加上了（storestore 和 storeload 屏障）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">inline void &nbsp; &nbsp; OrderAccess::release_store_fence(volatile jshort* p, jshort v) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-function">__asm__ volatile ( &nbsp;"xchgw (%2),%0"</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function"> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; : "=r" (v)</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function"> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; : "0" (v), "r" (p)</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function"> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; : "memory")</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">编译器优化的 putOrdered </strong></h2>
+<p><br></p>
+<p>我们看 C1 编译器的代码，可以看到 HIR 和 LIR ，这两个是关键流程。LIR 将根据 HIR 生成的节点来完成寄存器分配，而主要优化阶段在 HIR。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void Compiler::compile_method(ciEnv* env, ciMethod* method, int entry_bci) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-function">Compilation c(this, env, method, entry_bci, buffer_blob)</span>; <span class="ql-token hljs-comment">// 开始编译</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  Compilation::<span class="ql-token hljs-built_in">Compilation</span>(...){
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">compile_method</span>();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void Compilation::compile_method() </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">int</span> frame_size = <span class="ql-token hljs-built_in">compile_java_method</span>();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">int Compilation::compile_java_method() </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">build_hir</span>(); <span class="ql-token hljs-comment">// 构建高等级中间语言</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">emit_lir</span>(); &nbsp;<span class="ql-token hljs-comment">// 构建低等级中间语言</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">emit_code_body</span>(); <span class="ql-token hljs-comment">// 根据 LIR 生成机器语言</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(222, 222, 222);">build_hir</strong></h3>
+<p><br></p>
+<p>在构建 HIR 时，我们看到当invokeStaticMethod 字节码调用的为 putOrderedXX时，将会在HIR 中添加一个 UnsafePutObject 操作对象，该对象将会在后面调用 LIR 时使用。源码如下。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void Compilation::build_hir() </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;_hir = <span class="ql-token hljs-keyword">new</span> <span class="ql-token hljs-built_in">IR</span>(<span class="ql-token hljs-keyword">this</span>, <span class="ql-token hljs-built_in">method</span>(), <span class="ql-token hljs-built_in">osr_bci</span>()); <span class="ql-token hljs-comment">// 创建对象后直接开始构建 HIR </span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// IR 构造函数</span>
+ </div>
+ <div class="ql-code-block">
+  IR::<span class="ql-token hljs-built_in">IR</span>(Compilation* compilation, ciMethod* method, <span class="ql-token hljs-type">int</span> osr_bci) :
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;_locals_size(<span class="ql-token hljs-built_in">in_WordSize</span>(<span class="ql-token hljs-number">-1</span>))
+ </div>
+ <div class="ql-code-block">
+  , _num_loops(<span class="ql-token hljs-number">0</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp;_compilation = compilation;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;_top_scope &nbsp; = <span class="ql-token hljs-keyword">new</span> <span class="ql-token hljs-built_in">IRScope</span>(compilation, <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-number">-1</span>, method, osr_bci, <span class="ql-token hljs-literal">true</span>); <span class="ql-token hljs-comment">// 创建 IRScope 由此开始转换，注意这里指定了 末位参数 create_graph 为 true</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;_code &nbsp; &nbsp; &nbsp; &nbsp;= <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// IRScope 构造函数</span>
+ </div>
+ <div class="ql-code-block">
+  IRScope::<span class="ql-token hljs-built_in">IRScope</span>(Compilation* compilation, IRScope* caller, <span class="ql-token hljs-type">int</span> caller_bci, ciMethod* method, <span class="ql-token hljs-type">int</span> osr_bci, <span class="ql-token hljs-type">bool</span> create_graph)
+ </div>
+ <div class="ql-code-block">
+  : _callees(<span class="ql-token hljs-number">2</span>)
+ </div>
+ <div class="ql-code-block">
+  , _compilation(compilation)
+ </div>
+ <div class="ql-code-block">
+  , _requires_phi_function(method-&gt;<span class="ql-token hljs-built_in">max_locals</span>())
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (create_graph &amp;&amp; <span class="ql-token hljs-built_in">monitor_pairing_ok</span>()) _start = <span class="ql-token hljs-built_in">build_graph</span>(compilation, osr_bci); <span class="ql-token hljs-comment">// 构建 HIR 转换图</span>
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">BlockBegin* IRScope::build_graph(Compilation* compilation, int osr_bci) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-function">GraphBuilder gm(compilation, this)</span>; <span class="ql-token hljs-comment">// 创建GraphBuilder对象，在创建时开始转换，构造器执行完毕，那么转换完毕</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (compilation-&gt;<span class="ql-token hljs-built_in">bailed_out</span>()) <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">NULL</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">return</span> gm.<span class="ql-token hljs-built_in">start</span>(); <span class="ql-token hljs-comment">// 获取起始的 HIR 块信息</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// GraphBuilder 构造器</span>
+ </div>
+ <div class="ql-code-block">
+  GraphBuilder::<span class="ql-token hljs-built_in">GraphBuilder</span>(Compilation* compilation, IRScope* scope)...{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">scope_data</span>()-&gt;<span class="ql-token hljs-built_in">add_to_work_list</span>(start_block); <span class="ql-token hljs-comment">// 将起始块放入工作列表</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">iterate_all_blocks</span>(); <span class="ql-token hljs-comment">// 迭代所有图中的块信息，看这里即可，其他别看</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void GraphBuilder::iterate_all_blocks(bool start_in_current_block_for_inlining) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">do</span> {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (start_in_current_block_for_inlining &amp;&amp; !<span class="ql-token hljs-built_in">bailed_out</span>()) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-built_in">iterate_bytecodes_for_block</span>(<span class="ql-token hljs-number">0</span>); <span class="ql-token hljs-comment">// 迭代处理起始块的字节码</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;start_in_current_block_for_inlining = <span class="ql-token hljs-literal">false</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 处理非起始块的字节码</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;BlockBegin* b;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">while</span> ((b = <span class="ql-token hljs-built_in">scope_data</span>()-&gt;<span class="ql-token hljs-built_in">remove_from_work_list</span>()) != <span class="ql-token hljs-literal">NULL</span>) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (!b-&gt;<span class="ql-token hljs-built_in">is_set</span>(BlockBegin::was_visited_flag)) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-built_in">connect_to_end</span>(b); <span class="ql-token hljs-comment">// 处理当前块的字节码</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">while</span> (!<span class="ql-token hljs-built_in">bailed_out</span>() &amp;&amp; !<span class="ql-token hljs-built_in">scope_data</span>()-&gt;<span class="ql-token hljs-built_in">is_work_list_empty</span>());
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 我们看这里即可 bci 为 当前字节码的指针</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void GraphBuilder::connect_to_end(BlockBegin* beg) </span>{
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">iterate_bytecodes_for_block</span>(beg-&gt;<span class="ql-token hljs-built_in">bci</span>());
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">BlockEnd* GraphBuilder::iterate_bytecodes_for_block(int bci) </span>{
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">while</span> (!<span class="ql-token hljs-built_in">bailed_out</span>() &amp;&amp; <span class="ql-token hljs-built_in">last</span>()-&gt;<span class="ql-token hljs-built_in">as_BlockEnd</span>() == <span class="ql-token hljs-literal">NULL</span> &amp;&amp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; (code = <span class="ql-token hljs-built_in">stream</span>()-&gt;<span class="ql-token hljs-built_in">next</span>()) != ciBytecodeStream::<span class="ql-token hljs-built_in">EOBC</span>() &amp;&amp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; (<span class="ql-token hljs-built_in">block_at</span>(s.<span class="ql-token hljs-built_in">cur_bci</span>()) == <span class="ql-token hljs-literal">NULL</span> || <span class="ql-token hljs-built_in">block_at</span>(s.<span class="ql-token hljs-built_in">cur_bci</span>()) == <span class="ql-token hljs-built_in">block</span>())) { <span class="ql-token hljs-comment">// 循环处理所有字节码</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">switch</span> (code) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">// 这里省略其他字节码，我们调用的 unsafe.putOrderedInt 将通过以下字节码调用</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">case</span> Bytecodes::_invokevirtual : <span class="ql-token hljs-comment">// fall through</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">case</span> Bytecodes::_invokespecial : <span class="ql-token hljs-comment">// fall through</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">case</span> Bytecodes::_invokestatic &nbsp; : <span class="ql-token hljs-comment">// fall through</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">case</span> Bytecodes::_invokedynamic : <span class="ql-token hljs-comment">// fall through</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">case</span> Bytecodes::_invokeinterface: <span class="ql-token hljs-built_in">invoke</span>(code); <span class="ql-token hljs-keyword">break</span>; &nbsp;<span class="ql-token hljs-comment">// 此时调用invode方法处理该字节码</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void GraphBuilder::invoke(Bytecodes::Code code) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (!PatchALot &amp;&amp; Inline &amp;&amp; klass-&gt;<span class="ql-token hljs-built_in">is_loaded</span>() &amp;&amp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; (klass-&gt;<span class="ql-token hljs-built_in">is_initialized</span>() || klass-&gt;<span class="ql-token hljs-built_in">is_interface</span>() &amp;&amp; target-&gt;<span class="ql-token hljs-built_in">holder</span>()-&gt;<span class="ql-token hljs-built_in">is_initialized</span>())
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;&amp;&amp; target-&gt;<span class="ql-token hljs-built_in">is_loaded</span>()
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;&amp;&amp; !patch_for_appendix) { <span class="ql-token hljs-comment">// 对调用方法尝试进行内联</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (code == Bytecodes::_invokestatic &nbsp;||
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;code == Bytecodes::_invokespecial ||
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;code == Bytecodes::_invokevirtual &amp;&amp; target-&gt;<span class="ql-token hljs-built_in">is_final_method</span>() ||
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;code == Bytecodes::_invokedynamic) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;ciMethod* inline_target = (cha_monomorphic_target != <span class="ql-token hljs-literal">NULL</span>) ? cha_monomorphic_target : target;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-type">bool</span> success = <span class="ql-token hljs-built_in">try_inline</span>(inline_target, (cha_monomorphic_target != <span class="ql-token hljs-literal">NULL</span>) || (exact_target != <span class="ql-token hljs-literal">NULL</span>), code, better_receiver); <span class="ql-token hljs-comment">// 开始内联</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">print_inlining</span>(target, <span class="ql-token hljs-string">"not inlineable"</span>, <span class="ql-token hljs-comment">/*success*/</span> <span class="ql-token hljs-literal">false</span>);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">bool GraphBuilder::try_inline(ciMethod* callee, bool holder_known, Bytecodes::Code bc, Value receiver) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-keyword">if</span> (callee-&gt;<span class="ql-token hljs-built_in">intrinsic_id</span>() != vmIntrinsics::_none) { <span class="ql-token hljs-comment">// 执行内联</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (<span class="ql-token hljs-built_in">try_inline_intrinsics</span>(callee)) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-built_in">print_inlining</span>(callee, <span class="ql-token hljs-string">"intrinsic"</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-literal">true</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 这里等等，方法居然有个 intrinsic_id ？怎么来的？详情看混沌专题的描述</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">bool GraphBuilder::try_inline_intrinsics(ciMethod* callee) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;vmIntrinsics::ID id = callee-&gt;<span class="ql-token hljs-built_in">intrinsic_id</span>();
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">switch</span> (id) {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">// 这里我们看 putOrderedInt 即可</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-keyword">case</span> vmIntrinsics::_putOrderedInt &nbsp; : <span class="ql-token hljs-keyword">return</span> <span class="ql-token hljs-built_in">append_unsafe_put_obj</span>(callee, T_INT, <span class="ql-token hljs-literal">true</span>); &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 内联 putOrderedInt </span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">bool GraphBuilder::append_unsafe_put_obj(ciMethod* callee, BasicType t, bool is_volatile) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (InlineUnsafeOps) { <span class="ql-token hljs-comment">// 该标识符默认为 true</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;Values* args = <span class="ql-token hljs-built_in">state</span>()-&gt;<span class="ql-token hljs-built_in">pop_arguments</span>(callee-&gt;<span class="ql-token hljs-built_in">arg_size</span>());
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">null_check</span>(args-&gt;<span class="ql-token hljs-built_in">at</span>(<span class="ql-token hljs-number">0</span>));
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;Instruction* offset = args-&gt;<span class="ql-token hljs-built_in">at</span>(<span class="ql-token hljs-number">2</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;Instruction* op = <span class="ql-token hljs-built_in">append</span>(<span class="ql-token hljs-keyword">new</span> <span class="ql-token hljs-built_in">UnsafePutObject</span>(t, args-&gt;<span class="ql-token hljs-built_in">at</span>(<span class="ql-token hljs-number">1</span>), offset, args-&gt;<span class="ql-token hljs-built_in">at</span>(<span class="ql-token hljs-number">3</span>), is_volatile)); <span class="ql-token hljs-comment">// 向生成图中添加了一个 UnsafePutObject 对象</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">compilation</span>()-&gt;<span class="ql-token hljs-built_in">set_has_unsafe_access</span>(<span class="ql-token hljs-literal">true</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">kill_all</span>();
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">return</span> InlineUnsafeOps;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 最后我们来看看该对象的定义</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-built_in">LEAF</span>(UnsafePutObject, UnsafeObjectOp) <span class="ql-token hljs-comment">// 使用宏定义，来完成类定义（UnsafePutObject为子类，也即当前类的定义，UnsafeObjectOp为父类，也即 UnsafePutObject的父类）</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">private</span>:
+ </div>
+ <div class="ql-code-block">
+  &nbsp;Value _value; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-comment">// 要被存储的值</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-keyword">public</span>:
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">UnsafePutObject</span>(BasicType basic_type, Value object, Value offset, Value value, <span class="ql-token hljs-type">bool</span> is_volatile)
+ </div>
+ <div class="ql-code-block">
+  : <span class="ql-token hljs-built_in">UnsafeObjectOp</span>(basic_type, object, offset, <span class="ql-token hljs-literal">true</span>, is_volatile)
+ </div>
+ <div class="ql-code-block">
+  &nbsp; , _value(value)
+ </div>
+ <div class="ql-code-block">
+  {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;ASSERT_VALUES
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-comment">// accessors</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-function">Value value() &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; </span>{ <span class="ql-token hljs-keyword">return</span> _value; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-comment">// generic</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-function">virtual void input_values_do(ValueVisitor* f) &nbsp; </span>{ UnsafeObjectOp::<span class="ql-token hljs-built_in">input_values_do</span>(f); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; f-&gt;<span class="ql-token hljs-built_in">visit</span>(&amp;_value); }
+ </div>
+ <div class="ql-code-block">
+  };
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 看如下宏定义</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-meta">#define LEAF(class_name, super_class_name) &nbsp; &nbsp; &nbsp; </span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">BASE</span>(class_name, super_class_name) &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; <span class="ql-token hljs-keyword">public</span>: &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-function">virtual const char* name() const &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; </span>{ <span class="ql-token hljs-keyword">return</span> #class_name; } &nbsp; &nbsp; &nbsp;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-function">virtual void visit(InstructionVisitor* v) &nbsp; </span>{ v-&gt;do_##<span class="ql-token hljs-built_in">class_name</span>(<span class="ql-token hljs-keyword">this</span>); } &nbsp;<span class="ql-token hljs-comment">// 注意该虚函数的实现：当后面我们调用该方法时，将会直接调用传入的 InstructionVisitor的 do_UnsafePutObject 方法回调！！！！</span>
+ </div>
+</div>
+<p><br></p>
+<h3><strong style="color: rgb(38, 38, 38);">emit_lir</strong></h3>
+<p><br></p>
+<p>可以看到生成 LIR 时，将会根据 UnsafePutObject 对象的属性设置，在调用前后加上 membar_release 与 membar 屏障。代码如下。</p>
+<div class="ql-code-block-container">
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void Compilation::emit_lir() </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-comment">// 根据 HIR 生成 LIR 表示</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-function">LIRGenerator gen(this, method())</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-built_in">hir</span>()-&gt;<span class="ql-token hljs-built_in">iterate_linear_scan_order</span>(&amp;gen);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// LIR 生成器构造函数</span>
+ </div>
+ <div class="ql-code-block">
+  LIRGenerator::<span class="ql-token hljs-built_in">LIRGenerator</span>(Compilation* compilation, ciMethod* method)...{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">init</span>();
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void IR::iterate_linear_scan_order(BlockClosure* closure) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">linear_scan_order</span>()-&gt;<span class="ql-token hljs-built_in">iterate_forward</span>(closure);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 获取 HIR 的块信息 并迭代其中的块，调用 BlockClosure 也即 LIRGenerator 的 block_do 函数</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">BlockList* linear_scan_order() </span>{ &nbsp;<span class="ql-token hljs-built_in">assert</span>(_code != <span class="ql-token hljs-literal">NULL</span>, <span class="ql-token hljs-string">"not computed"</span>); <span class="ql-token hljs-keyword">return</span> _code; }
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void BlockList::iterate_forward (BlockClosure* closure) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-type">const</span> <span class="ql-token hljs-type">int</span> l = <span class="ql-token hljs-built_in">length</span>();
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">for</span> (<span class="ql-token hljs-type">int</span> i = <span class="ql-token hljs-number">0</span>; i &lt; l; i++) closure-&gt;<span class="ql-token hljs-built_in">block_do</span>(<span class="ql-token hljs-built_in">at</span>(i));
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void LIRGenerator::block_do(BlockBegin* block) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">block_do_prolog</span>(block); <span class="ql-token hljs-comment">// 创建 LIR_List 列表保存生成的 LIR</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">set_block</span>(block);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">for</span> (Instruction* instr = block; instr != <span class="ql-token hljs-literal">NULL</span>; instr = instr-&gt;<span class="ql-token hljs-built_in">next</span>()) { <span class="ql-token hljs-comment">// 迭代处理所有 HIR 块</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (instr-&gt;<span class="ql-token hljs-built_in">is_pinned</span>()) <span class="ql-token hljs-built_in">do_root</span>(instr);
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">set_block</span>(<span class="ql-token hljs-literal">NULL</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">block_do_epilog</span>(block); <span class="ql-token hljs-comment">// 处理完成后清理使用的资源</span>
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 处理块中的当前指令</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void LIRGenerator::do_root(Value instr) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;instr-&gt;<span class="ql-token hljs-built_in">visit</span>(<span class="ql-token hljs-keyword">this</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; ...
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 于是乎，在前面我们看到当前指令为 UnsafePutObject 时，将会回调该 LIRGenerator 的 do_UnsafePutObject方法</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void LIRGenerator::do_UnsafePutObject(UnsafePutObject* x) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;BasicType type = x-&gt;<span class="ql-token hljs-built_in">basic_type</span>();
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (type == T_BOOLEAN || type == T_BYTE) { <span class="ql-token hljs-comment">// boolean 和 byte</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;data.<span class="ql-token hljs-built_in">load_byte_item</span>();
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> {
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;data.<span class="ql-token hljs-built_in">load_item</span>();
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ...
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-comment">// 若当前设置的 x 变量为 volatile 且当前为多处理器架构，那么设置 storestore 屏障，并且在赋值后再执行 全屏障</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (x-&gt;<span class="ql-token hljs-built_in">is_volatile</span>() &amp;&amp; os::<span class="ql-token hljs-built_in">is_MP</span>()) <span class="ql-token hljs-function">__ membar_release()</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-built_in">put_Object_unsafe</span>(src.<span class="ql-token hljs-built_in">result</span>(), off.<span class="ql-token hljs-built_in">result</span>(), data.<span class="ql-token hljs-built_in">result</span>(), type, x-&gt;<span class="ql-token hljs-built_in">is_volatile</span>());
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (x-&gt;<span class="ql-token hljs-built_in">is_volatile</span>() &amp;&amp; os::<span class="ql-token hljs-built_in">is_MP</span>()) <span class="ql-token hljs-function">__ membar()</span>;
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  ​
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-comment">// 我们来看 X86 下放置对象的实现：直接赋值</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function">void LIRGenerator::put_Object_unsafe(LIR_Opr src, LIR_Opr offset, LIR_Opr data,</span>
+ </div>
+ <div class="ql-code-block">
+  <span class="ql-token hljs-function"> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; BasicType type, bool is_volatile) </span>{
+ </div>
+ <div class="ql-code-block">
+  &nbsp;<span class="ql-token hljs-keyword">if</span> (is_volatile &amp;&amp; type == T_LONG) { <span class="ql-token hljs-comment">// long 类型</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;LIR_Address* addr = <span class="ql-token hljs-keyword">new</span> <span class="ql-token hljs-built_in">LIR_Address</span>(src, offset, T_DOUBLE);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;LIR_Opr tmp = <span class="ql-token hljs-built_in">new_register</span>(T_DOUBLE);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;LIR_Opr spill = <span class="ql-token hljs-built_in">new_register</span>(T_DOUBLE);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-built_in">set_vreg_flag</span>(spill, must_start_in_memory);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-function">__ move(data, spill)</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-function">__ move(spill, tmp)</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-function">__ move(tmp, addr)</span>;
+ </div>
+ <div class="ql-code-block">
+  } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 其他类型</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;LIR_Address* addr = <span class="ql-token hljs-keyword">new</span> <span class="ql-token hljs-built_in">LIR_Address</span>(src, offset, type);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-type">bool</span> is_obj = (type == T_ARRAY || type == T_OBJECT);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp;<span class="ql-token hljs-keyword">if</span> (is_obj) { <span class="ql-token hljs-comment">// 对象类型，那么需要依赖读写屏障（注意：这里的barrier 不是 内存屏障，是一个回调函数，这里暂时忽略吧，后面说 GC 时会讲解）</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-built_in">pre_barrier</span>(LIR_OprFact::<span class="ql-token hljs-built_in">address</span>(addr), LIR_OprFact::illegalOpr <span class="ql-token hljs-comment">/* pre_val */</span>,
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-literal">true</span> <span class="ql-token hljs-comment">/* do_load */</span>, <span class="ql-token hljs-literal">false</span> <span class="ql-token hljs-comment">/* patch */</span>, <span class="ql-token hljs-literal">NULL</span>);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-function">__ move(data, addr)</span>;
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;<span class="ql-token hljs-built_in">post_barrier</span>(LIR_OprFact::<span class="ql-token hljs-built_in">address</span>(addr), data);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; } <span class="ql-token hljs-keyword">else</span> { <span class="ql-token hljs-comment">// 否则，直接赋值</span>
+ </div>
+ <div class="ql-code-block">
+  &nbsp; &nbsp; &nbsp;__ <span class="ql-token hljs-built_in">move</span>(data, addr);
+ </div>
+ <div class="ql-code-block">
+  &nbsp; }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+ <div class="ql-code-block">
+  }
+ </div>
+</div>
+<p><br></p>
+<h2><strong style="color: rgb(38, 38, 38);">总结</strong></h2>
+<p><br></p>
+<p>在JDK 1.8 中对于 putOrderedXXX 的语义采用的是一刀切的策略，都会加上同 volatile 变量写操作的 storestore 和 storeload 屏障，读者可以自行打开 jdk 1.9 + 的源码，Unsafe 的 putOrderedXXX 语义使用 putXXXRelease 操作，在 x86 上优化为空操作。</p>
+<p><br></p></p>
+</body>
+</html>
