@@ -58,7 +58,7 @@ public class Main {
     static void start() throws Exception {
         //    请先登录你有权限查看的星球的账号，进入该星球页面
         //    请使用谷歌浏览器刷新页面，在 Network 面板的抓包内容中找到 topics?... 这样的请求，返回的是 json 内容
-        //    将这个包的 cookie 部分复制到 headers 部分的 Cookie 一栏
+        //    将这个请求的 cookie 部分复制到 getHeaders() 部分的 Cookie 一栏
         //    将这个请求的 url，域名为 api.zsxq.com 开头的，复制到下面 start_url 的部分
         final String startUrl = "https://api.zsxq.com/v2/groups/51122814854444/topics?scope=all&count=20";
         String end_time = "2022-07-12T09:48:52.313+0800";
